@@ -1,0 +1,17 @@
+# Build output — everything the Makefile produces lives here.
+build/
+
+# Stray artifacts if something is ever built in-tree by hand.
+*.o
+*.d
+*.a
+*.exe
+*.out
+
+# Editor / tooling
+.cache/
+compile_commands.json
+.vscode/
+.idea/
+
+TODO.md
