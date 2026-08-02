@@ -2,6 +2,7 @@
 #include <cstring>
 #include <cstddef>
 #include <stdexcept>
+#include <utility>
 #include "checksum.hpp"
 #include <sctp/platform.hpp>   // htons/htonl/ntohs/ntohl
 
@@ -121,7 +122,11 @@ SCTP_Packet deserialize_sctp_packet(const uint8_t* data, size_t len) {
     return out;
 }
 
-void deserialize_chunk_value(Chunk_Type type, const uint8_t* data, size_t len, std::variant<init_chunk_value, cookie_echo_chunk_value, cookie_ack_chunk_value, data_chunk_value>& out) {
+void deserialize_chunk_value(
+        Chunk_Type type, const uint8_t* data, size_t len,
+        std::variant<init_chunk_value, cookie_echo_chunk_value,
+                     cookie_ack_chunk_value, data_chunk_value,
+                     sack_chunk_value>& out) {
     switch (type) {
         case INIT:
         case INIT_ACK: {
@@ -145,6 +150,12 @@ void deserialize_chunk_value(Chunk_Type type, const uint8_t* data, size_t len, s
         case DATA: {
             data_chunk_value v;
             deserialize_data_chunk(data, len, v);
+            out = std::move(v);
+            break;
+        }
+        case SACK: {
+            sack_chunk_value v;
+            deserialize_sack_chunk(data, len, v);
             out = std::move(v);
             break;
         }
@@ -188,6 +199,51 @@ void deserialize_data_chunk(const uint8_t* data, size_t len, data_chunk_value& o
     out.user_data.assign(data + 12, data + len);
 }
 
+void deserialize_sack_chunk(
+        const uint8_t* data, size_t len, sack_chunk_value& out) {
+    if (len < 12)
+        throw std::runtime_error("SACK chunk too short");
+
+    uint16_t gap_count = read16(data + 8);
+    uint16_t duplicate_count = read16(data + 10);
+    size_t required = 12
+        + static_cast<size_t>(gap_count) * 4
+        + static_cast<size_t>(duplicate_count) * 4;
+    if (required != len)
+        throw std::runtime_error("SACK chunk has inconsistent counts");
+
+    std::vector<sack_gap_ack_block> gap_ack_blocks;
+    gap_ack_blocks.reserve(gap_count);
+    size_t offset = 12;
+    uint16_t previous_end = 0;
+    for (uint16_t i = 0; i < gap_count; ++i) {
+        uint16_t start = read16(data + offset);
+        uint16_t end = read16(data + offset + 2);
+        if (start == 0 || end < start
+                || (i > 0 && start <= previous_end))
+            throw std::runtime_error("SACK chunk has invalid gap ack block");
+        gap_ack_blocks.push_back({start, end});
+        previous_end = end;
+        offset += 4;
+    }
+
+    std::vector<uint32_t> duplicate_tsns;
+    duplicate_tsns.reserve(duplicate_count);
+    for (uint16_t i = 0; i < duplicate_count; ++i) {
+        duplicate_tsns.push_back(read32(data + offset));
+        offset += 4;
+    }
+
+    out = sack_chunk_value{
+        .cumulative_tsn_ack = read32(data + 0),
+        .a_rwnd = read32(data + 4),
+        .number_of_gap_ack_blocks = gap_count,
+        .number_of_duplicate_tsns = duplicate_count,
+        .gap_ack_blocks = std::move(gap_ack_blocks),
+        .duplicate_tsns = std::move(duplicate_tsns),
+    };
+}
+
 std::vector<uint8_t> serialize_sctp_packet(const SCTP_Packet& pkt) {
     std::vector<uint8_t> out;
     out.reserve(SCTP_COMMON_HEADER_SIZE + 64);
@@ -227,6 +283,9 @@ void serialize_chunk(const SCTP_Chunk& chunk, std::vector<uint8_t>& out) {
             break;
         case DATA:
             serialize_data_chunk(std::get<data_chunk_value>(chunk.chunk_value), out);
+            break;
+        case SACK:
+            serialize_sack_chunk(std::get<sack_chunk_value>(chunk.chunk_value), out);
             break;
         default:
             throw std::runtime_error("unsupported chunk type");
@@ -276,4 +335,30 @@ void serialize_data_chunk(const data_chunk_value& v,std::vector<uint8_t>& out) {
     out.insert(out.end(),
                v.user_data.begin(),
                v.user_data.end());
+}
+
+void serialize_sack_chunk(
+        const sack_chunk_value& v, std::vector<uint8_t>& out) {
+    if (v.gap_ack_blocks.size() > UINT16_MAX
+            || v.duplicate_tsns.size() > UINT16_MAX) {
+        throw std::runtime_error("too many SACK entries");
+    }
+    if (v.number_of_gap_ack_blocks != v.gap_ack_blocks.size()
+            || v.number_of_duplicate_tsns != v.duplicate_tsns.size()) {
+        throw std::runtime_error("SACK counts do not match entry lists");
+    }
+
+    append32(out, v.cumulative_tsn_ack);
+    append32(out, v.a_rwnd);
+    append16(out, v.number_of_gap_ack_blocks);
+    append16(out, v.number_of_duplicate_tsns);
+    for (const auto& block : v.gap_ack_blocks) {
+        if (block.start == 0 || block.end < block.start)
+            throw std::runtime_error("invalid SACK gap ack block");
+        append16(out, block.start);
+        append16(out, block.end);
+    }
+    for (uint32_t tsn : v.duplicate_tsns) {
+        append32(out, tsn);
+    }
 }

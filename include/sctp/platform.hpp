@@ -17,20 +17,29 @@
   #include <arpa/inet.h>
   #include <unistd.h>
   #include <fcntl.h>
+  #include <poll.h>
   #include <cerrno>
   #include <cstring>
 #endif
 
+#include <cstddef>
 #include <string>
 #include <string_view>
 
 #ifdef _WIN32
 using sctp_socket_t = SOCKET;
+using sctp_pollfd = WSAPOLLFD;
+constexpr short SCTP_POLL_READ = POLLRDNORM;
 #else
 using sctp_socket_t = int;
+using sctp_pollfd = pollfd;
 constexpr sctp_socket_t INVALID_SOCKET = -1;
 constexpr int SOCKET_ERROR = -1;
+constexpr short SCTP_POLL_READ = POLLIN;
 #endif
+
+constexpr short SCTP_POLL_ERROR = POLLERR;
+constexpr short SCTP_POLL_FATAL = POLLHUP | POLLNVAL;
 
 // Winsock needs per-process init; POSIX does not. Winsock refcounts these
 // internally, so paired calls from multiple sockets are safe.
@@ -65,6 +74,14 @@ inline int sctp_last_error() {
 #endif
 }
 
+inline void sctp_set_last_error(int err) {
+#ifdef _WIN32
+    WSASetLastError(err);
+#else
+    errno = err;
+#endif
+}
+
 inline std::string sctp_error_string(int err) {
 #ifdef _WIN32
     return std::to_string(err);
@@ -75,6 +92,33 @@ inline std::string sctp_error_string(int err) {
 
 inline std::string sctp_error_string() {
     return sctp_error_string(sctp_last_error());
+}
+
+inline bool sctp_error_would_block(int err) {
+#ifdef _WIN32
+    return err == WSAEWOULDBLOCK;
+#else
+    return err == EAGAIN || err == EWOULDBLOCK;
+#endif
+}
+
+inline bool sctp_error_interrupted(int err) {
+#ifdef _WIN32
+    return err == WSAEINTR;
+#else
+    return err == EINTR;
+#endif
+}
+
+inline int sctp_poll(
+        sctp_pollfd* descriptors, size_t count, int timeout_ms) {
+#ifdef _WIN32
+    return WSAPoll(
+        descriptors, static_cast<ULONG>(count), timeout_ms);
+#else
+    return ::poll(
+        descriptors, static_cast<nfds_t>(count), timeout_ms);
+#endif
 }
 
 // Puts the socket in non-blocking mode so recvfrom() returns immediately when

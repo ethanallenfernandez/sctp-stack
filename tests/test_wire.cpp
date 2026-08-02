@@ -11,6 +11,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <stdexcept>
 #include <vector>
 #include <string>
 
@@ -95,7 +96,7 @@ static void test_checksum_field_is_little_endian() {
 
     // Recompute independently: zero the field, CRC the whole packet.
     std::vector<uint8_t> zeroed = w;
-    std::memset(zeroed.data() + SCTP_CHECKSUM_OFFSET, 0, 4);
+    sctp_clear_wire_checksum(zeroed.data());
     uint32_t expect = calculate_sctp_checksum(zeroed.data(), zeroed.size());
 
     uint32_t on_wire_le = static_cast<uint32_t>(w[8])
@@ -180,6 +181,110 @@ static void test_roundtrip() {
           "payload round-trip (padding stripped)");
 }
 
+static void test_sack_wire_layout() {
+    std::printf("SACK wire layout (RFC 9260 3.3.4):\n");
+
+    SCTP_Packet packet;
+    packet.header.src_port = 1;
+    packet.header.des_port = 2;
+    packet.header.verification_tag = 3;
+    packet.chunks.push_back(SCTP_Chunk{
+        .chunk_header = { .type = SACK, .flag = 0, .length = 0 },
+        .chunk_value = sack_chunk_value{
+            .cumulative_tsn_ack = 0x11223344,
+            .a_rwnd = 0x55667788,
+            .number_of_gap_ack_blocks = 2,
+            .number_of_duplicate_tsns = 1,
+            .gap_ack_blocks = {{1, 2}, {5, 7}},
+            .duplicate_tsns = {0xAABBCCDD},
+        },
+    });
+
+    std::vector<uint8_t> wire = serialize_sctp_packet(packet);
+    const uint8_t expected_chunk[] = {
+        0x03, 0x00, 0x00, 0x1C,
+        0x11, 0x22, 0x33, 0x44,
+        0x55, 0x66, 0x77, 0x88,
+        0x00, 0x02, 0x00, 0x01,
+        0x00, 0x01, 0x00, 0x02,
+        0x00, 0x05, 0x00, 0x07,
+        0xAA, 0xBB, 0xCC, 0xDD,
+    };
+    check(wire.size() == 40, "SACK packet has expected length");
+    check(std::memcmp(
+              wire.data() + SCTP_COMMON_HEADER_SIZE,
+              expected_chunk, sizeof(expected_chunk)) == 0,
+          "SACK fields use the RFC-defined order and byte order");
+
+    SCTP_Packet decoded =
+        deserialize_sctp_packet(wire.data(), wire.size());
+    const auto& sack =
+        std::get<sack_chunk_value>(decoded.chunks[0].chunk_value);
+    check_eq_u32(
+        sack.cumulative_tsn_ack, 0x11223344,
+        "Cumulative TSN Ack decoded");
+    check(sack.number_of_gap_ack_blocks == 2,
+          "Number of Gap Ack Blocks decoded");
+    check(sack.number_of_duplicate_tsns == 1,
+          "Number of Duplicate TSNs decoded");
+    check(sack.gap_ack_blocks.size() == 2,
+          "Gap Ack Blocks decoded");
+    check(sack.duplicate_tsns.size() == 1
+              && sack.duplicate_tsns[0] == 0xAABBCCDD,
+          "Duplicate TSN list decoded");
+}
+
+static void test_sack_deserialization_replaces_existing_value() {
+    std::printf("SACK deserialization replaces existing value:\n");
+
+    const uint8_t empty_sack_body[] = {
+        0x11, 0x22, 0x33, 0x44,
+        0x55, 0x66, 0x77, 0x88,
+        0x00, 0x00, 0x00, 0x00,
+    };
+    sack_chunk_value sack{
+        .cumulative_tsn_ack = 1,
+        .a_rwnd = 2,
+        .number_of_gap_ack_blocks = 1,
+        .number_of_duplicate_tsns = 1,
+        .gap_ack_blocks = {{1, 1}},
+        .duplicate_tsns = {3},
+    };
+
+    deserialize_sack_chunk(empty_sack_body, sizeof(empty_sack_body), sack);
+
+    check(sack.number_of_gap_ack_blocks == 0,
+          "Number of Gap Ack Blocks is replaced");
+    check(sack.number_of_duplicate_tsns == 0,
+          "Number of Duplicate TSNs is replaced");
+    check(sack.gap_ack_blocks.empty(),
+          "existing Gap Ack Blocks are cleared");
+    check(sack.duplicate_tsns.empty(),
+          "existing Duplicate TSNs are cleared");
+}
+
+static void test_sack_count_mismatch_is_rejected() {
+    std::printf("SACK count/list consistency:\n");
+
+    sack_chunk_value sack{
+        .cumulative_tsn_ack = 1,
+        .a_rwnd = 2,
+        .number_of_gap_ack_blocks = 0,
+        .number_of_duplicate_tsns = 0,
+        .gap_ack_blocks = {{1, 1}},
+        .duplicate_tsns = {},
+    };
+    std::vector<uint8_t> body;
+    bool threw = false;
+    try {
+        serialize_sack_chunk(sack, body);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+
+    check(threw, "mismatched RFC count fields are rejected");
+}
+
 static void test_malformed_input_is_rejected() {
     std::printf("Malformed input handling:\n");
 
@@ -207,6 +312,9 @@ int main() {
     test_common_header_is_big_endian();
     test_checksum_field_is_little_endian();
     test_roundtrip();
+    test_sack_wire_layout();
+    test_sack_deserialization_replaces_existing_value();
+    test_sack_count_mismatch_is_rejected();
     test_malformed_input_is_rejected();
 
     std::printf("\n%s (%d failure%s)\n",

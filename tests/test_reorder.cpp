@@ -38,8 +38,8 @@ static void test_tsn_lt() {
         {0, 0xFFFFFFFF, false, "0xFFFFFFFF does not follow 0"},
         {0xFFFFFFF0, 5, true,  "wrap: 5 is 21 ahead of 0xFFFFFFF0"},
         {5, 0xFFFFFFF0, false, "reverse of the above"},
-        {0, 0x7FFFFFFF, true,  "exactly half the space ahead"},
-        {0, 0x80000000, false, "past half the space is ambiguous, must be false"},
+        {0, 0x7FFFFFFF, true,  "largest unambiguous distance ahead"},
+        {0, 0x80000000, false, "exactly half the space is ambiguous"},
     };
     for (auto& c : cases) {
         check(tsn_lt(c.a, c.b) == c.want, c.why);

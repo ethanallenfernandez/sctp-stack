@@ -13,5 +13,8 @@ build/
 compile_commands.json
 .vscode/
 .idea/
+.claude/
+.codex/
 
 TODO.md
+AGENTS.md
