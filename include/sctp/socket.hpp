@@ -5,6 +5,7 @@
 #include <sctp/wakeup_pair.hpp>
 #include <sctp/deliverable.hpp>
 #include <sctp/expiration_queue.hpp>
+#include <sctp/send_queue.hpp>
 #include <string_view>
 #include <string>
 #include <vector>
@@ -17,12 +18,6 @@
 #include <sctp/association.hpp>
 #include <chrono>
 #include <cstdint>
-
-enum class Send_Priority {
-    CONTROL,
-    RETRANSMISSION,
-    NEW_DATA,
-};
 
 class SCTP_Socket {
     friend struct SCTP_Socket_Test_Access;
@@ -53,11 +48,7 @@ class SCTP_Socket {
         Wakeup_Pair wakeup;
         std::unordered_map<Association_Key, Association, Association_Hash> associations;
         std::mutex associations_mutex;
-        std::queue<Deliverable> control_queue;
-        std::queue<Deliverable> retransmission_queue;
-        std::queue<Deliverable> new_data_queue;
-        std::chrono::steady_clock::time_point next_send_attempt{};
-        std::mutex sending_queue_mutex;
+        Send_Queue sends;
         Expiration_Queue expirations;
         std::thread event_loop_thread;
 
@@ -72,9 +63,6 @@ class SCTP_Socket {
             Send_Priority priority = Send_Priority::CONTROL);
         void wake_event_loop();
         int next_poll_timeout();
-        void purge_queued_packets(const Association_Key& location);
-        void remove_retransmissions(const Association_Key& location, const sack_chunk_value& sack);
-        void remove_retransmissions(const Association_Key& location, Chunk_Type type);
         bool handle_send_packet(const Deliverable& deliverable);
         void schedule_expirations_after_send(
             const Deliverable& deliverable,

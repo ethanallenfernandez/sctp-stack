@@ -46,23 +46,6 @@ bool has_unacknowledged_data(const Association& assoc) {
     );
 }
 
-bool sack_acknowledges(const sack_chunk_value& sack, uint32_t tsn) {
-    if (tsn_lte(tsn, sack.cumulative_tsn_ack)) {
-        return true;
-    }
-    uint32_t offset = tsn - sack.cumulative_tsn_ack;
-    if (offset > UINT16_MAX) {
-        return false;
-    }
-    return std::any_of(
-        sack.gap_ack_blocks.begin(),
-        sack.gap_ack_blocks.end(),
-        [offset](const sack_gap_ack_block& block) {
-            return offset >= block.start && offset <= block.end;
-        }
-    );
-}
-
 } // namespace
 
 SCTP_Socket::SCTP_Socket() : udp_socket(INVALID_SOCKET) {
@@ -143,13 +126,7 @@ void SCTP_Socket::sctp_close() {
         event_loop_thread.join();
     }
     expirations.clear();
-    {
-        std::lock_guard<std::mutex> sending_lock(sending_queue_mutex);
-        control_queue = {};
-        retransmission_queue = {};
-        new_data_queue = {};
-        next_send_attempt = {};
-    }
+    sends.clear();
     wakeup.close();
     if (udp_socket != INVALID_SOCKET) {
         sctp_close_socket(udp_socket);
@@ -252,7 +229,7 @@ void SCTP_Socket::remove_association(const Association_Key& key) {
         associations.erase(key);
     }
     cancel_expirations(key);
-    purge_queued_packets(key);
+    sends.purge(key);
 }
 
 int SCTP_Socket::await_established_association(const Association_Key& association_id, int timeout_ms) {
@@ -428,46 +405,23 @@ void SCTP_Socket::run_expire() {
 }
 
 void SCTP_Socket::run_sending() {
-    Deliverable deliverable;
-    Send_Priority priority = Send_Priority::CONTROL;
-    {
-        std::lock_guard<std::mutex> sending_lock(sending_queue_mutex);
-        if (std::chrono::steady_clock::now() < next_send_attempt) {
-            return;
-        }
-        if (!control_queue.empty()) {
-            deliverable = control_queue.front();
-        } else if (!retransmission_queue.empty()) {
-            priority = Send_Priority::RETRANSMISSION;
-            deliverable = retransmission_queue.front();
-        } else if (!new_data_queue.empty()) {
-            priority = Send_Priority::NEW_DATA;
-            deliverable = new_data_queue.front();
-        } else {
-            return;
-        }
-    }
-
-    if (!handle_send_packet(deliverable)) {
-        std::lock_guard<std::mutex> sending_lock(sending_queue_mutex);
-        next_send_attempt = std::chrono::steady_clock::now() + SEND_RETRY_DELAY;
+    // Peek, send with the queue lock released, then commit. handle_send_packet
+    // must not run under the send queue's lock.
+    std::optional<Send_Queue::Pending> pending =
+        sends.peek(std::chrono::steady_clock::now());
+    if (!pending) {
         return;
     }
 
-    {
-        std::lock_guard<std::mutex> sending_lock(sending_queue_mutex);
-        if (priority == Send_Priority::CONTROL) {
-            control_queue.pop();
-        } else if (priority == Send_Priority::RETRANSMISSION) {
-            retransmission_queue.pop();
-        } else {
-            new_data_queue.pop();
-        }
-        next_send_attempt = {};
+    if (!handle_send_packet(pending->deliverable)) {
+        sends.defer(std::chrono::steady_clock::now() + SEND_RETRY_DELAY);
+        return;
     }
-    schedule_expirations_after_send(deliverable, std::chrono::steady_clock::now());
-    if (priority == Send_Priority::RETRANSMISSION) {
-        schedule_pending_retransmission(deliverable.location);
+
+    sends.commit(pending->priority);
+    schedule_expirations_after_send(pending->deliverable, std::chrono::steady_clock::now());
+    if (pending->priority == Send_Priority::RETRANSMISSION) {
+        schedule_pending_retransmission(pending->deliverable.location);
     }
 }
 
@@ -495,17 +449,10 @@ void SCTP_Socket::run_receiving() {
     }
 }
 
+// Wraps Send_Queue::enqueue only to wake the event loop, which may be blocked
+// in poll() with no deadline at all when the queue was empty.
 void SCTP_Socket::enqueue_packet(Deliverable deliverable, Send_Priority priority) {
-    {
-        std::lock_guard<std::mutex> sending_lock(sending_queue_mutex);
-        if (priority == Send_Priority::CONTROL) {
-            control_queue.push(std::move(deliverable));
-        } else if (priority == Send_Priority::RETRANSMISSION) {
-            retransmission_queue.push(std::move(deliverable));
-        } else {
-            new_data_queue.push(std::move(deliverable));
-        }
-    }
+    sends.enqueue(std::move(deliverable), priority);
     wake_event_loop();
 }
 
@@ -521,16 +468,12 @@ int SCTP_Socket::next_poll_timeout() {
     bool have_deadline = false;
     auto deadline = std::chrono::steady_clock::time_point::max();
 
-    {
-        std::lock_guard<std::mutex> sending_lock(sending_queue_mutex);
-        bool have_queued_packet = !control_queue.empty() || !retransmission_queue.empty() || !new_data_queue.empty();
-        if (have_queued_packet) {
-            if (next_send_attempt <= now) {
-                return 0;
-            }
-            have_deadline = true;
-            deadline = next_send_attempt;
+    if (auto send_attempt = sends.next_deadline()) {
+        if (*send_attempt <= now) {
+            return 0;
         }
+        have_deadline = true;
+        deadline = *send_attempt;
     }
 
     if (auto expiration = expirations.next_deadline()) {
@@ -556,76 +499,6 @@ int SCTP_Socket::next_poll_timeout() {
         return INT_MAX;
     }
     return static_cast<int>(milliseconds.count());
-}
-
-void SCTP_Socket::purge_queued_packets(const Association_Key& location) {
-    std::lock_guard<std::mutex> sending_lock(sending_queue_mutex);
-    auto purge = [&](std::queue<Deliverable>& queue) {
-        std::queue<Deliverable> retained;
-        while (!queue.empty()) {
-            Deliverable packet = std::move(queue.front());
-            queue.pop();
-            if (!(packet.location == location)) {
-                retained.push(std::move(packet));
-            }
-        }
-        queue = std::move(retained);
-    };
-    purge(control_queue);
-    purge(retransmission_queue);
-    purge(new_data_queue);
-}
-
-void SCTP_Socket::remove_retransmissions(const Association_Key& location, const sack_chunk_value& sack) {
-    std::lock_guard<std::mutex> sending_lock(sending_queue_mutex);
-    std::queue<Deliverable> retained;
-    while (!retransmission_queue.empty()) {
-        Deliverable packet = std::move(retransmission_queue.front());
-        retransmission_queue.pop();
-        if (packet.location == location) {
-            auto& chunks = packet.packet.chunks;
-            chunks.erase(
-                std::remove_if(
-                    chunks.begin(),
-                    chunks.end(),
-                    [&](const SCTP_Chunk& chunk) {
-                        return chunk.chunk_header.type == DATA && sack_acknowledges(sack, std::get<data_chunk_value>(chunk.chunk_value).tsn);
-                    }
-                ),
-                chunks.end()
-            );
-        }
-        if (!packet.packet.chunks.empty()) {
-            retained.push(std::move(packet));
-        }
-    }
-    retransmission_queue = std::move(retained);
-}
-
-void SCTP_Socket::remove_retransmissions(const Association_Key& location, Chunk_Type type) {
-    std::lock_guard<std::mutex> sending_lock(sending_queue_mutex);
-    std::queue<Deliverable> retained;
-    while (!retransmission_queue.empty()) {
-        Deliverable packet = std::move(retransmission_queue.front());
-        retransmission_queue.pop();
-        if (packet.location == location) {
-            auto& chunks = packet.packet.chunks;
-            chunks.erase(
-                std::remove_if(
-                    chunks.begin(),
-                    chunks.end(),
-                    [&](const SCTP_Chunk& chunk) {
-                        return chunk.chunk_header.type == type;
-                    }
-                ),
-                chunks.end()
-            );
-        }
-        if (!packet.packet.chunks.empty()) {
-            retained.push(std::move(packet));
-        }
-    }
-    retransmission_queue = std::move(retained);
 }
 
 bool SCTP_Socket::handle_send_packet(const Deliverable& deliverable) {
@@ -734,7 +607,7 @@ void SCTP_Socket::handle_expiration(const Expiration_Fallback& fallback) {
 
     if (exhausted) {
         cancel_expirations(fallback.key.location);
-        purge_queued_packets(fallback.key.location);
+        sends.purge(fallback.key.location);
         std::cout << "Association failed after handshake retransmissions" << std::endl;
     } else if (should_retry) {
         enqueue_packet(fallback.retry, Send_Priority::RETRANSMISSION);
@@ -1003,7 +876,7 @@ void SCTP_Socket::handle_init_ack(const SCTP_Common_Header& header, const SCTP_C
     uint32_t peer_tag = assoc.peer_ver_tag;
     assoc_lock.unlock();
     cancel_expiration(Expiration_Key{assoc_key, Expiration_Timer_Type::T1_INIT});
-    remove_retransmissions(assoc_key, INIT);
+    sends.remove_retransmissions_of_type(assoc_key, INIT);
 
     SCTP_Packet cookie_echo_packet;
 
@@ -1076,7 +949,7 @@ void SCTP_Socket::handle_cookie_ack(const SCTP_Common_Header&, const SCTP_Chunk&
     assoc_lock.unlock();
     cancel_expiration(
         Expiration_Key{assoc_key, Expiration_Timer_Type::T1_COOKIE});
-    remove_retransmissions(assoc_key, COOKIE_ECHO);
+    sends.remove_retransmissions_of_type(assoc_key, COOKIE_ECHO);
 }
 
 void SCTP_Socket::update_rto(Association& assoc, std::chrono::microseconds measurement) {
@@ -1324,7 +1197,7 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
     }
 
     Expiration_Key timer{key, Expiration_Timer_Type::T3_RTX};
-    remove_retransmissions(key, sack);
+    sends.remove_acked_retransmissions(key, sack);
     if (schedule_fast_retransmission) {
         schedule_pending_retransmission(key);
     }

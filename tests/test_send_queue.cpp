@@ -61,18 +61,11 @@ struct SCTP_Socket_Test_Access {
     }
 
     static size_t pending_packets(SCTP_Socket& stack) {
-        std::lock_guard<std::mutex> lock(stack.sending_queue_mutex);
-        return stack.control_queue.size()
-            + stack.retransmission_queue.size()
-            + stack.new_data_queue.size();
+        return stack.sends.size();
     }
 
     static uint32_t pending_data_tsn(SCTP_Socket& stack) {
-        std::lock_guard<std::mutex> lock(stack.sending_queue_mutex);
-        const auto& data = std::get<data_chunk_value>(
-            stack.new_data_queue.front()
-                .packet.chunks.front().chunk_value);
-        return data.tsn;
+        return stack.sends.front_data_tsns(Send_Priority::NEW_DATA).front();
     }
 
     static void enqueue(
@@ -83,25 +76,14 @@ struct SCTP_Socket_Test_Access {
 
     static std::vector<uint32_t> retransmission_tsns(
             SCTP_Socket& stack) {
-        std::lock_guard<std::mutex> lock(stack.sending_queue_mutex);
-        std::vector<uint32_t> result;
-        if (stack.retransmission_queue.empty()) {
-            return result;
-        }
-        for (const auto& chunk :
-             stack.retransmission_queue.front().packet.chunks) {
-            if (chunk.chunk_header.type == DATA) {
-                result.push_back(
-                    std::get<data_chunk_value>(chunk.chunk_value).tsn);
-            }
-        }
-        return result;
+        return stack.sends.front_data_tsns(
+            Send_Priority::RETRANSMISSION);
     }
 
     static void remove_acked_retransmissions(
             SCTP_Socket& stack, const Association_Key& key,
             const sack_chunk_value& sack) {
-        stack.remove_retransmissions(key, sack);
+        stack.sends.remove_acked_retransmissions(key, sack);
     }
 };
 

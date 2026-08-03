@@ -43,19 +43,7 @@ struct SCTP_Socket_Test_Access {
         if (stack.expirations.has_any_for(key)) {
             return false;
         }
-        std::lock_guard<std::mutex> lock(stack.sending_queue_mutex);
-        auto contains = [&](std::queue<Deliverable> queue) {
-            while (!queue.empty()) {
-                if (queue.front().location == key) {
-                    return true;
-                }
-                queue.pop();
-            }
-            return false;
-        };
-        return !contains(stack.control_queue)
-            && !contains(stack.retransmission_queue)
-            && !contains(stack.new_data_queue);
+        return !stack.sends.has_packets_for(key);
     }
 
     static Association association(
@@ -140,9 +128,8 @@ struct SCTP_Socket_Test_Access {
     }
 
     static size_t queued_fast_chunks(SCTP_Socket& stack) {
-        std::lock_guard<std::mutex> lock(stack.sending_queue_mutex);
-        return stack.retransmission_queue.empty()
-            ? 0 : stack.retransmission_queue.front().packet.chunks.size();
+        return stack.sends.front_chunk_count(
+            Send_Priority::RETRANSMISSION);
     }
 
     static size_t pending_fast_chunks(
