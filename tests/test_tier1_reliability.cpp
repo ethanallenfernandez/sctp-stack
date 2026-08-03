@@ -40,13 +40,8 @@ struct SCTP_Socket_Test_Access {
                 return false;
             }
         }
-        {
-            std::lock_guard<std::mutex> lock(stack.expiration_queue_mutex);
-            for (const auto& expiration : stack.active_expirations) {
-                if (expiration.first.location == key) {
-                    return false;
-                }
-            }
+        if (stack.expirations.has_any_for(key)) {
+            return false;
         }
         std::lock_guard<std::mutex> lock(stack.sending_queue_mutex);
         auto contains = [&](std::queue<Deliverable> queue) {
@@ -162,10 +157,8 @@ struct SCTP_Socket_Test_Access {
 
     static uint64_t t3_generation(
             SCTP_Socket& stack, const Association_Key& key) {
-        std::lock_guard<std::mutex> lock(stack.expiration_queue_mutex);
-        auto timer = stack.active_expirations.find(
+        return stack.expirations.generation_of(
             Expiration_Key{key, Expiration_Timer_Type::T3_RTX});
-        return timer == stack.active_expirations.end() ? 0 : timer->second;
     }
 };
 

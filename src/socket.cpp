@@ -142,13 +142,7 @@ void SCTP_Socket::sctp_close() {
         wake_event_loop();
         event_loop_thread.join();
     }
-    {
-        std::lock_guard<std::mutex> expiration_lock(expiration_queue_mutex);
-        while (!expiration_queue.empty()) {
-            expiration_queue.pop();
-        }
-        active_expirations.clear();
-    }
+    expirations.clear();
     {
         std::lock_guard<std::mutex> sending_lock(sending_queue_mutex);
         control_queue = {};
@@ -419,22 +413,8 @@ void SCTP_Socket::event_loop() {
 }
 
 void SCTP_Socket::run_expire() {
-    std::vector<Expiration_Fallback> expired;
-    {
-        std::lock_guard<std::mutex> expiration_lock(expiration_queue_mutex);
-        auto now = std::chrono::steady_clock::now();
-        while (!expiration_queue.empty() && expiration_queue.top().expiration <= now) {
-            Expiration_Fallback fallback = expiration_queue.top();
-            expiration_queue.pop();
-
-            auto active = active_expirations.find(fallback.key);
-            if (active == active_expirations.end() || active->second != fallback.generation) {
-                continue;
-            }
-            active_expirations.erase(active);
-            expired.push_back(std::move(fallback));
-        }
-    }
+    std::vector<Expiration_Fallback> expired =
+        expirations.drain_expired(std::chrono::steady_clock::now());
 
     for (const auto& fallback : expired) {
         try {
@@ -553,19 +533,10 @@ int SCTP_Socket::next_poll_timeout() {
         }
     }
 
-    {
-        std::lock_guard<std::mutex> expiration_lock(expiration_queue_mutex);
-        while (!expiration_queue.empty()) {
-            const Expiration_Fallback& fallback = expiration_queue.top();
-            auto active = active_expirations.find(fallback.key);
-            if (active != active_expirations.end() && active->second == fallback.generation) {
-                if (!have_deadline || fallback.expiration < deadline) {
-                    have_deadline = true;
-                    deadline = fallback.expiration;
-                }
-                break;
-            }
-            expiration_queue.pop();
+    if (auto expiration = expirations.next_deadline()) {
+        if (!have_deadline || *expiration < deadline) {
+            have_deadline = true;
+            deadline = *expiration;
         }
     }
 
@@ -709,36 +680,21 @@ void SCTP_Socket::schedule_expirations_after_send( const Deliverable& deliverabl
     }
 }
 
+// The three timer entry points wrap Expiration_Queue only to wake the event
+// loop afterwards: the poll() deadline it is currently blocked on is stale as
+// soon as the heap changes. The wake must happen outside the queue's lock.
 void SCTP_Socket::schedule_expiration(const Expiration_Key& key, std::chrono::steady_clock::time_point expiration, const Deliverable& retry) {
-    {
-        std::lock_guard<std::mutex> expiration_lock(expiration_queue_mutex);
-        uint64_t generation = next_expiration_generation++;
-        active_expirations.insert_or_assign(key, generation);
-        expiration_queue.push(Expiration_Fallback{key, expiration, generation, retry});
-    }
+    expirations.schedule(key, expiration, retry);
     wake_event_loop();
 }
 
 void SCTP_Socket::cancel_expiration(const Expiration_Key& key) {
-    {
-        std::lock_guard<std::mutex> expiration_lock(expiration_queue_mutex);
-        active_expirations.erase(key);
-    }
+    expirations.cancel(key);
     wake_event_loop();
 }
 
-void SCTP_Socket::cancel_expirations( const Association_Key& location) {
-    {
-        std::lock_guard<std::mutex> expiration_lock(expiration_queue_mutex);
-        for (auto it = active_expirations.begin();
-             it != active_expirations.end();) {
-            if (it->first.location == location) {
-                it = active_expirations.erase(it);
-            } else {
-                ++it;
-            }
-        }
-    }
+void SCTP_Socket::cancel_expirations(const Association_Key& location) {
+    expirations.cancel_all(location);
     wake_event_loop();
 }
 
@@ -817,8 +773,7 @@ void SCTP_Socket::record_data_sent(const Association_Key& location, const data_c
 void SCTP_Socket::start_t3_if_stopped(const Association_Key& location) {
     Expiration_Key key{location, Expiration_Timer_Type::T3_RTX};
     {
-        std::lock_guard<std::mutex> expiration_lock(expiration_queue_mutex);
-        if (active_expirations.find(key) != active_expirations.end()) {
+        if (expirations.is_active(key)) {
             return;
         }
     }
