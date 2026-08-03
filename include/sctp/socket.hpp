@@ -2,6 +2,7 @@
 #define SCTP_SOCKET_HPP
 
 #include <sctp/platform.hpp>
+#include <sctp/wakeup_pair.hpp>
 #include <string_view>
 #include <string>
 #include <vector>
@@ -89,8 +90,7 @@ class SCTP_Socket {
         int receive_buffer_size;
         sockaddr_in local_address;
         sctp_socket_t udp_socket;
-        sctp_socket_t wakeup_reader{INVALID_SOCKET};
-        sctp_socket_t wakeup_writer{INVALID_SOCKET};
+        Wakeup_Pair wakeup;
         std::unordered_map<Association_Key, Association, Association_Hash> associations;
         std::mutex associations_mutex;
         std::queue<Deliverable> control_queue;
@@ -113,10 +113,7 @@ class SCTP_Socket {
         void enqueue_packet(
             Deliverable deliverable,
             Send_Priority priority = Send_Priority::CONTROL);
-        bool initialize_wakeup_sockets();
-        void close_wakeup_sockets();
         void wake_event_loop();
-        void drain_wakeup();
         int next_poll_timeout();
         void purge_queued_packets(const Association_Key& location);
         void remove_retransmissions(const Association_Key& location, const sack_chunk_value& sack);

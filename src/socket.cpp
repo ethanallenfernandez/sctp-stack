@@ -119,7 +119,7 @@ bool SCTP_Socket::sctp_run() {
         return false;
     }
 
-    if (!initialize_wakeup_sockets()) {
+    if (!wakeup.open()) {
         std::cout << "Error creating event-loop wakeup sockets: "
                   << sctp_error_string() << std::endl;
         return false;
@@ -130,7 +130,7 @@ bool SCTP_Socket::sctp_run() {
         event_loop_thread = std::thread(&SCTP_Socket::event_loop, this);
     } catch (...) {
         running.store(false);
-        close_wakeup_sockets();
+        wakeup.close();
         throw;
     }
     return true;
@@ -156,7 +156,7 @@ void SCTP_Socket::sctp_close() {
         new_data_queue = {};
         next_send_attempt = {};
     }
-    close_wakeup_sockets();
+    wakeup.close();
     if (udp_socket != INVALID_SOCKET) {
         sctp_close_socket(udp_socket);
         udp_socket = INVALID_SOCKET;
@@ -378,7 +378,7 @@ void SCTP_Socket::event_loop() {
         sctp_pollfd descriptors[2]{};
         descriptors[0].fd = udp_socket;
         descriptors[0].events = SCTP_POLL_READ;
-        descriptors[1].fd = wakeup_reader;
+        descriptors[1].fd = wakeup.poll_handle();
         descriptors[1].events = SCTP_POLL_READ;
 
         int ready = sctp_poll(descriptors, 2, next_poll_timeout());
@@ -393,7 +393,7 @@ void SCTP_Socket::event_loop() {
         }
 
         if ((descriptors[1].revents & SCTP_POLL_READ) != 0) {
-            drain_wakeup();
+            wakeup.drain();
         }
         if ((descriptors[1].revents & (SCTP_POLL_ERROR | SCTP_POLL_FATAL)) != 0) {
             std::cout << "Event-loop wakeup poll reported an error" << std::endl;
@@ -529,85 +529,12 @@ void SCTP_Socket::enqueue_packet(Deliverable deliverable, Send_Priority priority
     wake_event_loop();
 }
 
-bool SCTP_Socket::initialize_wakeup_sockets() {
-    close_wakeup_sockets();
-
-    wakeup_reader = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (wakeup_reader == INVALID_SOCKET) {
-        return false;
-    }
-    wakeup_writer = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (wakeup_writer == INVALID_SOCKET) {
-        int err = sctp_last_error();
-        close_wakeup_sockets();
-        sctp_set_last_error(err);
-        return false;
-    }
-
-    sockaddr_in wakeup_address{};
-    wakeup_address.sin_family = AF_INET;
-    wakeup_address.sin_port = 0;
-    if (!sctp_parse_ipv4("127.0.0.1", wakeup_address.sin_addr)
-            || bind(
-                wakeup_reader,
-                reinterpret_cast<const sockaddr*>(&wakeup_address),
-                sizeof(wakeup_address)) == SOCKET_ERROR) {
-        int err = sctp_last_error();
-        close_wakeup_sockets();
-        sctp_set_last_error(err);
-        return false;
-    }
-
-    socklen_t address_length = sizeof(wakeup_address);
-    if (getsockname(
-            wakeup_reader,
-            reinterpret_cast<sockaddr*>(&wakeup_address),
-            &address_length) == SOCKET_ERROR
-            || connect(
-                wakeup_writer,
-                reinterpret_cast<const sockaddr*>(&wakeup_address),
-                sizeof(wakeup_address)) == SOCKET_ERROR
-            || !sctp_set_nonblocking(wakeup_reader)
-            || !sctp_set_nonblocking(wakeup_writer)) {
-        int err = sctp_last_error();
-        close_wakeup_sockets();
-        sctp_set_last_error(err);
-        return false;
-    }
-    return true;
-}
-
-void SCTP_Socket::close_wakeup_sockets() {
-    if (wakeup_reader != INVALID_SOCKET) {
-        sctp_close_socket(wakeup_reader);
-        wakeup_reader = INVALID_SOCKET;
-    }
-    if (wakeup_writer != INVALID_SOCKET) {
-        sctp_close_socket(wakeup_writer);
-        wakeup_writer = INVALID_SOCKET;
-    }
-}
-
+// Wakes the event loop out of poll(). Kept on SCTP_Socket rather than calling
+// wakeup.wake() at each site: every scheduling path ends with it.
 void SCTP_Socket::wake_event_loop() {
-    if (wakeup_writer == INVALID_SOCKET) {
-        return;
-    }
-
-    const char byte = 1;
-    int sent = send(wakeup_writer, &byte, 1, 0);
-    if (sent == SOCKET_ERROR && !sctp_error_would_block(sctp_last_error())) {
-        std::cout << "Error waking event loop: " << sctp_error_string() << std::endl;
-    }
+    wakeup.wake();
 }
 
-void SCTP_Socket::drain_wakeup() {
-    char buffer[64];
-    while (recv(wakeup_reader, buffer, sizeof(buffer), 0) > 0) {}
-    int err = sctp_last_error();
-    if (!sctp_error_would_block(err)) {
-        std::cout << "Error draining event-loop wakeup: " << sctp_error_string(err) << std::endl;
-    }
-}
 
 int SCTP_Socket::next_poll_timeout() {
     auto now = std::chrono::steady_clock::now();
