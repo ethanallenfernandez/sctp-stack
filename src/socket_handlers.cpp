@@ -128,7 +128,9 @@ void SCTP_Socket::handle_init(const SCTP_Common_Header& header, const SCTP_Chunk
             .out_streams = 1,
             .in_streams = 1,
             .initial_tsn = new_assoc.next_tsn,
-            .optional_parameters = {}
+            .optional_parameters = {
+                // State Cookie required
+            }
         }
     });
 

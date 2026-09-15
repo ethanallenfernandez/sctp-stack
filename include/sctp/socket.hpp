@@ -58,28 +58,18 @@ class SCTP_Socket {
         void run_expire();
         void run_sending();
         void run_receiving();
-        void enqueue_packet(
-            Deliverable deliverable,
-            Send_Priority priority = Send_Priority::CONTROL);
+        void enqueue_packet(Deliverable deliverable, Send_Priority priority = Send_Priority::CONTROL);
         void wake_event_loop();
         int next_poll_timeout();
         bool handle_send_packet(const Deliverable& deliverable);
-        void schedule_expirations_after_send(
-            const Deliverable& deliverable,
-            std::chrono::steady_clock::time_point sent_at);
-        void schedule_expiration(
-            const Expiration_Key& key,
-            std::chrono::steady_clock::time_point expiration,
-            const Deliverable& retry);
+        void schedule_expirations_after_send(const Deliverable& deliverable, std::chrono::steady_clock::time_point sent_at);
+        void schedule_expiration(const Expiration_Key& key, std::chrono::steady_clock::time_point expiration, const Deliverable& retry);
         void cancel_expiration(const Expiration_Key& key);
         void cancel_expirations(const Association_Key& location);
         void handle_expiration(const Expiration_Fallback& fallback);
         void handle_t3_expiration(const Association_Key& location);
         void handle_delayed_sack_expiration(const Association_Key& location);
-        void record_data_sent(
-            const Association_Key& location,
-            const data_chunk_value& data,
-            std::chrono::steady_clock::time_point sent_at);
+        void record_data_sent(const Association_Key& location, const data_chunk_value& data, std::chrono::steady_clock::time_point sent_at);
         void start_t3_if_stopped(const Association_Key& location);
         void restart_t3(const Association_Key& location);
         void handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src);

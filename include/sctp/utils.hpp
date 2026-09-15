@@ -27,7 +27,7 @@ inline bool tsn_gte(uint32_t a, uint32_t b) {
 // Whether a SACK reports this TSN as received, either below the cumulative ack
 // point or inside one of the Gap Ack Blocks (RFC 9260 3.3.4). Gap Ack Block
 // offsets are 16-bit relative to the cumulative TSN ack, so anything further
-// out than UINT16_MAX cannot be covered by a block.
+// out than UINT16_MAX cannot be covered by a block.798++97
 inline bool sack_acknowledges(const sack_chunk_value& sack, uint32_t tsn) {
     if (tsn_lte(tsn, sack.cumulative_tsn_ack)) {
         return true;

@@ -48,10 +48,8 @@ class Send_Queue {
 
         // Drops DATA chunks the peer has acknowledged from packets still
         // waiting to be retransmitted, and drops packets left with no chunks.
-        void remove_acked_retransmissions(
-            const Association_Key& location, const sack_chunk_value& sack);
-        void remove_retransmissions_of_type(
-            const Association_Key& location, Chunk_Type type);
+        void remove_acked_retransmissions(const Association_Key& location, const sack_chunk_value& sack);
+        void remove_retransmissions_of_type(const Association_Key& location, Chunk_Type type);
 
         void clear();
 

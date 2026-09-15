@@ -25,8 +25,7 @@ void Send_Queue::enqueue(Deliverable deliverable, Send_Priority priority) {
     queue_for(priority).push(std::move(deliverable));
 }
 
-std::optional<Send_Queue::Pending> Send_Queue::peek(
-        std::chrono::steady_clock::time_point now) {
+std::optional<Send_Queue::Pending> Send_Queue::peek(std::chrono::steady_clock::time_point now) {
     std::lock_guard<std::mutex> lock(mutex);
     if (now < next_send_attempt) {
         return std::nullopt;
@@ -72,8 +71,7 @@ void Send_Queue::purge(const Association_Key& location) {
     purge_one(new_data);
 }
 
-void Send_Queue::remove_acked_retransmissions(
-        const Association_Key& location, const sack_chunk_value& sack) {
+void Send_Queue::remove_acked_retransmissions(const Association_Key& location, const sack_chunk_value& sack) {
     std::lock_guard<std::mutex> lock(mutex);
     std::queue<Deliverable> retained;
     while (!retransmission.empty()) {
@@ -99,8 +97,7 @@ void Send_Queue::remove_acked_retransmissions(
     retransmission = std::move(retained);
 }
 
-void Send_Queue::remove_retransmissions_of_type(
-        const Association_Key& location, Chunk_Type type) {
+void Send_Queue::remove_retransmissions_of_type(const Association_Key& location, Chunk_Type type) {
     std::lock_guard<std::mutex> lock(mutex);
     std::queue<Deliverable> retained;
     while (!retransmission.empty()) {

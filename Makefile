@@ -13,8 +13,19 @@ SANITIZE ?=
 
 # include/ is the public API, src/ holds internal headers (serialize, checksum).
 INCLUDES := -Iinclude -Isrc
+
+# libcrypto supplies HMAC-SHA-256 for the State Cookie MAC (RFC 9260 5.1.3) and
+# the CSPRNG behind the cookie secret. It is confined to src/state_cookie.cpp
+# and src/secure_random.cpp: no header under include/ or src/ includes an
+# OpenSSL header, so anything linking libsctp.a needs this flag but not
+# OpenSSL's include path. Overridable for the Windows build, which has to reach
+# BCryptGenRandom instead.
+CRYPTO_LIBS ?= -lcrypto
+
 CXXFLAGS  = $(CXXSTD) $(WARN) $(OPT) $(SANITIZE) $(INCLUDES) -pthread
-LDFLAGS   = -pthread $(SANITIZE)
+# $(LIB) precedes $(LDFLAGS) in the link rules below, so -lcrypto resolves
+# after libsctp.a - the order a static archive requires.
+LDFLAGS   = -pthread $(SANITIZE) $(CRYPTO_LIBS)
 
 # ---- layout ----------------------------------------------------------------
 # BUILD is overridden by the asan target, so everything derived from it uses

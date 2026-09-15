@@ -9,7 +9,8 @@
 void Expiration_Queue::schedule(
         const Expiration_Key& key,
         std::chrono::steady_clock::time_point expiration,
-        const Deliverable& retry) {
+        const Deliverable& retry
+    ) {
     std::lock_guard<std::mutex> lock(mutex);
     uint64_t generation = next_generation++;
     active.insert_or_assign(key, generation);
@@ -61,8 +62,7 @@ void Expiration_Queue::clear() {
     active.clear();
 }
 
-std::vector<Expiration_Fallback> Expiration_Queue::drain_expired(
-        std::chrono::steady_clock::time_point now) {
+std::vector<Expiration_Fallback> Expiration_Queue::drain_expired(std::chrono::steady_clock::time_point now) {
     std::vector<Expiration_Fallback> expired;
     std::lock_guard<std::mutex> lock(mutex);
     while (!queue.empty() && queue.top().expiration <= now) {
