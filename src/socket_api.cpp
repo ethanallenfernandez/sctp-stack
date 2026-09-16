@@ -154,8 +154,10 @@ Association SCTP_Socket::init_new_association(const Association_Key& key) {
     result.primary_path = key.address;
     result.state = COOKIE_WAIT;
 
-    result.this_ver_tag = random_verification_tag();
-    result.next_tsn = random_u32();
+    do {
+        generate_random(result.this_ver_tag);
+    } while (result.this_ver_tag == 0); // 0 tag reserved by INIT
+    generate_random(result.next_tsn);
     result.cumulative_tsn_ack = result.next_tsn - 1;
     result.rto = sctp_parameters::RTO_INITIAL;
     result.pmdcs = DEFAULT_PMDCS;

@@ -11,11 +11,11 @@
 #include <sctp/association.hpp>
 #include <sctp/expiration_queue.hpp>
 #include <sctp/sctp.hpp>
+#include <sctp/platform.hpp>
 
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
-#include <random>
 #include <unordered_map>
 #include <vector>
 
@@ -52,25 +52,9 @@ inline bool has_unacknowledged_data(const Association& assoc) {
     );
 }
 
-// Seeded from the full entropy of random_device rather than a single 32-bit
-// draw. NOTE: mt19937 is not cryptographically secure - its state is
-// recoverable from enough observed output, so a determined attacker can predict
-// future tags. Move this to the OS CSPRNG when implementing the state cookie.
-inline std::mt19937& tag_rng() {
-    static thread_local std::mt19937 gen = [] {
-        std::random_device rd;
-        std::seed_seq seq{rd(), rd(), rd(), rd(), rd(), rd(), rd(), rd()};
-        return std::mt19937(seq);
-    }();
-    return gen;
+template <typename T>
+inline auto generate_random(T& input) -> decltype(input) {
+    random_bytes(reinterpret_cast<uint8_t*>(&input), sizeof(input));
+    return input;
 }
-
-inline uint32_t random_u32() {
-    return std::uniform_int_distribution<uint32_t>(0, UINT32_MAX)(tag_rng());
-}
-
-inline uint32_t random_verification_tag() {
-    return std::uniform_int_distribution<uint32_t>(1, UINT32_MAX)(tag_rng());
-}
-
 #endif

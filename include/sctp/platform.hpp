@@ -10,6 +10,8 @@
   #endif
   #include <winsock2.h>   // must precede windows.h
   #include <ws2tcpip.h>   // also provides socklen_t
+  #include <bcrypt.h>
+  #pragma comment(lib, "bcrypt.lib")
   #pragma comment(lib, "Ws2_32.lib")
 #else
   #include <sys/socket.h>
@@ -18,13 +20,17 @@
   #include <unistd.h>
   #include <fcntl.h>
   #include <poll.h>
+  #include <cstdio>
   #include <cerrno>
   #include <cstring>
+  #include <sys/random.h>
 #endif
 
 #include <cstddef>
 #include <string>
 #include <string_view>
+#include <cstdlib>
+#include <stdexcept>
 
 #ifdef _WIN32
 using sctp_socket_t = SOCKET;
@@ -136,11 +142,35 @@ inline bool sctp_set_nonblocking(sctp_socket_t s) {
 #endif
 }
 
-// inet_addr() cannot distinguish 255.255.255.255 from failure and is deprecated
-// on both platforms; inet_pton() is available on Windows since Vista.
+
 inline bool sctp_parse_ipv4(std::string_view ip_address, in_addr& out) {
     std::string ip{ip_address};
     return ::inet_pton(AF_INET, ip.c_str(), &out) == 1;
 }
 
+inline void random_bytes(uint8_t* buffer, size_t length) {
+#ifdef _WIN32
+    NTSTATUS status = BCryptGenRandom(
+        nullptr, 
+        buffer, 
+        static_cast<ULONG>(length),
+        BCRYPT_USE_SYSTEM_PREFERRED_RNG
+    );
+    if (status != STATUS_SUCCESS) {
+        throw std::runtime_error("BCryptGenRandom failed");
+    }
+#else
+    size_t filled{0};
+    while (filled < length) {
+        ssize_t result = getrandom(buffer + filled, length - filled, 0);
+        if (result == -1) {
+            if (errno == EINTR) {
+                continue; // Retry on OS interrupt
+            }
+            throw std::runtime_error("getrandom failed: " + std::string(std::strerror(errno)));
+        }
+        filled += static_cast<size_t>(result);
+    }
+#endif
+}
 #endif
