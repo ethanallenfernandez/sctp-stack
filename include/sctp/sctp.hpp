@@ -1,19 +1,13 @@
 #ifndef SCTP_HPP
 #define SCTP_HPP
 
-// Protocol data types and wire constants only. Deliberately free of any socket
-// or platform dependency, so the codec and its tests can include this without
-// pulling in the networking headers.
 #include <stdint.h>
 #include <cstddef>
 #include <vector>
 #include <variant>
 #include <chrono>
 
-// On-the-wire sizes and offsets from RFC 9260 §3.1. These are intentionally NOT
-// sizeof() of the structs below: struct fields hold HOST byte order and are
-// converted to/from network byte order during (de)serialization, so the structs
-// are no longer a 1:1 image of the wire layout.
+// These are intentionally NOT sizeof() of the structs below: struct fields hold HOST byte order.
 constexpr size_t SCTP_COMMON_HEADER_SIZE = 12;
 constexpr size_t SCTP_CHUNK_HEADER_SIZE  = 4;
 constexpr size_t SCTP_CHECKSUM_OFFSET    = 8;
@@ -66,12 +60,25 @@ enum Chunk_Type : uint8_t {
     ABORT = 6,
     SHUTDOWN = 7,
     SHUTDOWN_ACK = 8,
-    //ERROR = 9,
+    OP_ERROR = 9,
     COOKIE_ECHO = 10,
     COOKIE_ACK = 11,
     ECNE = 12,
     CWR = 13, 
     SHUTDOWN_COMPLETE = 14,
+};
+
+enum Param_Type : uint16_t {
+    PARAM_IPV4_ADDRESS = 5,
+    PARAM_IPV6_ADDRESS = 6,
+    PARAM_STATE_COOKIE = 7,
+    PARAM_UNRECOGNIZED = 8,
+    PARAM_COOKIE_PRESERVATIVE = 9,
+};
+
+enum Error_Cause_Code : uint16_t {
+    CAUSE_STALE_COOKIE = 3,
+    CAUSE_COOKIE_WHILE_SHUTTING_DOWN = 10,
 };
 
 struct init_chunk_value {
@@ -111,21 +118,62 @@ struct cookie_echo_chunk_value {
 
 struct cookie_ack_chunk_value {};
 
+struct error_cause {
+    uint16_t code;
+    std::vector<uint8_t> info;
+};
+
+struct error_chunk_value {
+    std::vector<error_cause> causes;
+};
+
+constexpr size_t STATE_COOKIE_BODY_SIZE = 64;
+constexpr size_t STATE_COOKIE_MAC_SIZE = 32;
+constexpr size_t STATE_COOKIE_SIZE = STATE_COOKIE_BODY_SIZE + STATE_COOKIE_MAC_SIZE;
+constexpr uint8_t STATE_COOKIE_VERSION = 1;
+constexpr size_t COOKIE_SECRET_SIZE = 32;
+
+struct State_Cookie {
+    uint8_t version;                  // STATE_COOKIE_VERSION
+    uint8_t secret_generation;        // selects the rotating secret that signed this
+    uint64_t created_us;              // steady_clock, microseconds
+    uint32_t lifespan_us;             // Valid.Cookie.Life
+    uint16_t sctp_src_port;           // peer's, from the INIT common header
+    uint16_t sctp_dst_port;           // ours
+    uint32_t peer_ipv4;               // host order; serializer applies htonl
+    uint16_t peer_udp_port;           // host order; rebuilds the Association_Key
+    uint32_t local_ver_tag;           // tag we advertised in INIT ACK
+    uint32_t peer_ver_tag;            // INIT Initiate Tag
+    uint32_t local_initial_tsn;
+    uint32_t peer_initial_tsn;
+    uint32_t peer_a_rwnd;
+    uint16_t local_out_streams;
+    uint16_t local_in_streams;
+    uint16_t peer_out_streams;
+    uint16_t peer_in_streams;
+    uint32_t local_tie_tag;
+    uint32_t peer_tie_tag;
+    uint8_t mac[STATE_COOKIE_MAC_SIZE];
+};
+
 struct SCTP_Chunk_Header {
     Chunk_Type type; // uint8_t enum
     uint8_t flag;
     uint16_t length;
 };
 
+using Chunk_Value_Type = std::variant<
+    init_chunk_value, 
+    cookie_echo_chunk_value,
+    cookie_ack_chunk_value, 
+    data_chunk_value,
+    sack_chunk_value,
+    error_chunk_value
+>;
+
 struct SCTP_Chunk {
     SCTP_Chunk_Header chunk_header;
-    std::variant<
-        init_chunk_value, 
-        cookie_echo_chunk_value,
-        cookie_ack_chunk_value, 
-        data_chunk_value,
-        sack_chunk_value
-    > chunk_value;
+    Chunk_Value_Type chunk_value;
 }; 
 
 struct SCTP_Packet {

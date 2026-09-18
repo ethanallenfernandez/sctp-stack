@@ -48,8 +48,6 @@ constexpr uint16_t OUR_UDP_PORT = 9900;
 // destination port to the UDP destination port, so keep them equal.
 constexpr uint16_t KERNEL_SCTP_PORT = 9899;
 
-constexpr uint16_t PARAM_STATE_COOKIE = 7;   // RFC 9260 3.3.3
-
 int failures = 0;
 
 void check(bool cond, const std::string& what) {

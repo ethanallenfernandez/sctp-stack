@@ -53,6 +53,111 @@ uint32_t read_checksum_le(const uint8_t* p) {
 
 } // namespace
 
+/*------------------- RFC 9260 3.2.1 parameters and 5.1.3 cookie ------------*/
+
+void append_parameter(std::vector<uint8_t>& out, uint16_t type, const uint8_t* value, size_t len) {
+    size_t total = SCTP_CHUNK_HEADER_SIZE + len;
+    if (total > UINT16_MAX) {
+        throw std::runtime_error("parameter too long");
+    }
+
+    append16(out, type);
+    append16(out, static_cast<uint16_t>(total));
+    out.insert(out.end(), value, value + len);
+    // Padding is not counted in Parameter Length and must never exceed 3 bytes.
+    out.resize(out.size() + ((4 - (total % 4)) % 4), 0);
+}
+
+bool find_parameter(const std::vector<uint8_t>& params, uint16_t type, std::vector<uint8_t>& value_out) {
+    size_t offset = 0;
+    while (offset + SCTP_CHUNK_HEADER_SIZE <= params.size()) {
+        uint16_t parameter_type = read16(&params[offset]);
+        uint16_t length = read16(&params[offset + 2]);
+
+        // Length counts its own 4-byte header, so anything below that is
+        // malformed and would make the advance below stall forever.
+        if (length < SCTP_CHUNK_HEADER_SIZE || offset + length > params.size()) {
+            return false;
+        }
+        if (parameter_type == type) {
+            value_out.assign(params.begin() + static_cast<std::ptrdiff_t>(offset + SCTP_CHUNK_HEADER_SIZE),
+                             params.begin() + static_cast<std::ptrdiff_t>(offset + length));
+            return true;
+        }
+        offset += (static_cast<size_t>(length) + 3) & ~size_t{3};
+    }
+    return false;
+}
+
+std::vector<uint8_t> serialize_state_cookie(const State_Cookie& cookie) {
+    std::vector<uint8_t> out;
+    out.reserve(STATE_COOKIE_SIZE);
+
+    out.push_back(cookie.version);
+    out.push_back(cookie.secret_generation);
+    append16(out, 0);                                                   // reserved
+    append32(out, static_cast<uint32_t>(cookie.created_us >> 32));
+    append32(out, static_cast<uint32_t>(cookie.created_us));
+    append32(out, cookie.lifespan_us);
+    append16(out, cookie.sctp_src_port);
+    append16(out, cookie.sctp_dst_port);
+    append32(out, cookie.peer_ipv4);
+    append16(out, cookie.peer_udp_port);
+    append16(out, 0);                                                   // reserved
+    append32(out, cookie.local_ver_tag);
+    append32(out, cookie.peer_ver_tag);
+    append32(out, cookie.local_initial_tsn);
+    append32(out, cookie.peer_initial_tsn);
+    append32(out, cookie.peer_a_rwnd);
+    append16(out, cookie.local_out_streams);
+    append16(out, cookie.local_in_streams);
+    append16(out, cookie.peer_out_streams);
+    append16(out, cookie.peer_in_streams);
+    append32(out, cookie.local_tie_tag);
+    append32(out, cookie.peer_tie_tag);
+
+    // A field added without bumping STATE_COOKIE_BODY_SIZE would shift the MAC
+    // boundary and silently break every cookie. Cheaper to catch here.
+    if (out.size() != STATE_COOKIE_BODY_SIZE) {
+        throw std::runtime_error("state cookie body size does not match STATE_COOKIE_BODY_SIZE");
+    }
+
+    out.insert(out.end(), cookie.mac, cookie.mac + STATE_COOKIE_MAC_SIZE);
+    return out;
+}
+
+bool deserialize_state_cookie(const std::vector<uint8_t>& data, State_Cookie& out) {
+    if (data.size() != STATE_COOKIE_SIZE) {
+        return false;
+    }
+    const uint8_t* p = data.data();
+    if (p[0] != STATE_COOKIE_VERSION) {
+        return false;
+    }
+
+    out.version           = p[0];
+    out.secret_generation = p[1];
+    out.created_us        = static_cast<uint64_t>(read32(p + 4)) << 32 | read32(p + 8);
+    out.lifespan_us       = read32(p + 12);
+    out.sctp_src_port     = read16(p + 16);
+    out.sctp_dst_port     = read16(p + 18);
+    out.peer_ipv4         = read32(p + 20);
+    out.peer_udp_port     = read16(p + 24);
+    out.local_ver_tag     = read32(p + 28);
+    out.peer_ver_tag      = read32(p + 32);
+    out.local_initial_tsn = read32(p + 36);
+    out.peer_initial_tsn  = read32(p + 40);
+    out.peer_a_rwnd       = read32(p + 44);
+    out.local_out_streams = read16(p + 48);
+    out.local_in_streams  = read16(p + 50);
+    out.peer_out_streams  = read16(p + 52);
+    out.peer_in_streams   = read16(p + 54);
+    out.local_tie_tag     = read32(p + 56);
+    out.peer_tie_tag      = read32(p + 60);
+    std::memcpy(out.mac, p + STATE_COOKIE_BODY_SIZE, STATE_COOKIE_MAC_SIZE);
+    return true;
+}
+
 uint32_t sctp_read_wire_checksum(const uint8_t* data) {
     return read_checksum_le(data + SCTP_CHECKSUM_OFFSET);
 }
@@ -123,10 +228,11 @@ SCTP_Packet deserialize_sctp_packet(const uint8_t* data, size_t len) {
 }
 
 void deserialize_chunk_value(
-        Chunk_Type type, const uint8_t* data, size_t len,
-        std::variant<init_chunk_value, cookie_echo_chunk_value,
-                     cookie_ack_chunk_value, data_chunk_value,
-                     sack_chunk_value>& out) {
+    Chunk_Type type, 
+    const uint8_t* data, 
+    size_t len,
+    Chunk_Value_Type& out
+) {
     switch (type) {
         case INIT:
         case INIT_ACK: {
@@ -159,6 +265,12 @@ void deserialize_chunk_value(
             out = std::move(v);
             break;
         }
+        case OP_ERROR: {
+            error_chunk_value v;
+            deserialize_error_chunk(data, len, v);
+            out = std::move(v);
+            break;
+        }
         default:
             throw std::runtime_error("unsupported chunk type");
     }
@@ -186,6 +298,27 @@ void deserialize_cookie_ack_chunk(const uint8_t* data, size_t len, cookie_ack_ch
     (void)data;
     (void)len;
     (void)out;
+}
+
+void deserialize_error_chunk(const uint8_t* data, size_t len, error_chunk_value& out) {
+    // Causes use the 3.2.1 TLV encoding. Unlike find_parameter this throws,
+    // matching the other chunk deserializers: the caller drops the packet.
+    size_t offset = 0;
+    while (offset + SCTP_CHUNK_HEADER_SIZE <= len) {
+        uint16_t code = read16(data + offset);
+        uint16_t length = read16(data + offset + 2);
+
+        if (length < SCTP_CHUNK_HEADER_SIZE)
+            throw std::runtime_error("ERROR chunk cause length below header size");
+        if (offset + length > len)
+            throw std::runtime_error("ERROR chunk cause overruns chunk");
+
+        out.causes.push_back(error_cause{
+            code,
+            std::vector<uint8_t>(data + offset + SCTP_CHUNK_HEADER_SIZE, data + offset + length),
+        });
+        offset += (static_cast<size_t>(length) + 3) & ~size_t{3};
+    }
 }
 void deserialize_data_chunk(const uint8_t* data, size_t len, data_chunk_value& out) {
     if (len < 12)
@@ -281,6 +414,9 @@ void serialize_chunk(const SCTP_Chunk& chunk, std::vector<uint8_t>& out) {
         case COOKIE_ACK:
             serialize_cookie_ack_chunk(std::get<cookie_ack_chunk_value>(chunk.chunk_value), out);
             break;
+        case OP_ERROR:
+            serialize_error_chunk(std::get<error_chunk_value>(chunk.chunk_value), out);
+            break;
         case DATA:
             serialize_data_chunk(std::get<data_chunk_value>(chunk.chunk_value), out);
             break;
@@ -324,6 +460,12 @@ void serialize_cookie_ack_chunk(const cookie_ack_chunk_value& v, std::vector<uin
     // COOKIE_ACK has no payload
     (void)v;
     (void)out;
+}
+
+void serialize_error_chunk(const error_chunk_value& v, std::vector<uint8_t>& out) {
+    for (const auto& cause : v.causes) {
+        append_parameter(out, cause.code, cause.info.data(), cause.info.size());
+    }
 }
 
 void serialize_data_chunk(const data_chunk_value& v,std::vector<uint8_t>& out) {
