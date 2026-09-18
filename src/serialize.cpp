@@ -299,8 +299,7 @@ void deserialize_cookie_ack_chunk(const uint8_t* data, size_t len, cookie_ack_ch
 }
 
 void deserialize_error_chunk(const uint8_t* data, size_t len, error_chunk_value& out) {
-    // Causes are 3.2.1 TLVs. Throws rather than returning false, matching the
-    // other chunk deserializers.
+    // Throws rather than returning false, matching the other chunk deserializers.
     size_t offset = 0;
     while (offset + SCTP_CHUNK_HEADER_SIZE <= len) {
         uint16_t code = read16(data + offset);

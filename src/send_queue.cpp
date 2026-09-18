@@ -44,7 +44,16 @@ std::optional<Send_Queue::Pending> Send_Queue::peek(std::chrono::steady_clock::t
 
 void Send_Queue::commit(Send_Priority priority) {
     std::lock_guard<std::mutex> lock(mutex);
-    queue_for(priority).pop();
+    // The lock is released between peek() and commit(), so a purge() landing in
+    // that window can leave nothing to pop. pop() on an empty std::queue is
+    // undefined and in practice destroys a Deliverable that was never there,
+    // crashing in ~SCTP_Packet on the event-loop thread. Skipping the pop is
+    // the correct outcome and not merely a guard: purge() dropped that packet
+    // because the association it belonged to was abandoned.
+    std::queue<Deliverable>& queue = queue_for(priority);
+    if (!queue.empty()) {
+        queue.pop();
+    }
     next_send_attempt = {};
 }
 

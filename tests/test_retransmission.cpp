@@ -116,6 +116,12 @@ struct RawPeer {
             std::get<init_chunk_value>(init.chunks[0].chunk_value);
         stack_tag = init_value.initiate_tag;
 
+        // The stack drops an INIT ACK with no State Cookie. Contents are
+        // opaque to the initiator; it only echoes them back.
+        std::vector<uint8_t> parameters;
+        std::vector<uint8_t> filler(STATE_COOKIE_SIZE, 0xA5);
+        append_parameter(parameters, PARAM_STATE_COOKIE, filler.data(), filler.size());
+
         SCTP_Packet init_ack;
         init_ack.header.src_port = PEER_PORT;
         init_ack.header.des_port = STACK_PORT;
@@ -132,7 +138,7 @@ struct RawPeer {
                 .out_streams = 1,
                 .in_streams = 1,
                 .initial_tsn = PEER_TSN,
-                .optional_parameters = {},
+                .optional_parameters = std::move(parameters),
             },
         });
         send(init_ack);

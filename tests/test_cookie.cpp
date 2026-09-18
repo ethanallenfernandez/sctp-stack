@@ -1,8 +1,8 @@
-// State cookie and TLV parameter codec (RFC 9260 3.2.1, 3.3.10, 5.1.3).
+// State cookie, TLV parameter and ERROR codecs in isolation.
 //
 // The wire-layout assertions are RFC-fixed - type 7, length 100, big-endian -
-// so a self-consistent encoder bug cannot pass them. Round-trips are the weaker
-// half. No handler involved; the codec in isolation.
+// so a self-consistent encoder bug cannot pass them. Round-trips are the
+// weaker half.
 
 #include <sctp/sctp.hpp>
 #include "serialize.hpp"

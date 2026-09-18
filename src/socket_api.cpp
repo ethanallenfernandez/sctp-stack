@@ -167,6 +167,31 @@ Association SCTP_Socket::init_new_association(const Association_Key& key) {
     return result;
 }
 
+Association SCTP_Socket::init_new_association(const State_Cookie& cookie, const Association_Key& key) {
+    Association result{};
+
+    result.primary_path = key.address;
+    result.state = ESTABLISHED;
+
+    result.this_ver_tag = cookie.local_ver_tag;
+    result.peer_ver_tag = cookie.peer_ver_tag;
+    result.local_tie_tag = cookie.local_tie_tag;
+    result.peer_tie_tag = cookie.peer_tie_tag;
+    result.next_tsn = cookie.local_initial_tsn;
+    result.cumulative_tsn_ack = cookie.local_initial_tsn - 1;
+    result.last_peer_tsn = cookie.peer_initial_tsn - 1;
+    result.peer_rwnd = cookie.peer_a_rwnd;
+    result.out_streams = cookie.local_out_streams;
+    result.in_streams = cookie.local_in_streams;
+
+    result.rto = sctp_parameters::RTO_INITIAL;
+    result.pmdcs = DEFAULT_PMDCS;
+    result.cwnd = std::min(4U * result.pmdcs, std::max(2U * result.pmdcs, 4380U));
+    result.ssthresh = RWND;
+
+    return result;
+}
+
 void SCTP_Socket::remove_association(const Association_Key& key) {
     {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);

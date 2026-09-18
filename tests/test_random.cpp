@@ -122,9 +122,8 @@ void test_generate_random() {
     check(&returned == &value, "returns a reference to the argument");
 }
 
-// Tags run 1..2^32-1; 0 marks an INIT-bearing packet (RFC 9260 5.3.1, 8.5.1 A).
-// The production loop is inline in init_new_association, so this re-implements
-// it: proves the strategy, does NOT cover the real copy.
+// The production rejection loop is inline in init_new_association, so this
+// re-implements it: proves the strategy, does NOT cover the real copy.
 void test_verification_tag_strategy() {
     std::printf("verification tag strategy (RFC 9260 5.3.1):\n");
 

@@ -263,6 +263,14 @@ struct RawPeer {
         }
         stack_tag = std::get<init_chunk_value>(
             init.chunks[0].chunk_value).initiate_tag;
+
+        // The stack drops an INIT ACK with no State Cookie. Contents are
+        // opaque to the initiator, so filler is enough - and keeping it fixed
+        // lets the retransmission test assert the echo is byte-identical.
+        std::vector<uint8_t> parameters;
+        std::vector<uint8_t> filler(STATE_COOKIE_SIZE, 0xA5);
+        append_parameter(parameters, PARAM_STATE_COOKIE, filler.data(), filler.size());
+
         SCTP_Packet ack = packet(INIT_ACK);
         ack.chunks.push_back(SCTP_Chunk{
             .chunk_header = {.type = INIT_ACK, .flag = 0, .length = 0},
@@ -272,7 +280,7 @@ struct RawPeer {
                 .out_streams = 1,
                 .in_streams = 1,
                 .initial_tsn = PEER_TSN,
-                .optional_parameters = {1, 2, 3, 4}}});
+                .optional_parameters = std::move(parameters)}});
         send(ack);
         return receive_until(COOKIE_ECHO, cookie_echo,
                              Clock::now() + std::chrono::seconds(1), raw);
@@ -305,12 +313,22 @@ struct RawPeer {
                            Clock::now() + std::chrono::seconds(1))) {
             return false;
         }
-        stack_tag = std::get<init_chunk_value>(
-            init_ack.chunks[0].chunk_value).initiate_tag;
+        const auto& init_ack_value = std::get<init_chunk_value>(
+            init_ack.chunks[0].chunk_value);
+        stack_tag = init_ack_value.initiate_tag;
+
+        // Must come back byte for byte: the stateless responder has nothing
+        // else to rebuild the association from.
+        std::vector<uint8_t> cookie;
+        if (!find_parameter(init_ack_value.optional_parameters,
+                            PARAM_STATE_COOKIE, cookie)) {
+            return false;
+        }
+
         SCTP_Packet echo = packet(COOKIE_ECHO);
         echo.chunks.push_back(SCTP_Chunk{
             .chunk_header = {.type = COOKIE_ECHO, .flag = 0, .length = 0},
-            .chunk_value = cookie_echo_chunk_value{.cookie_data = {}}});
+            .chunk_value = cookie_echo_chunk_value{.cookie_data = cookie}});
         send(echo);
         SCTP_Packet cookie_ack;
         if (!receive_until(COOKIE_ACK, cookie_ack,

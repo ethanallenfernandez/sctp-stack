@@ -1,6 +1,6 @@
-// SHA-256 (FIPS 180-4) and HMAC (RFC 2104), authenticating the state cookie
-// (RFC 9260 5.1.3). In-tree for the same reason as the CRC-32C: nothing but
-// pthreads is linked. Verified against RFC 4231 in tests/test_hmac.cpp.
+// SHA-256 and HMAC, authenticating the state cookie. In-tree for the same
+// reason as the CRC-32C: nothing but pthreads is linked. Verified against
+// published vectors in tests/test_hmac.cpp.
 
 #include "hmac.hpp"
 

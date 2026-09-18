@@ -163,13 +163,21 @@ static void test_out_of_order_delivery(uint32_t base_tsn, const char* label) {
         init_ack.chunks[0].chunk_header.type != INIT_ACK) {
         check(false, "received INIT_ACK"); peer.close_it(); return;
     }
-    uint32_t server_tag = std::get<init_chunk_value>(init_ack.chunks[0].chunk_value).initiate_tag;
+    const auto& init_ack_value = std::get<init_chunk_value>(init_ack.chunks[0].chunk_value);
+    uint32_t server_tag = init_ack_value.initiate_tag;
     check(init_ack.header.verification_tag == CLIENT_TAG, "INIT_ACK echoes our tag");
+
+    // Echo the cookie back exactly: the server kept no state, so this is the
+    // only thing that lets it rebuild the association.
+    std::vector<uint8_t> cookie;
+    if (!find_parameter(init_ack_value.optional_parameters, PARAM_STATE_COOKIE, cookie)) {
+        check(false, "INIT_ACK carries a State Cookie"); peer.close_it(); return;
+    }
 
     SCTP_Packet cookie_echo = make_header(server_tag);
     cookie_echo.chunks.push_back(SCTP_Chunk{
         .chunk_header = { .type = COOKIE_ECHO, .flag = 0, .length = 0 },
-        .chunk_value = cookie_echo_chunk_value{ .cookie_data = {} }
+        .chunk_value = cookie_echo_chunk_value{ .cookie_data = cookie }
     });
     peer.send(cookie_echo);
 

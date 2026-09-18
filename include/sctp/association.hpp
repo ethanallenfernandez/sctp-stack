@@ -36,9 +36,6 @@ struct Outstanding_Data {
 struct Association {
     uint32_t peer_ver_tag;
     uint32_t this_ver_tag;
-    // RFC 9260 5.2.2. Copies of a prior association's tags, mirrored into the
-    // state cookie so a peer restart can be told from a replay. Zero when no
-    // prior TCB existed.
     uint32_t local_tie_tag;
     uint32_t peer_tie_tag;
     Association_State state;
