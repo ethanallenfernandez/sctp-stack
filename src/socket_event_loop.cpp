@@ -1,7 +1,6 @@
-// The event loop thread: a poll() over the UDP socket and the wakeup pair,
-// draining expired timers, sending one queued packet per pass, and receiving in
-// batches. Also the scheduling wrappers that wake the loop after changing the
-// send or expiration queues.
+// The event loop thread: poll() over the UDP socket and the wakeup pair, drain
+// expired timers, send one queued packet per pass, receive in batches. Also the
+// wrappers that wake the loop after touching the send or expiration queues.
 
 #include <sctp/socket.hpp>
 #include <sctp/platform.hpp>
@@ -77,8 +76,7 @@ void SCTP_Socket::run_expire() {
 }
 
 void SCTP_Socket::run_sending() {
-    // Peek, send with the queue lock released, then commit. handle_send_packet
-    // must not run under the send queue's lock.
+    // handle_send_packet must not run under the send queue's lock.
     std::optional<Send_Queue::Pending> pending =
         sends.peek(std::chrono::steady_clock::now());
     if (!pending) {
@@ -121,16 +119,14 @@ void SCTP_Socket::run_receiving() {
     }
 }
 
-// Wraps Send_Queue::enqueue only to wake the event loop, which may be blocked
-// in poll() with no deadline at all when the queue was empty.
+// Wraps enqueue only to wake the loop, which may be in poll() with no deadline.
 
 void SCTP_Socket::enqueue_packet(Deliverable deliverable, Send_Priority priority) {
     sends.enqueue(std::move(deliverable), priority);
     wake_event_loop();
 }
 
-// Wakes the event loop out of poll(). Kept on SCTP_Socket rather than calling
-// wakeup.wake() at each site: every scheduling path ends with it.
+// On SCTP_Socket rather than inline at each site: every scheduling path ends here.
 
 void SCTP_Socket::wake_event_loop() {
     wakeup.wake();
@@ -226,9 +222,8 @@ void SCTP_Socket::schedule_expirations_after_send( const Deliverable& deliverabl
     }
 }
 
-// The three timer entry points wrap Expiration_Queue only to wake the event
-// loop afterwards: the poll() deadline it is currently blocked on is stale as
-// soon as the heap changes. The wake must happen outside the queue's lock.
+// These wrap Expiration_Queue only to wake the loop: its poll() deadline goes
+// stale the moment the heap changes. The wake must be outside the queue's lock.
 
 void SCTP_Socket::schedule_expiration(const Expiration_Key& key, std::chrono::steady_clock::time_point expiration, const Deliverable& retry) {
     expirations.schedule(key, expiration, retry);

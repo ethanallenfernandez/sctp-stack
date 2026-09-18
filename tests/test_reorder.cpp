@@ -1,11 +1,7 @@
-// Out-of-order delivery and TSN serial-number arithmetic.
-//
-// Drives a real SCTP_Socket over a plain UDP socket: performs the four-way
-// handshake by hand, then feeds DATA chunks in a deliberately scrambled order
-// and checks what the application layer actually receives.
-//
-// This path has never been exercised before, so these are new baselines rather
-// than regression guards.
+// Out-of-order delivery and TSN serial-number arithmetic. Drives a real
+// SCTP_Socket over plain UDP: hand-rolled handshake, then scrambled DATA,
+// checking what the application layer receives. New baselines, not regression
+// guards - this path was never exercised before.
 
 #include <sctp/socket.hpp>
 #include <sctp/utils.hpp>
@@ -185,9 +181,8 @@ static void test_out_of_order_delivery(uint32_t base_tsn, const char* label) {
     check(true, "association established");
 
     // --- scrambled DATA ------------------------------------------------
-    // Server expects base_tsn first. Send +1 and +2 early so they must be
-    // buffered, then base_tsn to fill the gap, then +3 and +4 in order.
-    // Before the fix, +3 and +4 stranded in the out-of-order buffer forever.
+    // +1 and +2 early so they must be buffered, then base_tsn fills the gap,
+    // then +3 and +4. Before the fix, +3 and +4 stranded forever.
     peer.send(make_data(server_tag, base_tsn + 1, "two"));
     peer.send(make_data(server_tag, base_tsn + 2, "three"));
     std::this_thread::sleep_for(std::chrono::milliseconds(100));

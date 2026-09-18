@@ -64,8 +64,7 @@ void append_parameter(std::vector<uint8_t>& out, uint16_t type, const uint8_t* v
     append16(out, type);
     append16(out, static_cast<uint16_t>(total));
     out.insert(out.end(), value, value + len);
-    // Padding is not counted in Parameter Length and must never exceed 3 bytes.
-    out.resize(out.size() + ((4 - (total % 4)) % 4), 0);
+    out.resize(out.size() + ((4 - (total % 4)) % 4), 0);   // padding is not counted in Length
 }
 
 bool find_parameter(const std::vector<uint8_t>& params, uint16_t type, std::vector<uint8_t>& value_out) {
@@ -74,8 +73,7 @@ bool find_parameter(const std::vector<uint8_t>& params, uint16_t type, std::vect
         uint16_t parameter_type = read16(&params[offset]);
         uint16_t length = read16(&params[offset + 2]);
 
-        // Length counts its own 4-byte header, so anything below that is
-        // malformed and would make the advance below stall forever.
+        // Below 4 the advance stalls and the walk spins forever.
         if (length < SCTP_CHUNK_HEADER_SIZE || offset + length > params.size()) {
             return false;
         }
@@ -116,8 +114,8 @@ std::vector<uint8_t> serialize_state_cookie(const State_Cookie& cookie) {
     append32(out, cookie.local_tie_tag);
     append32(out, cookie.peer_tie_tag);
 
-    // A field added without bumping STATE_COOKIE_BODY_SIZE would shift the MAC
-    // boundary and silently break every cookie. Cheaper to catch here.
+    // A field added without bumping STATE_COOKIE_BODY_SIZE shifts the MAC
+    // boundary and silently breaks every cookie.
     if (out.size() != STATE_COOKIE_BODY_SIZE) {
         throw std::runtime_error("state cookie body size does not match STATE_COOKIE_BODY_SIZE");
     }
@@ -301,8 +299,8 @@ void deserialize_cookie_ack_chunk(const uint8_t* data, size_t len, cookie_ack_ch
 }
 
 void deserialize_error_chunk(const uint8_t* data, size_t len, error_chunk_value& out) {
-    // Causes use the 3.2.1 TLV encoding. Unlike find_parameter this throws,
-    // matching the other chunk deserializers: the caller drops the packet.
+    // Causes are 3.2.1 TLVs. Throws rather than returning false, matching the
+    // other chunk deserializers.
     size_t offset = 0;
     while (offset + SCTP_CHUNK_HEADER_SIZE <= len) {
         uint16_t code = read16(data + offset);

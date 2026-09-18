@@ -1,11 +1,8 @@
-// SHA-256 and HMAC-SHA-256 against externally-fixed vectors: FIPS 180-4 for the
-// hash, RFC 4231 for the MAC.
+// SHA-256 and HMAC-SHA-256 against published vectors: FIPS 180-4 and RFC 4231.
 //
-// Every assertion here compares against a value published by someone else. A
-// round-trip test (hmac(k,m) == hmac(k,m)) would pass with a completely broken
-// hash, and a cookie MAC'd with a broken hash validates against itself
-// perfectly while being worthless - the same class of bug as the CRC-32C
-// polynomial error that tests/test_wire.cpp was written to catch.
+// Externally fixed on purpose. A round-trip test passes with a totally broken
+// hash, and a cookie MAC'd with one validates against itself perfectly while
+// being worthless - the CRC-32C polynomial bug again.
 
 #include "hmac.hpp"
 
@@ -77,26 +74,23 @@ void test_sha256() {
                  "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
                  "SHA256(\"abc\")");
 
-    // 56 bytes. The critical padding case: 0x80 plus the 8-byte length no
-    // longer fit alongside the message in one block, so a second compression
-    // block is required. An implementation that only handles short messages
-    // passes everything above and fails here.
+    // 56 bytes: 0x80 plus the length no longer fit in one block, so a second
+    // is needed. Everything above passes without that branch.
     check_digest(hash_of(bytes("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")),
                  "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
                  "SHA256(56-byte message, two-block padding)");
 
-    // 55 bytes: the largest message that still pads into a single block.
+    // Largest message that still pads into a single block.
     check_digest(hash_of(repeated('a', 55)),
                  "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318",
                  "SHA256(55 'a', single-block padding boundary)");
 
-    // Exactly one block: remainder is 0, so the tail is pure padding.
+    // remainder == 0, so the tail is pure padding.
     check_digest(hash_of(repeated('a', 64)),
                  "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb",
                  "SHA256(64 'a', exact block multiple)");
 
-    // 1,000,000 'a' - the FIPS long-message vector. Exercises the multi-block
-    // loop far past anything the cookie will ever hash.
+    // FIPS long-message vector; exercises the multi-block loop.
     check_digest(hash_of(repeated('a', 1000000)),
                  "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0",
                  "SHA256(1,000,000 'a')");
@@ -111,7 +105,7 @@ void test_hmac_sha256() {
                  "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
                  "case 1: 20-byte key");
 
-    // Key shorter than the digest; exercises zero-extension to a full block.
+    // Short key: exercises zero-extension to a full block.
     check_digest(mac_of(bytes("Jefe"), bytes("what do ya want for nothing?")),
                  "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
                  "case 2: 4-byte key");
@@ -128,9 +122,8 @@ void test_hmac_sha256() {
                  "82558a389a443c0ea4cc819899f2083a85f0faa3e578f8077a2e3ff46729665b",
                  "case 4: 25-byte key");
 
-    // 131-byte key. The only vector that exercises key_len > SHA256_BLOCK_SIZE,
-    // where the key must be hashed down before use - a branch that is otherwise
-    // never taken, since the cookie secret is exactly 32 bytes.
+    // Only vector hitting key_len > SHA256_BLOCK_SIZE. The 32-byte cookie
+    // secret never takes that branch.
     check_digest(mac_of(repeated(0xaa, 131), bytes("Test Using Larger Than Block-Size Key - Hash Key First")),
                  "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54",
                  "case 6: 131-byte key is hashed first");
@@ -154,16 +147,15 @@ void test_cookie_shaped_usage() {
     uint8_t reference[SHA256_DIGEST_SIZE];
     hmac_sha256(secret.data(), secret.size(), body.data(), body.size(), reference);
 
-    // A different secret over identical bytes must not collide: this is what
-    // stops an attacker who knows the cookie layout from forging one.
+    // What stops an attacker who knows the layout from forging a cookie.
     std::vector<uint8_t> other_secret = repeated(0x5b, 32);
     uint8_t under_other_secret[SHA256_DIGEST_SIZE];
     hmac_sha256(other_secret.data(), other_secret.size(), body.data(), body.size(), under_other_secret);
     check(!constant_time_equal(reference, under_other_secret, SHA256_DIGEST_SIZE),
           "a one-bit change in the secret changes the MAC");
 
-    // Every byte of the body must be covered. A MAC that only reaches the first
-    // block would leave the tie-tags at offsets 56-63 unauthenticated.
+    // A MAC reaching only the first block would leave the tie-tags at offsets
+    // 56-63 unauthenticated.
     for (size_t i = 0; i < body.size(); i++) {
         std::vector<uint8_t> tampered = body;
         tampered[i] ^= 0x01;
@@ -186,9 +178,7 @@ void test_constant_time_equal() {
     std::memcpy(b, a, sizeof(b));
     check(constant_time_equal(a, b, sizeof(a)), "identical buffers compare equal");
 
-    // Differing in the LAST byte is the case a short-circuiting compare would
-    // still get right; differing in the FIRST is the case it would get right
-    // too. Both are here to catch an inverted or truncated loop bound.
+    // First and last byte both, to catch an inverted or truncated loop bound.
     b[sizeof(b) - 1] ^= 0x01;
     check(!constant_time_equal(a, b, sizeof(a)), "differing final byte compares unequal");
 

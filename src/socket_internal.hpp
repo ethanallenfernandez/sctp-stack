@@ -32,6 +32,9 @@ constexpr std::chrono::milliseconds SEND_RETRY_DELAY{10};
 constexpr uint32_t DEFAULT_PMDCS = 1200;
 constexpr size_t MAX_RECEIVE_BATCH = 64;
 constexpr uint8_t DATA_IMMEDIATE_SACK_FLAG = 0x08;
+// RFC 9260 5.1.3 suggests hourly. Must exceed VALID_COOKIE_LIFE so a cookie
+// still inside its lifespan always has its signing key retained.
+constexpr std::chrono::minutes COOKIE_SECRET_ROTATION{60};
 
 inline bool has_unacknowledged_data(const Association& assoc) {
     return std::any_of(

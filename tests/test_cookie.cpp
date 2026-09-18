@@ -1,11 +1,8 @@
 // State cookie and TLV parameter codec (RFC 9260 3.2.1, 3.3.10, 5.1.3).
 //
-// The wire-layout assertions here are fixed by the RFC - parameter type 7,
-// length 100, big-endian - not by our own encoder, so a self-consistent bug
-// cannot pass them. The round-trip tests are the weaker half and only prove
-// internal agreement.
-//
-// No handler is involved yet: this exercises the codec in isolation.
+// The wire-layout assertions are RFC-fixed - type 7, length 100, big-endian -
+// so a self-consistent encoder bug cannot pass them. Round-trips are the weaker
+// half. No handler involved; the codec in isolation.
 
 #include <sctp/sctp.hpp>
 #include "serialize.hpp"
@@ -39,7 +36,7 @@ uint16_t rd16be(const uint8_t* p) {
     return static_cast<uint16_t>(p[0] << 8 | p[1]);
 }
 
-// Every field distinct so a serializer that crosses two of them is visible.
+// Every field distinct, so a serializer crossing two of them shows up.
 State_Cookie sample_cookie() {
     State_Cookie cookie{};
     cookie.version = STATE_COOKIE_VERSION;
@@ -76,7 +73,7 @@ void test_parameters() {
     const uint8_t value[3] = {0xAA, 0xBB, 0xCC};
     append_parameter(params, PARAM_STATE_COOKIE, value, sizeof(value));
 
-    // 4-byte header + 3-byte value = 7, padded to 8. Length excludes padding.
+    // 4 + 3 = 7, padded to 8. Length excludes padding.
     check_eq(params.size(), 8, "3-byte value pads to 8 bytes");
     check_eq(rd16be(&params[0]), PARAM_STATE_COOKIE, "type is big-endian");
     check_eq(rd16be(&params[2]), 7, "length counts the header and excludes padding");
@@ -86,7 +83,7 @@ void test_parameters() {
     check(find_parameter(params, PARAM_STATE_COOKIE, found), "padded parameter is found");
     check(found.size() == 3 && std::memcmp(found.data(), value, 3) == 0, "value recovered without padding");
 
-    // A second parameter must be reachable across the first one's padding.
+    // Must be reachable across the first one's padding.
     const uint8_t second[4] = {0x01, 0x02, 0x03, 0x04};
     append_parameter(params, PARAM_COOKIE_PRESERVATIVE, second, sizeof(second));
     check(find_parameter(params, PARAM_COOKIE_PRESERVATIVE, found), "second parameter found across padding");
@@ -96,8 +93,8 @@ void test_parameters() {
     check(!find_parameter(params, PARAM_IPV6_ADDRESS, found), "absent parameter reports false");
     check(!find_parameter({}, PARAM_STATE_COOKIE, found), "empty list reports false");
 
-    // Attacker-controlled input. A length below 4 would leave the walk's offset
-    // unchanged and spin forever; an overrunning length would read off the end.
+    // Attacker-controlled. Length < 4 spins the walk forever; an overrunning
+    // one reads off the end.
     std::vector<uint8_t> malformed = {0x00, 0x07, 0x00, 0x02};
     check(!find_parameter(malformed, PARAM_STATE_COOKIE, found), "length below 4 is rejected, not looped on");
 
@@ -143,15 +140,15 @@ void test_cookie_round_trip() {
     check_eq(decoded.peer_tie_tag, original.peer_tie_tag, "peer_tie_tag");
     check(std::memcmp(decoded.mac, original.mac, STATE_COOKIE_MAC_SIZE) == 0, "mac");
 
-    // Fields are big-endian, matching every other field in the stack.
+    // Big-endian, like every other field in the stack.
     check_eq(wire[0], STATE_COOKIE_VERSION, "version at offset 0");
     check_eq(wire[1], 0x07, "secret_generation at offset 1");
     check_eq(rd16be(&wire[16]), 0x1234, "sctp_src_port big-endian at offset 16");
     check_eq(rd16be(&wire[2]), 0, "offset 2 is reserved and zeroed");
     check_eq(rd16be(&wire[26]), 0, "offset 26 is reserved and zeroed");
 
-    // The MAC is a plain suffix, never interleaved, so the caller can write it
-    // straight into the tail of this buffer after hashing the first 64 bytes.
+    // Plain suffix, never interleaved, so the caller can write it into the tail
+    // after hashing the first 64 bytes.
     check(std::memcmp(wire.data() + STATE_COOKIE_BODY_SIZE, original.mac, STATE_COOKIE_MAC_SIZE) == 0,
           "mac occupies bytes 64..96");
 }
@@ -176,9 +173,7 @@ void test_cookie_rejects_bad_input() {
     check(!deserialize_state_cookie(wrong_version, decoded), "unknown version is rejected");
 }
 
-// The codec has no opinion about MACs, but the layout exists to serve one.
-// This is the property step 9 depends on: authenticate 64 bytes, and every
-// field is covered.
+// The layout exists to serve a MAC: authenticate 64 bytes, cover every field.
 void test_cookie_mac_placement() {
     std::printf("State cookie MAC coverage:\n");
 
@@ -190,8 +185,8 @@ void test_cookie_mac_placement() {
     uint8_t reference[SHA256_DIGEST_SIZE];
     std::memcpy(reference, wire.data() + STATE_COOKIE_BODY_SIZE, SHA256_DIGEST_SIZE);
 
-    // Deserializing then re-serializing must reproduce the same 64 body bytes,
-    // or a cookie would fail to verify against the MAC we just minted for it.
+    // Must reproduce the same 64 bytes, or a cookie fails to verify against the
+    // MAC just minted for it.
     State_Cookie decoded{};
     check(deserialize_state_cookie(wire, decoded), "MAC'd cookie deserializes");
     std::vector<uint8_t> reserialized = serialize_state_cookie(decoded);
@@ -202,8 +197,8 @@ void test_cookie_mac_placement() {
     hmac_sha256(secret, sizeof(secret), reserialized.data(), STATE_COOKIE_BODY_SIZE, recomputed);
     check(constant_time_equal(reference, recomputed, SHA256_DIGEST_SIZE), "recomputed MAC matches after a round-trip");
 
-    // Every body byte must change the MAC: a field left outside the MAC'd range
-    // would be attacker-editable. Offsets 56-63 are the tie-tags.
+    // A field outside the MAC'd range would be attacker-editable. 56-63 are
+    // the tie-tags.
     for (size_t i = 0; i < STATE_COOKIE_BODY_SIZE; i++) {
         std::vector<uint8_t> tampered = wire;
         tampered[i] ^= 0x01;
@@ -247,7 +242,7 @@ void test_cookie_in_init_ack() {
     });
 
     std::vector<uint8_t> wire = serialize_sctp_packet(packet);
-    // 12 common header + 4 chunk header + 16 fixed INIT fields + 100 TLV.
+    // 12 header + 4 chunk header + 16 fixed INIT fields + 100 TLV.
     check_eq(wire.size(), 132, "INIT ACK with a cookie is 132 bytes on the wire");
     check_eq(rd16be(&wire[14]), 120, "INIT ACK chunk length is 120");
 
@@ -299,7 +294,7 @@ void test_error_chunk() {
         check(decoded_error.causes[0].info == staleness, "Measure of Staleness round-trips");
     }
 
-    // Two causes, the first an odd length, to prove the walk crosses padding.
+    // First an odd length, to prove the walk crosses padding.
     error_chunk_value multi;
     multi.causes.push_back(error_cause{CAUSE_STALE_COOKIE, {0x01, 0x02, 0x03}});
     multi.causes.push_back(error_cause{CAUSE_COOKIE_WHILE_SHUTTING_DOWN, {}});

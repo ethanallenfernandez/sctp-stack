@@ -6,10 +6,9 @@ namespace {
 const std::array<uint32_t, 256>& crc32c_table() {
     static const std::array<uint32_t, 256> table = [] {
         std::array<uint32_t, 256> result{};
-        // Reflected form of the CRC-32C (Castagnoli) polynomial. The normal
-        // form is 0x1EDC6F41; it must be bit-reversed to 0x82F63B78 to pair
-        // with the right-shifting table algorithm below. Check value:
-        // CRC32C("123456789") == 0xE3069283 (RFC 3309).
+        // CRC-32C (Castagnoli), reflected to pair with the right-shifting
+        // table below; normal form is 0x1EDC6F41. RFC 3309 check value:
+        // CRC32C("123456789") == 0xE3069283.
         const uint32_t poly = 0x82F63B78;
 
         for (int i = 0; i < 256; i++) {

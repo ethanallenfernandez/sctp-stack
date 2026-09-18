@@ -1,8 +1,4 @@
 // Timer heap backing Expiration_Queue.
-//
-// Bodies moved verbatim out of SCTP_Socket::{schedule,cancel}_expiration,
-// cancel_expirations, and the two halves of run_expire / next_poll_timeout that
-// touched the heap.
 
 #include <sctp/expiration_queue.hpp>
 

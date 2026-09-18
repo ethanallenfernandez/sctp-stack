@@ -1,16 +1,14 @@
 #ifndef SCTP_EXPIRATION_QUEUE_HPP
 #define SCTP_EXPIRATION_QUEUE_HPP
 
-// The retransmission timer heap: T1-init, T1-cookie, T3-rtx and the delayed
-// SACK timer (RFC 9260 6.3.2, 5.1, 6.2).
+// Timer heap: T1-init, T1-cookie, T3-rtx, delayed SACK (RFC 9260 5.1, 6.2, 6.3.2).
 //
-// Cancellation is by generation counter rather than by removal from the heap:
-// std::priority_queue cannot erase from the middle, so schedule() stamps each
-// entry with a generation and records the live one in `active`. An entry whose
-// generation no longer matches is stale and is discarded when it surfaces.
+// std::priority_queue cannot erase from the middle, so cancellation stamps each
+// entry with a generation and keeps the live one in `active`. Entries whose
+// generation no longer matches are discarded when they surface.
 //
-// None of these operations wake the event loop. SCTP_Socket wraps them to add
-// that, because the wake must happen after the lock is released.
+// Nothing here wakes the event loop; SCTP_Socket wraps these to do that after
+// releasing the lock.
 
 #include <sctp/association.hpp>
 #include <sctp/deliverable.hpp>

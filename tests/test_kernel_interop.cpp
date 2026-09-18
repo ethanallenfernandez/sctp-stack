@@ -1,17 +1,13 @@
-// Kernel interop, stage 0: send an INIT to the Linux kernel's SCTP stack and
-// validate the INIT_ACK it sends back.
+// Kernel interop, stage 0: INIT to the Linux kernel's SCTP stack, validate its
+// INIT_ACK.
 //
-// Why this test matters more than its size suggests: every other test in this
-// suite is written against our own encoder, so a bug both sides of a loopback
-// agree on is invisible to them. That is precisely how the CRC-32C polynomial
-// error survived. Here the *kernel* computes the checksum and lays out the
-// bytes, and we validate them with our own code — so this is the only test that
-// can catch that class of bug.
+// The only test here that can catch a bug our encoder and our tests agree on -
+// which is how the CRC-32C polynomial error survived. The kernel lays out these
+// bytes; we validate them.
 //
-// It deliberately stops after INIT_ACK. Completing the handshake needs us to
-// echo the State Cookie (not implemented yet), and per RFC 9260 5.1.3 the
-// responder holds no state until COOKIE_ECHO returns, so abandoning the
-// handshake here leaks nothing on the kernel side.
+// Stops after INIT_ACK: echoing the State Cookie is not implemented yet. Per
+// RFC 9260 5.1.3 the responder holds no state until COOKIE_ECHO, so abandoning
+// the handshake leaks nothing kernel-side.
 //
 // Requires root setup first; skips cleanly (exit 0) when absent:
 //     sudo modprobe sctp

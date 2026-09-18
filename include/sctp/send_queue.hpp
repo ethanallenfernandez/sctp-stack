@@ -1,14 +1,11 @@
 #ifndef SCTP_SEND_QUEUE_HPP
 #define SCTP_SEND_QUEUE_HPP
 
-// Outbound packet scheduling: protocol control traffic first, then
-// retransmissions, then new DATA.
+// Outbound scheduling: control traffic, then retransmissions, then new DATA.
 //
-// Sending is deliberately split into peek() / commit() rather than a single
-// pop(). The actual sendto() must not run while the queue lock is held, so the
-// event loop peeks the front packet, releases the lock, writes to the wire, and
-// only then commits the pop. On a failed write it calls defer() instead and the
-// packet stays queued. This is safe because only the event-loop thread pops.
+// peek()/commit() instead of pop() so sendto() runs outside the queue lock. A
+// failed write calls defer() and the packet stays queued. Safe because only the
+// event-loop thread pops.
 
 #include <sctp/association.hpp>
 #include <sctp/deliverable.hpp>
@@ -36,26 +33,22 @@ class Send_Queue {
 
         void enqueue(Deliverable deliverable, Send_Priority priority);
 
-        // Front packet of the highest-priority non-empty queue. Returns nullopt
-        // if everything is empty or a failed send is still backing off. Does
-        // not pop -- the caller must follow with commit() or defer().
+        // Highest-priority front packet, or nullopt if empty or backing off.
+        // Does not pop: follow with commit() or defer().
         std::optional<Pending> peek(std::chrono::steady_clock::time_point now);
         void commit(Send_Priority priority);
         void defer(std::chrono::steady_clock::time_point retry_at);
 
-        // Drops every queued packet for an association, used when it goes away.
         void purge(const Association_Key& location);
 
-        // Drops DATA chunks the peer has acknowledged from packets still
-        // waiting to be retransmitted, and drops packets left with no chunks.
+        // Drops acked DATA from pending retransmissions, and empty packets.
         void remove_acked_retransmissions(const Association_Key& location, const sack_chunk_value& sack);
         void remove_retransmissions_of_type(const Association_Key& location, Chunk_Type type);
 
         void clear();
 
-        // When the event loop should next attempt a send: nullopt if nothing is
-        // queued, otherwise the backoff deadline (which may be in the past,
-        // meaning send now).
+        // Next send attempt, or nullopt if nothing is queued. May be in the
+        // past, meaning send now.
         std::optional<std::chrono::steady_clock::time_point> next_deadline();
 
         // Inspection, for tests and diagnostics.

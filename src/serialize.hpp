@@ -13,6 +13,8 @@ void serialize_sack_chunk(const sack_chunk_value& v, std::vector<uint8_t>& out);
 void serialize_cookie_echo_chunk(const cookie_echo_chunk_value& v, std::vector<uint8_t>& out);
 void serialize_cookie_ack_chunk(const cookie_ack_chunk_value& v, std::vector<uint8_t>& out);
 void serialize_error_chunk(const error_chunk_value& v, std::vector<uint8_t>& out);
+// MAC is a plain suffix, so callers can sign the first STATE_COOKIE_BODY_SIZE
+// bytes of the result and write the digest straight into its tail.
 std::vector<uint8_t> serialize_state_cookie(const State_Cookie& cookie);
 
 
