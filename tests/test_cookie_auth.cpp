@@ -5,6 +5,7 @@
 #include <sctp/cookie_auth.hpp>
 #include "serialize.hpp"
 
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -260,11 +261,45 @@ void test_stale() {
     // stay zero on every path that does not send one.
     check(staleness == 0, "staleness untouched on a valid cookie");
 
-    // NOTE: the STALE path itself is not covered. Forcing an expiry needs
-    // control of the clock, and generate()/verify() read steady_clock directly.
-    // Taking `now` as a parameter would close this; it is the only branch in
-    // verify() with no test, and the only one that sends a reply.
-    std::printf("  [SKIP] genuine expiry needs a clock seam (see note)\n");
+    // Genuine expiry, driven through the clock seam.
+    auto base = std::chrono::steady_clock::now();
+    auto offset = std::chrono::microseconds(0);
+    Cookie_Auth timed;
+    timed.clock = [&] { return base + offset; };
+    std::vector<uint8_t> aging = mint(timed);
+
+    offset = sctp_parameters::VALID_COOKIE_LIFE;
+    check_result(timed.verify(aging, echo_header(), peer_address(), decoded, staleness),
+                 Cookie_Result::VALID, "valid at exactly Valid.Cookie.Life");
+    check(staleness == 0, "no staleness while valid");
+
+    offset = std::chrono::microseconds(sctp_parameters::VALID_COOKIE_LIFE) + std::chrono::microseconds(1500);
+    check_result(timed.verify(aging, echo_header(), peer_address(), decoded, staleness),
+                 Cookie_Result::STALE, "stale 1.5 ms past its lifespan");
+    check(staleness == 1500, "Measure of Staleness is the overshoot in microseconds");
+}
+
+void test_cookie_preservative() {
+    std::printf("Cookie Preservative (5.2.6):\n");
+
+    auto base = std::chrono::steady_clock::now();
+    auto offset = std::chrono::microseconds(0);
+    Cookie_Auth auth;
+    auth.clock = [&] { return base + offset; };
+    State_Cookie decoded{};
+    uint32_t staleness = 0;
+
+    std::vector<uint8_t> extended = auth.generate(inbound_header(), sample_init(), peer_address(), LOCAL_TAG, LOCAL_TSN, 0, 0, 5000);
+    deserialize_state_cookie(extended, decoded);
+    check(decoded.lifespan_us == 65'000'000, "5 s increment gives a 65 s lifespan");
+    offset = std::chrono::seconds(64);
+    check_result(auth.verify(extended, echo_header(), peer_address(), decoded, staleness),
+                 Cookie_Result::VALID, "still valid at 64 s");
+
+    offset = std::chrono::microseconds(0);
+    std::vector<uint8_t> capped = auth.generate(inbound_header(), sample_init(), peer_address(), LOCAL_TAG, LOCAL_TSN, 0, 0, UINT32_MAX);
+    deserialize_state_cookie(capped, decoded);
+    check(decoded.lifespan_us == 120'000'000, "a huge increment is capped at MAX_COOKIE_LIFE (120 s)");
 }
 
 void test_rotation() {
@@ -296,6 +331,7 @@ int main() {
     test_bad_mac();
     test_wrong_endpoint();
     test_stale();
+    test_cookie_preservative();
     test_rotation();
 
     if (failures == 0) {

@@ -32,9 +32,17 @@ constexpr std::chrono::milliseconds SEND_RETRY_DELAY{10};
 constexpr uint32_t DEFAULT_PMDCS = 1200;
 constexpr size_t MAX_RECEIVE_BATCH = 64;
 constexpr uint8_t DATA_IMMEDIATE_SACK_FLAG = 0x08;
-// Must exceed VALID_COOKIE_LIFE, so a cookie still inside its lifespan always
-// has its signing key retained.
+// Must exceed any cookie lifespan, so a cookie still inside it always has its
+// signing key retained.
 constexpr std::chrono::minutes COOKIE_SECRET_ROTATION{60};
+// Ceiling on VALID_COOKIE_LIFE plus a peer's Cookie Preservative (5.2.6).
+constexpr std::chrono::seconds MAX_COOKIE_LIFE{120};
+static_assert(MAX_COOKIE_LIFE < COOKIE_SECRET_ROTATION);
+// New INITs sent in answer to Stale Cookie errors before giving up.
+constexpr uint8_t MAX_STALE_COOKIE_RETRIES = 2;
+// What we advertise as OS and MIS in INIT and INIT ACK.
+constexpr uint16_t LOCAL_OUT_STREAMS = 1;
+constexpr uint16_t LOCAL_MAX_IN_STREAMS = 1;
 
 inline bool has_unacknowledged_data(const Association& assoc) {
     return std::any_of(
@@ -44,6 +52,24 @@ inline bool has_unacknowledged_data(const Association& assoc) {
             return !entry.second.gap_acked;
         }
     );
+}
+
+inline std::vector<uint8_t> be32_bytes(uint32_t v) {
+    return {static_cast<uint8_t>(v >> 24), static_cast<uint8_t>(v >> 16), static_cast<uint8_t>(v >> 8), static_cast<uint8_t>(v)};
+}
+
+inline uint32_t read_be32(const uint8_t* p) {
+    return static_cast<uint32_t>(p[0]) << 24 | static_cast<uint32_t>(p[1]) << 16 | static_cast<uint32_t>(p[2]) << 8 | p[3];
+}
+
+// RFC 9260 3.3.10.1: Stream Identifier, then 16 reserved bits.
+inline error_cause invalid_stream_cause(uint16_t stream_id) {
+    return error_cause{CAUSE_INVALID_STREAM_ID, {static_cast<uint8_t>(stream_id >> 8), static_cast<uint8_t>(stream_id), 0, 0}};
+}
+
+// RFC 9260 3.3.10.3: Measure of Staleness, in microseconds.
+inline error_cause stale_cookie_cause(uint32_t staleness_us) {
+    return error_cause{CAUSE_STALE_COOKIE, be32_bytes(staleness_us)};
 }
 
 template <typename T>

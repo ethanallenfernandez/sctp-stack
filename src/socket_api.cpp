@@ -5,6 +5,7 @@
 
 #include <sctp/socket.hpp>
 #include <sctp/platform.hpp>
+#include "serialize.hpp"
 #include "socket_internal.hpp"
 
 #include <chrono>
@@ -126,27 +127,32 @@ Association_Key SCTP_Socket::sctp_associate(std::string_view ip_address, int por
     associations.insert_or_assign(key, assoc);
     assoc_lock.unlock();
 
+    enqueue_packet(Deliverable{key, build_init(key, assoc)});
+    return key;
+}
+
+SCTP_Packet SCTP_Socket::build_init(const Association_Key& key, const Association& assoc, uint32_t cookie_preservative_ms) {
     SCTP_Packet init_packet = INIT_PACKET;
     // Header fields are host byte order; the serializer converts. sin_port is
     // already network order, so it needs ntohs, not htons.
     init_packet.header.src_port = ntohs(local_address.sin_port);
-    init_packet.header.des_port = static_cast<uint16_t>(port);
+    init_packet.header.des_port = ntohs(key.address.sin_port);
     init_packet.header.verification_tag = 0;   // RFC 9260 §8.5, packet carries INIT
-    init_packet.header.checksum = 0;
+
+    std::vector<uint8_t> parameters;
+    if (cookie_preservative_ms != 0) {
+        std::vector<uint8_t> increment = be32_bytes(cookie_preservative_ms);
+        append_parameter(parameters, PARAM_COOKIE_PRESERVATIVE, increment.data(), increment.size());
+    }
     init_packet.chunks[0].chunk_value = init_chunk_value {
         .initiate_tag = assoc.this_ver_tag,
         .a_rwnd = RWND,
-        .out_streams = 1,
-        .in_streams = 1,
+        .out_streams = LOCAL_OUT_STREAMS,
+        .in_streams = LOCAL_MAX_IN_STREAMS,
         .initial_tsn = assoc.next_tsn,
-        .optional_parameters = {}
+        .optional_parameters = std::move(parameters)
     };
-
-    Deliverable init_deliv{key, init_packet};
-
-    enqueue_packet(std::move(init_deliv));
-
-    return key;
+    return init_packet;
 }
 
 Association SCTP_Socket::init_new_association(const Association_Key& key) {
@@ -158,6 +164,9 @@ Association SCTP_Socket::init_new_association(const Association_Key& key) {
     result.this_ver_tag = generate_nonzero_tag();
     generate_random(result.next_tsn);
     result.cumulative_tsn_ack = result.next_tsn - 1;
+    // Upper bounds until the INIT ACK narrows them (5.1.1).
+    result.out_streams = LOCAL_OUT_STREAMS;
+    result.in_streams = LOCAL_MAX_IN_STREAMS;
     result.rto = sctp_parameters::RTO_INITIAL;
     result.pmdcs = DEFAULT_PMDCS;
     result.cwnd = std::min(4U * result.pmdcs, std::max(2U * result.pmdcs, 4380U));
@@ -178,8 +187,9 @@ Association SCTP_Socket::init_new_association(const State_Cookie& cookie, const 
     result.cumulative_tsn_ack = cookie.local_initial_tsn - 1;
     result.last_peer_tsn = cookie.peer_initial_tsn - 1;
     result.peer_rwnd = cookie.peer_a_rwnd;
-    result.out_streams = cookie.local_out_streams;
-    result.in_streams = cookie.local_in_streams;
+    // RFC 9260 5.1.1: each direction gets the smaller of what the two ends offered.
+    result.out_streams = std::min(cookie.local_out_streams, cookie.peer_in_streams);
+    result.in_streams = std::min(cookie.local_in_streams, cookie.peer_out_streams);
 
     result.rto = sctp_parameters::RTO_INITIAL;
     result.pmdcs = DEFAULT_PMDCS;

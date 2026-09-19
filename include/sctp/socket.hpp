@@ -63,6 +63,7 @@ private:
     void event_loop();
     Association init_new_association(const Association_Key& key);
     Association init_new_association(const State_Cookie& cookie, const Association_Key& key);
+    SCTP_Packet build_init(const Association_Key& key, const Association& assoc, uint32_t cookie_preservative_ms = 0);
     void remove_association(const Association_Key& key);
     void notify_assoc_change(const Association_Key& key, Assoc_Change_State state);
     void run_expire();

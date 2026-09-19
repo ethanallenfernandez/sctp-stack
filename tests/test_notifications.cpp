@@ -58,6 +58,10 @@ struct SCTP_Socket_Test_Access {
         stack.associations.insert_or_assign(key, assoc);
     }
 
+    static void set_state(SCTP_Socket& stack, Association_State state) {
+        stack.associations.at(peer_key()).state = state;
+    }
+
     static bool has_association(SCTP_Socket& stack) {
         return stack.associations.count(peer_key()) != 0;
     }
@@ -207,8 +211,15 @@ void test_error_while_echoed() {
     auto n = stack.sctp_recv_notification();
     check(n && n->type == Notification_Type::SCTP_REMOTE_ERROR, "it is reported as REMOTE_ERROR");
 
+    bool retried_quietly = true;
+    for (int i = 0; i < 2; ++i) {   // MAX_STALE_COOKIE_RETRIES
+        Access::receive(stack, error_chunk_value{{error_cause{CAUSE_STALE_COOKIE, {0, 0, 0, 1}}}});
+        retried_quietly = retried_quietly && Access::has_association(stack) && !stack.sctp_recv_notification();
+        Access::set_state(stack, COOKIE_ECHOED);   // as if the retried handshake reached COOKIE ECHO again
+    }
+    check(retried_quietly, "Stale Cookie retries the handshake without notifying");
     Access::receive(stack, error_chunk_value{{error_cause{CAUSE_STALE_COOKIE, {0, 0, 0, 1}}}});
-    check(!Access::has_association(stack), "Stale Cookie ends the handshake");
+    check(!Access::has_association(stack), "once retries run out, Stale Cookie ends the handshake");
     n = stack.sctp_recv_notification();
     check(is_assoc_change(n, Assoc_Change_State::CANT_STR_ASSOC), "reported as CANT_STR_ASSOC");
     check(!stack.sctp_recv_notification(), "and not also as REMOTE_ERROR");

@@ -6,16 +6,12 @@
 #include "serialize.hpp"
 #include "socket_internal.hpp"
 
-namespace {
-
-uint64_t now_us() {
-    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+uint64_t Cookie_Auth::now_us() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(clock().time_since_epoch()).count());
 }
 
-} // namespace
-
 void Cookie_Auth::rotate_if_due() {
-    auto now = std::chrono::steady_clock::now();
+    auto now = clock();
 
     if (!initialized) {
         random_bytes(current, COOKIE_SECRET_SIZE);
@@ -56,15 +52,20 @@ std::vector<uint8_t> Cookie_Auth::generate(
     uint32_t local_tag,
     uint32_t local_tsn,
     uint32_t local_tie_tag,
-    uint32_t peer_tie_tag
+    uint32_t peer_tie_tag,
+    uint32_t lifespan_increment_ms
 ) {
     rotate_if_due();
+    auto lifespan = std::min<std::chrono::microseconds>(
+        sctp_parameters::VALID_COOKIE_LIFE + std::chrono::milliseconds(lifespan_increment_ms),
+        MAX_COOKIE_LIFE
+    );
 
     State_Cookie cookie{};
     cookie.version = STATE_COOKIE_VERSION;
     cookie.secret_generation = generation;
     cookie.created_us = now_us();
-    cookie.lifespan_us = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::microseconds>(sctp_parameters::VALID_COOKIE_LIFE).count());
+    cookie.lifespan_us = static_cast<uint32_t>(lifespan.count());
 
     // src_port is the peer's and des_port ours in both the INIT and the
     // COOKIE_ECHO, so verify() can compare these directly without swapping.
@@ -79,10 +80,9 @@ std::vector<uint8_t> Cookie_Auth::generate(
     cookie.peer_initial_tsn = init.initial_tsn;
     cookie.peer_a_rwnd = init.a_rwnd;
 
-    // Stream negotiation is not implemented; we advertise 1/1. The peer's
-    // counts ride along so it can land without a cookie format change.
-    cookie.local_out_streams = 1;
-    cookie.local_in_streams = 1;
+    // What we advertised; init_new_association negotiates against the peer's.
+    cookie.local_out_streams = LOCAL_OUT_STREAMS;
+    cookie.local_in_streams = LOCAL_MAX_IN_STREAMS;
     cookie.peer_out_streams = init.out_streams;
     cookie.peer_in_streams = init.in_streams;
 

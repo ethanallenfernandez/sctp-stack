@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <chrono>
+#include <functional>
 #include <vector>
 #include <sctp/sctp.hpp>
 #include <sctp/platform.hpp>
@@ -25,7 +26,9 @@ public:
         uint32_t local_tag,
         uint32_t local_tsn,
         uint32_t local_tie_tag,
-        uint32_t peer_tie_tag);
+        uint32_t peer_tie_tag,
+        uint32_t lifespan_increment_ms = 0
+    );
 
     // staleness_us is only set when the result is STALE.
     Cookie_Result verify(
@@ -33,9 +36,14 @@ public:
         const SCTP_Common_Header& header,
         const sockaddr_in& src,
         State_Cookie& out,
-        uint32_t& staleness_us);
+        uint32_t& staleness_us
+    );
+
+    // Overridable so tests can expire cookies without waiting.
+    std::function<std::chrono::steady_clock::time_point()> clock = [] { return std::chrono::steady_clock::now(); };
 
 private:
+    uint64_t now_us();
     void rotate_if_due();
     const uint8_t* secret_for(uint8_t wanted_generation);
 

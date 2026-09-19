@@ -178,6 +178,14 @@ void SCTP_Socket::report_unrecognized_chunks(const SCTP_Common_Header& header, c
 
 void SCTP_Socket::handle_init(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src) {
     const auto& init = std::get<init_chunk_value>(chunk.chunk_value);
+    // RFC 9260 3.3.2: MUST discard. The ABORT it SHOULD also send is not implemented.
+    if (init.out_streams == 0 || init.in_streams == 0) {
+        std::cout << "Dropped INIT advertising zero streams" << std::endl;
+        return;
+    }
+    std::vector<uint8_t> preservative;
+    uint32_t lifespan_increment_ms = find_parameter(init.optional_parameters, PARAM_COOKIE_PRESERVATIVE, preservative)
+        && preservative.size() == 4 ? read_be32(preservative.data()) : 0;
 
     uint32_t local_tag = generate_nonzero_tag();
     uint32_t local_tsn;
@@ -219,7 +227,8 @@ void SCTP_Socket::handle_init(const SCTP_Common_Header& header, const SCTP_Chunk
         local_tag, 
         local_tsn, 
         local_tie_tag, 
-        peer_tie_tag
+        peer_tie_tag,
+        lifespan_increment_ms
     );
 
     std::vector<uint8_t> parameters;
@@ -240,8 +249,8 @@ void SCTP_Socket::handle_init(const SCTP_Common_Header& header, const SCTP_Chunk
         .chunk_value = init_chunk_value {
             .initiate_tag = local_tag,
             .a_rwnd = RWND,
-            .out_streams = 1,
-            .in_streams = 1,
+            .out_streams = LOCAL_OUT_STREAMS,
+            .in_streams = LOCAL_MAX_IN_STREAMS,
             .initial_tsn = local_tsn,
             .optional_parameters = std::move(parameters)
         }
@@ -260,6 +269,10 @@ void SCTP_Socket::handle_init_ack(const SCTP_Common_Header& header, const SCTP_C
         std::cout << "Dropped INIT_ACK with no State Cookie parameter" << std::endl;
         return;
     }
+    if (init_ack.out_streams == 0 || init_ack.in_streams == 0) {
+        std::cout << "Dropped INIT_ACK advertising zero streams" << std::endl;
+        return;
+    }
 
     std::unique_lock<std::mutex> assoc_lock(associations_mutex);
     Association_Key assoc_key{src};
@@ -272,6 +285,8 @@ void SCTP_Socket::handle_init_ack(const SCTP_Common_Header& header, const SCTP_C
     assoc.last_peer_tsn = init_ack.initial_tsn - 1;
     assoc.peer_ver_tag = init_ack.initiate_tag;
     assoc.peer_rwnd = init_ack.a_rwnd;
+    assoc.out_streams = std::min(LOCAL_OUT_STREAMS, init_ack.in_streams);
+    assoc.in_streams = std::min(LOCAL_MAX_IN_STREAMS, init_ack.out_streams);
     assoc.state = COOKIE_ECHOED;
     uint32_t peer_tag = assoc.peer_ver_tag;
     assoc_lock.unlock();
@@ -324,13 +339,7 @@ void SCTP_Socket::send_stale_cookie_error(
         const sockaddr_in& src,
         const State_Cookie& cookie,
         uint32_t staleness_us) {
-    std::vector<uint8_t> staleness{
-        static_cast<uint8_t>(staleness_us >> 24),
-        static_cast<uint8_t>(staleness_us >> 16),
-        static_cast<uint8_t>(staleness_us >> 8),
-        static_cast<uint8_t>(staleness_us),
-    };
-    send_error(header, src, cookie.peer_ver_tag, {error_cause{CAUSE_STALE_COOKIE, std::move(staleness)}});
+    send_error(header, src, cookie.peer_ver_tag, {stale_cookie_cause(staleness_us)});
 }
 
 void SCTP_Socket::send_error(
@@ -449,49 +458,68 @@ bool SCTP_Socket::handle_cookie_echo(
 
 void SCTP_Socket::handle_error(const SCTP_Common_Header&, const SCTP_Chunk& chunk, const sockaddr_in& src) {
     const auto& error = std::get<error_chunk_value>(chunk.chunk_value);
-
-    bool stale_cookie = std::any_of(
-        error.causes.begin(),
-        error.causes.end(),
-        [](const error_cause& cause) {
-            return cause.code == CAUSE_STALE_COOKIE;
-        }
-    );
-
-    for (const auto& cause : error.causes) {
-        switch (cause.code) {
-            case CAUSE_STALE_COOKIE:
-                std::cout << "Peer reported a stale cookie" << std::endl;
-                break;
-            case CAUSE_UNRECOGNIZED_CHUNK:
-                std::cout << "Peer reported an unrecognized chunk" << std::endl;
-                break;
-            case CAUSE_COOKIE_WHILE_SHUTTING_DOWN:
-                std::cout << "Peer reported a COOKIE ECHO while shutting down" << std::endl;
-                break;
-            default:
-                std::cout << "Peer reported an error cause: " << cause.code << std::endl;
-                break;
-        }
-    }
-
-    Association_Key assoc_key{src};
-    bool failed_start = false;
-    {
-        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
-        auto it = associations.find(assoc_key);
-        failed_start = stale_cookie && it != associations.end() && it->second.state == COOKIE_ECHOED;
-        // RFC 9260 3.3.10: at least one cause. Unknown codes are still passed up.
-        if (!failed_start && !error.causes.empty()) {
-            notifications.enqueue(Notification{Notification_Type::SCTP_REMOTE_ERROR, assoc_key, 0, Remote_Error{error.causes}});
-        }
-    }
-    if (!failed_start) {
+    if (error.causes.empty()) {
         return;
     }
 
-    // Neither alternative is implemented: no re-INIT, no Cookie Preservative.
-    std::cout << "Association failed: peer reported a stale cookie" << std::endl;
+    Association_Key assoc_key{src};
+    SCTP_Packet retry_init;
+    bool handshake_failed = false;
+    {
+        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+        auto it = associations.find(assoc_key);
+        if (it == associations.end()) {
+            return;
+        }
+        Association& assoc = it->second;
+
+        for (const auto& cause : error.causes) {
+            switch (cause.code) {
+                case CAUSE_STALE_COOKIE: {
+                    bool handled = !retry_init.chunks.empty() || handshake_failed;
+                    if (handled || assoc.state != COOKIE_ECHOED || cause.info.size() != 4) {
+                        break;
+                    }
+                    if (assoc.stale_cookie_retries >= MAX_STALE_COOKIE_RETRIES) {
+                        handshake_failed = true;
+                        break;
+                    }
+                    
+                    uint32_t staleness_ms = read_be32(cause.info.data()) / 1000 + 1;
+                    ++assoc.stale_cookie_retries;
+                    assoc.state = COOKIE_WAIT;
+                    assoc.peer_ver_tag = 0;
+                    assoc.init_retransmits = 0;
+                    assoc.cookie_retransmits = 0;
+                    retry_init = build_init(assoc_key, assoc, staleness_ms + std::min(staleness_ms, 1000U));
+                    break;
+                }
+                case CAUSE_COOKIE_WHILE_SHUTTING_DOWN: // TODO
+                    break;
+                case CAUSE_UNRECOGNIZED_CHUNK: // TODO
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        // Every cause is passed up raw, unknown codes included, unless the
+        // ERROR was consumed by handshake recovery.
+        if (retry_init.chunks.empty() && !handshake_failed) {
+            notifications.enqueue(Notification{Notification_Type::SCTP_REMOTE_ERROR, assoc_key, 0, Remote_Error{error.causes}});
+            return;
+        }
+    }
+
+    cancel_expiration(Expiration_Key{assoc_key, Expiration_Timer_Type::T1_COOKIE});
+    sends.remove_retransmissions_of_type(assoc_key, COOKIE_ECHO);
+    if (!handshake_failed) {
+        std::cout << "Retrying association with a Cookie Preservative" << std::endl;
+        enqueue_packet(Deliverable{assoc_key, std::move(retry_init)});
+        return;
+    }
+
+    std::cout << "Association failed: peer kept reporting a stale cookie" << std::endl;
     remove_association(assoc_key);
     notify_assoc_change(assoc_key, Assoc_Change_State::CANT_STR_ASSOC);
 }
@@ -814,6 +842,8 @@ void SCTP_Socket::handle_data_packet(
     bool have_data = false;
     bool send_immediately = acknowledge_immediately;
     bool start_delayed_timer = false;
+    std::vector<error_cause> invalid_streams;
+    uint32_t peer_tag = 0;
 
     {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
@@ -823,6 +853,7 @@ void SCTP_Socket::handle_data_packet(
         }
 
         Association& assoc = it->second;
+        peer_tag = assoc.peer_ver_tag;
         bool hole_existed = !assoc.tsn_ooo_buffer.empty();
         bool saw_duplicate = false;
 
@@ -835,15 +866,24 @@ void SCTP_Socket::handle_data_packet(
                 || (chunk.chunk_header.flag & DATA_IMMEDIATE_SACK_FLAG) != 0;
             const auto& data = std::get<data_chunk_value>(chunk.chunk_value);
             uint32_t tsn = data.tsn;
+            // RFC 9260 6.5: an invalid stream is still acked, but reported and never delivered.
+            bool valid_stream = data.stream_identifier < assoc.in_streams;
             if (tsn == assoc.last_peer_tsn + 1) {
                 assoc.last_peer_tsn = tsn;
-                assoc.ulp_buffer.push(data.user_data);
+                if (valid_stream) {
+                    assoc.ulp_buffer.push(data.user_data);
+                } else {
+                    invalid_streams.push_back(invalid_stream_cause(data.stream_identifier));
+                }
                 read_ooo_buffer(assoc);
             } else if (tsn_lt(assoc.last_peer_tsn + 1, tsn)) {
                 auto inserted = assoc.tsn_ooo_buffer.emplace(tsn, data);
                 if (!inserted.second) {
                     assoc.duplicate_tsns.push_back(tsn);
                     saw_duplicate = true;
+                } else if (!valid_stream) {
+                    inserted.first->second.user_data.clear();
+                    invalid_streams.push_back(invalid_stream_cause(data.stream_identifier));
                 }
             } else {
                 assoc.duplicate_tsns.push_back(tsn);
@@ -863,6 +903,9 @@ void SCTP_Socket::handle_data_packet(
         }
     }
 
+    if (!invalid_streams.empty()) {
+        send_error(packet.header, src, peer_tag, std::move(invalid_streams));
+    }
     if (send_immediately) {
         send_sack(assoc_key);
     } else if (start_delayed_timer) {
@@ -875,10 +918,11 @@ void SCTP_Socket::handle_data_packet(
 
 void SCTP_Socket::read_ooo_buffer(Association& assoc) {
     uint32_t tsn = assoc.last_peer_tsn + 1;
-    while (assoc.tsn_ooo_buffer.find(tsn) != assoc.tsn_ooo_buffer.end()) {
-        assoc.ulp_buffer.push(assoc.tsn_ooo_buffer[tsn].user_data);
-        assoc.tsn_ooo_buffer.erase(tsn);
-        tsn++;
+    for (auto it = assoc.tsn_ooo_buffer.find(tsn); it != assoc.tsn_ooo_buffer.end(); it = assoc.tsn_ooo_buffer.find(++tsn)) {
+        if (it->second.stream_identifier < assoc.in_streams) {
+            assoc.ulp_buffer.push(std::move(it->second.user_data));
+        }
+        assoc.tsn_ooo_buffer.erase(it);
     }
     assoc.last_peer_tsn = tsn - 1;
 }

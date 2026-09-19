@@ -49,6 +49,7 @@ struct Association {
     uint32_t last_peer_tsn;
     uint16_t init_retransmits;
     uint16_t cookie_retransmits;
+    uint8_t stale_cookie_retries;
     uint32_t cumulative_tsn_ack;
     std::map<uint32_t, Outstanding_Data> outstanding_data;
     bool has_rtt_measurement_tsn;
