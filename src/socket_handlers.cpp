@@ -19,7 +19,6 @@
 #include <vector>
 
 namespace {
-    // RFC 9260 3.3.10.6: the whole unrecognized chunk, unpadded.
     error_cause unrecognized_chunk_cause(const SCTP_Chunk& chunk) {
         const auto& body = std::get<unknown_chunk_value>(chunk.chunk_value).body;
         uint16_t length = static_cast<uint16_t>(SCTP_CHUNK_HEADER_SIZE + body.size());
@@ -360,9 +359,10 @@ void SCTP_Socket::send_error(
 }
 
 bool SCTP_Socket::handle_cookie_echo(
-        const SCTP_Common_Header& header,
-        const SCTP_Chunk& chunk,
-        const sockaddr_in& src) {
+    const SCTP_Common_Header& header,
+    const SCTP_Chunk& chunk,
+    const sockaddr_in& src
+) {
     const auto& echo = std::get<cookie_echo_chunk_value>(chunk.chunk_value);
 
     State_Cookie cookie{};
@@ -385,6 +385,7 @@ bool SCTP_Socket::handle_cookie_echo(
             return false;
         }
         associations.insert_or_assign(key, init_new_association(cookie, key));
+        notify_assoc_change(key, Assoc_Change_State::COMM_UP);
         send_cookie_ack(header, src, cookie.peer_ver_tag);
         return true;
     }
@@ -407,6 +408,7 @@ bool SCTP_Socket::handle_cookie_echo(
         // D
         if (tcb.state == COOKIE_ECHOED) {
             tcb.state = ESTABLISHED;
+            notify_assoc_change(key, Assoc_Change_State::COMM_UP);
         }
     } else if (!local_match && !peer_match && tie_tags_match) {
         // A: peer restart
@@ -415,11 +417,11 @@ bool SCTP_Socket::handle_cookie_echo(
             send_error(header, src, cookie.peer_ver_tag, {error_cause{CAUSE_COOKIE_WHILE_SHUTTING_DOWN, {}}});
             return false;
         }
-        // TODO: RESTART notification to the ULP once there is a notification API.
         std::cout << "Peer restarted, association reset" << std::endl;
         cancel_expirations(key);
         sends.purge(key);
         tcb = init_new_association(cookie, key);
+        notify_assoc_change(key, Assoc_Change_State::RESTART);
     } else if (local_match) {
         // B: collision, peer's tag is new or not yet known
         tcb.peer_ver_tag = cookie.peer_ver_tag;
@@ -427,6 +429,9 @@ bool SCTP_Socket::handle_cookie_echo(
         tcb.peer_rwnd = cookie.peer_a_rwnd;
         tcb.tsn_ooo_buffer.clear();
         tcb.duplicate_tsns.clear();
+        if (tcb.state == COOKIE_WAIT || tcb.state == COOKIE_ECHOED) {
+            notify_assoc_change(key, Assoc_Change_State::COMM_UP);
+        }
         tcb.state = ESTABLISHED;
     } else {
         // C, and anything not in the table
@@ -471,17 +476,24 @@ void SCTP_Socket::handle_error(const SCTP_Common_Header&, const SCTP_Chunk& chun
     }
 
     Association_Key assoc_key{src};
+    bool failed_start = false;
     {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
         auto it = associations.find(assoc_key);
-        if (it == associations.end() || it->second.state != COOKIE_ECHOED) {
-            return;
+        failed_start = stale_cookie && it != associations.end() && it->second.state == COOKIE_ECHOED;
+        // RFC 9260 3.3.10: at least one cause. Unknown codes are still passed up.
+        if (!failed_start && !error.causes.empty()) {
+            notifications.enqueue(Notification{Notification_Type::SCTP_REMOTE_ERROR, assoc_key, 0, Remote_Error{error.causes}});
         }
+    }
+    if (!failed_start) {
+        return;
     }
 
     // Neither alternative is implemented: no re-INIT, no Cookie Preservative.
     std::cout << "Association failed: peer reported a stale cookie" << std::endl;
     remove_association(assoc_key);
+    notify_assoc_change(assoc_key, Assoc_Change_State::CANT_STR_ASSOC);
 }
 
 void SCTP_Socket::handle_cookie_ack(const SCTP_Common_Header&, const SCTP_Chunk&, const sockaddr_in& src) {
@@ -494,6 +506,7 @@ void SCTP_Socket::handle_cookie_ack(const SCTP_Common_Header&, const SCTP_Chunk&
 
     Association& assoc = it->second;
     assoc.state = ESTABLISHED;
+    notify_assoc_change(assoc_key, Assoc_Change_State::COMM_UP);
     assoc_lock.unlock();
     cancel_expiration(
         Expiration_Key{assoc_key, Expiration_Timer_Type::T1_COOKIE});

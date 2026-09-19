@@ -40,6 +40,7 @@ void SCTP_Socket::handle_expiration(const Expiration_Fallback& fallback) {
         uint16_t& retransmits = is_init ? association->second.init_retransmits : association->second.cookie_retransmits;
         if (retransmits >= sctp_parameters::MAX_INIT_RETRANSMITS) {
             associations.erase(association);
+            notify_assoc_change(fallback.key.location, Assoc_Change_State::CANT_STR_ASSOC);
             exhausted = true;
         } else {
             ++retransmits;

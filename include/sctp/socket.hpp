@@ -7,6 +7,7 @@
 #include <sctp/expiration_queue.hpp>
 #include <sctp/send_queue.hpp>
 #include <sctp/cookie_auth.hpp>
+#include <sctp/notification_queue.hpp>
 
 #include <string_view>
 #include <string>
@@ -40,6 +41,8 @@ public:
     size_t sctp_recv_data_from(const sockaddr_in& association_id, std::vector<uint8_t>& buffer);
     size_t sctp_recv_data_from(const Association_Key& association_id, std::vector<uint8_t>& buffer);
     Association_Key get_this_association_key();
+    std::optional<Notification> sctp_recv_notification(int timeout_ms = 0);
+    void sctp_subscribe(Notification_Type type, bool on);
 
 private:
     std::atomic<bool> running{false};
@@ -52,6 +55,7 @@ private:
     std::mutex associations_mutex;
     Send_Queue sends;
     Expiration_Queue expirations;
+    Notification_Queue notifications;
     std::thread event_loop_thread;
     Cookie_Auth cookie_authorizer;
 
@@ -60,6 +64,7 @@ private:
     Association init_new_association(const Association_Key& key);
     Association init_new_association(const State_Cookie& cookie, const Association_Key& key);
     void remove_association(const Association_Key& key);
+    void notify_assoc_change(const Association_Key& key, Assoc_Change_State state);
     void run_expire();
     void run_sending();
     void run_receiving();

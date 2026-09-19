@@ -88,6 +88,7 @@ bool SCTP_Socket::sctp_run() {
 
 void SCTP_Socket::sctp_close() {
     running.store(false);
+    notifications.close();
     if (event_loop_thread.joinable()) {
         wake_event_loop();
         event_loop_thread.join();
@@ -195,6 +196,21 @@ void SCTP_Socket::remove_association(const Association_Key& key) {
     }
     cancel_expirations(key);
     sends.purge(key);
+}
+
+void SCTP_Socket::notify_assoc_change(const Association_Key& key, Assoc_Change_State state) {
+    notifications.enqueue(Notification{Notification_Type::SCTP_ASSOC_CHANGE, key, 0, Assoc_Change{state}});
+}
+
+std::optional<Notification> SCTP_Socket::sctp_recv_notification(int timeout_ms) {
+    if (timeout_ms <= 0) {
+        return notifications.dequeue();
+    }
+    return notifications.wait_dequeue(std::chrono::milliseconds(timeout_ms));
+}
+
+void SCTP_Socket::sctp_subscribe(Notification_Type type, bool on) {
+    notifications.set_subscribed(type, on);
 }
 
 int SCTP_Socket::await_established_association(const Association_Key& association_id, int timeout_ms) {
