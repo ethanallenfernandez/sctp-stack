@@ -18,6 +18,22 @@
 #include <stdexcept>
 #include <vector>
 
+namespace {
+    // RFC 9260 3.3.10.6: the whole unrecognized chunk, unpadded.
+    error_cause unrecognized_chunk_cause(const SCTP_Chunk& chunk) {
+        const auto& body = std::get<unknown_chunk_value>(chunk.chunk_value).body;
+        uint16_t length = static_cast<uint16_t>(SCTP_CHUNK_HEADER_SIZE + body.size());
+        std::vector<uint8_t> info{
+            static_cast<uint8_t>(chunk.chunk_header.type),
+            chunk.chunk_header.flag,
+            static_cast<uint8_t>(length >> 8),
+            static_cast<uint8_t>(length),
+        };
+        info.insert(info.end(), body.begin(), body.end());
+        return error_cause{CAUSE_UNRECOGNIZED_CHUNK, std::move(info)};
+    }
+}
+
 void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockaddr_in& src) {
     if (n < SCTP_COMMON_HEADER_SIZE) {
         return;
@@ -49,10 +65,23 @@ void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockad
         return;
     }
 
+    std::vector<error_cause> unrecognized;
+    for (auto it = in_pkt.chunks.begin(); it != in_pkt.chunks.end();) {
+        if (!std::holds_alternative<unknown_chunk_value>(it->chunk_value)) {
+            ++it;
+            continue;
+        }
+        uint8_t type = it->chunk_header.type;
+        if (type & 0x40) {
+            unrecognized.push_back(unrecognized_chunk_cause(*it));
+        }
+        it = (type & 0x80) ? in_pkt.chunks.erase(it) : in_pkt.chunks.erase(it, in_pkt.chunks.end());
+    }
+
     // A COOKIE ECHO skipped the tag check, so it gates the rest of the packet.
     // An accepted cookie proves the header tag: verify() matched it against the
     // cookie's local tag, which every accepting path leaves in the TCB.
-    bool carried_cookie_echo = in_pkt.chunks[0].chunk_header.type == COOKIE_ECHO;
+    bool carried_cookie_echo = !in_pkt.chunks.empty() && in_pkt.chunks[0].chunk_header.type == COOKIE_ECHO;
     if (carried_cookie_echo) {
         std::cout << "Recieved COOKIE_ECHO" << std::endl;
         if (!handle_cookie_echo(in_pkt.header, in_pkt.chunks[0], src)) {
@@ -92,6 +121,10 @@ void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockad
     // Once per packet, not per chunk: delayed-SACK counting is packet-granular.
     // DATA bundled with a COOKIE ECHO must skip the delayed-SACK timer.
     handle_data_packet(in_pkt, src, carried_cookie_echo);
+
+    if (!unrecognized.empty()) {
+        report_unrecognized_chunks(in_pkt.header, src, std::move(unrecognized));
+    }
 }
 
 bool SCTP_Socket::validate_verification_tag(const SCTP_Packet& pkt, const sockaddr_in& src) {
@@ -113,6 +146,35 @@ bool SCTP_Socket::validate_verification_tag(const SCTP_Packet& pkt, const sockad
     std::lock_guard<std::mutex> assoc_lock(associations_mutex);
     auto it = associations.find(Association_Key{src});
     return it != associations.end() && pkt.header.verification_tag == it->second.this_ver_tag;
+}
+
+// After dispatch: a bundled COOKIE ECHO may have created the TCB. COOKIE_WAIT
+// has no peer tag to address the report with.
+void SCTP_Socket::report_unrecognized_chunks(const SCTP_Common_Header& header, const sockaddr_in& src, std::vector<error_cause> causes) {
+    uint32_t peer_tag;
+    size_t budget;
+    {
+        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+        auto it = associations.find(Association_Key{src});
+        if (it == associations.end() || it->second.state == COOKIE_WAIT) {
+            return;
+        }
+        peer_tag = it->second.peer_ver_tag;
+        budget = it->second.pmdcs;
+    }
+
+    size_t size = SCTP_CHUNK_HEADER_SIZE;
+    auto fits = causes.begin();
+    for (; fits != causes.end(); ++fits) {
+        size += (SCTP_CHUNK_HEADER_SIZE + fits->info.size() + 3) & ~size_t{3};
+        if (size > budget) {
+            break;
+        }
+    }
+    causes.erase(fits, causes.end());
+    if (!causes.empty()) {
+        send_error(header, src, peer_tag, std::move(causes));
+    }
 }
 
 void SCTP_Socket::handle_init(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src) {
@@ -252,7 +314,7 @@ void SCTP_Socket::send_cookie_ack(const SCTP_Common_Header& header, const sockad
             .flag = 0,
             .length = 0   // recomputed by serialize_chunk
         },
-        .chunk_value = cookie_ack_chunk_value {}
+        .chunk_value = empty_chunk_value {}
     });
 
     enqueue_packet(Deliverable{src, std::move(cookie_ack_packet)});
@@ -269,22 +331,21 @@ void SCTP_Socket::send_stale_cookie_error(
         static_cast<uint8_t>(staleness_us >> 8),
         static_cast<uint8_t>(staleness_us),
     };
-    send_error(header, src, cookie.peer_ver_tag, error_cause{CAUSE_STALE_COOKIE, std::move(staleness)});
+    send_error(header, src, cookie.peer_ver_tag, {error_cause{CAUSE_STALE_COOKIE, std::move(staleness)}});
 }
 
 void SCTP_Socket::send_error(
         const SCTP_Common_Header& header,
         const sockaddr_in& src,
         uint32_t peer_tag,
-        error_cause cause) {
+        std::vector<error_cause> causes) {
     SCTP_Packet error_packet;
 
     error_packet.header.src_port = header.des_port;
     error_packet.header.des_port = header.src_port;
     error_packet.header.verification_tag = peer_tag;
 
-    error_chunk_value error;
-    error.causes.push_back(std::move(cause));
+    error_chunk_value error{std::move(causes)};
 
     error_packet.chunks.push_back(SCTP_Chunk{
         .chunk_header = {
@@ -351,7 +412,7 @@ bool SCTP_Socket::handle_cookie_echo(
         // A: peer restart
         if (tcb.state == SHUTDOWN_ACK_SENT) {
             // TODO: also resend SHUTDOWN ACK. Needs Tier 3 shutdown.
-            send_error(header, src, cookie.peer_ver_tag, error_cause{CAUSE_COOKIE_WHILE_SHUTTING_DOWN, {}});
+            send_error(header, src, cookie.peer_ver_tag, {error_cause{CAUSE_COOKIE_WHILE_SHUTTING_DOWN, {}}});
             return false;
         }
         // TODO: RESTART notification to the ULP once there is a notification API.
@@ -391,8 +452,22 @@ void SCTP_Socket::handle_error(const SCTP_Common_Header&, const SCTP_Chunk& chun
             return cause.code == CAUSE_STALE_COOKIE;
         }
     );
-    if (!stale_cookie) {
-        return;
+
+    for (const auto& cause : error.causes) {
+        switch (cause.code) {
+            case CAUSE_STALE_COOKIE:
+                std::cout << "Peer reported a stale cookie" << std::endl;
+                break;
+            case CAUSE_UNRECOGNIZED_CHUNK:
+                std::cout << "Peer reported an unrecognized chunk" << std::endl;
+                break;
+            case CAUSE_COOKIE_WHILE_SHUTTING_DOWN:
+                std::cout << "Peer reported a COOKIE ECHO while shutting down" << std::endl;
+                break;
+            default:
+                std::cout << "Peer reported an error cause: " << cause.code << std::endl;
+                break;
+        }
     }
 
     Association_Key assoc_key{src};

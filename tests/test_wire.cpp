@@ -9,6 +9,7 @@
 #include "serialize.hpp"
 #include <sctp/sctp.hpp>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
@@ -62,7 +63,7 @@ static void test_common_header_is_big_endian() {
     pkt.header.checksum = 0;
     pkt.chunks.push_back(SCTP_Chunk{
         .chunk_header = { .type = COOKIE_ACK, .flag = 0, .length = 0 },
-        .chunk_value = cookie_ack_chunk_value{}
+        .chunk_value = empty_chunk_value{}
     });
 
     std::vector<uint8_t> w = serialize_sctp_packet(pkt);
@@ -89,7 +90,7 @@ static void test_checksum_field_is_little_endian() {
     pkt.header.verification_tag = 3;
     pkt.chunks.push_back(SCTP_Chunk{
         .chunk_header = { .type = COOKIE_ACK, .flag = 0, .length = 0 },
-        .chunk_value = cookie_ack_chunk_value{}
+        .chunk_value = empty_chunk_value{}
     });
 
     std::vector<uint8_t> w = serialize_sctp_packet(pkt);
@@ -307,6 +308,128 @@ static void test_malformed_input_is_rejected() {
     check(throws(c), "chunk length beyond datagram rejected");
 }
 
+static std::vector<uint8_t> packet_with(SCTP_Chunk chunk) {
+    SCTP_Packet pkt;
+    pkt.header = {1, 2, 0x01020304, 0};
+    pkt.chunks.push_back(std::move(chunk));
+    return serialize_sctp_packet(pkt);
+}
+
+static bool bytes_at(const std::vector<uint8_t>& w, size_t at, const std::vector<uint8_t>& want) {
+    return w.size() >= at + want.size() && std::equal(want.begin(), want.end(), w.begin() + at);
+}
+
+static void test_shutdown_family_wire_layout() {
+    std::printf("SHUTDOWN / SHUTDOWN ACK / SHUTDOWN COMPLETE (RFC 9260 3.3.8, 3.3.9, 3.3.13):\n");
+
+    auto w = packet_with({{SHUTDOWN, 0, 0}, shutdown_chunk_value{0xCAFEBABE}});
+    check(w.size() == 20, "SHUTDOWN packet is 12 + 8 bytes");
+    check(bytes_at(w, 12, {7, 0, 0x00, 0x08, 0xCA, 0xFE, 0xBA, 0xBE}),
+          "SHUTDOWN: type 7, length 8, Cumulative TSN Ack big-endian");
+    auto back = deserialize_sctp_packet(w.data(), w.size());
+    check_eq_u32(std::get<shutdown_chunk_value>(back.chunks[0].chunk_value).cumulative_tsn_ack,
+                 0xCAFEBABE, "SHUTDOWN Cumulative TSN Ack round-trip");
+
+    w = packet_with({{SHUTDOWN_ACK, 0, 0}, empty_chunk_value{}});
+    check(w.size() == 16 && bytes_at(w, 12, {8, 0, 0x00, 0x04}), "SHUTDOWN ACK: type 8, length 4");
+
+    w = packet_with({{SHUTDOWN_COMPLETE, CHUNK_FLAG_T_BIT, 0}, empty_chunk_value{}});
+    check(w.size() == 16 && bytes_at(w, 12, {14, 0x01, 0x00, 0x04}),
+          "SHUTDOWN COMPLETE: type 14, T bit in flags bit 0, length 4");
+    back = deserialize_sctp_packet(w.data(), w.size());
+    check(back.chunks[0].chunk_header.type == SHUTDOWN_COMPLETE
+              && back.chunks[0].chunk_header.flag == CHUNK_FLAG_T_BIT
+              && std::holds_alternative<empty_chunk_value>(back.chunks[0].chunk_value),
+          "SHUTDOWN COMPLETE decodes with T bit");
+
+    std::vector<uint8_t> bad = {0, 1, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0x00, 0x06, 0xAA, 0xBB};
+    bool threw = false;
+    try { deserialize_sctp_packet(bad.data(), bad.size()); } catch (const std::exception&) { threw = true; }
+    check(threw, "SHUTDOWN with a 2-byte body is rejected");
+}
+
+static void test_abort_wire_layout() {
+    std::printf("ABORT (RFC 9260 3.3.7):\n");
+
+    error_chunk_value causes;
+    causes.causes.push_back({CAUSE_USER_INITIATED_ABORT, {'b', 'y', 'e'}});
+    auto w = packet_with({{ABORT, CHUNK_FLAG_T_BIT, 0}, causes});
+    // 4 chunk header + cause (4 header + 3 reason = 7, padded to 8) = 12; the
+    // cause padding is inside the chunk, so it counts toward Chunk Length.
+    check(w.size() == 24, "ABORT with a 3-byte reason is 12 + 12 bytes");
+    check(bytes_at(w, 12, {6, 0x01, 0x00, 0x0C, 0x00, 0x0C, 0x00, 0x07, 'b', 'y', 'e', 0}),
+          "ABORT: type 6, T bit, length 12, cause 12 length 7, padded");
+
+    auto back = deserialize_sctp_packet(w.data(), w.size());
+    const auto& decoded = std::get<error_chunk_value>(back.chunks[0].chunk_value);
+    check(back.chunks[0].chunk_header.type == ABORT && decoded.causes.size() == 1
+              && decoded.causes[0].code == CAUSE_USER_INITIATED_ABORT
+              && decoded.causes[0].info == std::vector<uint8_t>{'b', 'y', 'e'},
+          "ABORT cause round-trip");
+
+    w = packet_with({{ABORT, 0, 0}, error_chunk_value{}});
+    check(w.size() == 16 && bytes_at(w, 12, {6, 0, 0x00, 0x04}), "ABORT with no causes is length 4");
+    back = deserialize_sctp_packet(w.data(), w.size());
+    check(std::get<error_chunk_value>(back.chunks[0].chunk_value).causes.empty(), "empty ABORT decodes");
+}
+
+static void test_heartbeat_wire_layout() {
+    std::printf("HEARTBEAT / HEARTBEAT ACK (RFC 9260 3.3.5, 3.3.6):\n");
+
+    std::vector<uint8_t> info = {0xDE, 0xAD, 0xBE, 0xEF, 0x42};
+    auto w = packet_with({{HEARTBEAT, 0, 0}, heartbeat_chunk_value{info}});
+    // 4 chunk header + param (4 header + 5 info = 9, padded to 12) = 16.
+    check(w.size() == 28, "HEARTBEAT with 5-byte info is 12 + 16 bytes");
+    check(bytes_at(w, 12, {4, 0, 0x00, 0x10, 0x00, 0x01, 0x00, 0x09, 0xDE, 0xAD, 0xBE, 0xEF, 0x42, 0, 0, 0}),
+          "HEARTBEAT: type 4, Heartbeat Info param type 1, length 9, padded");
+
+    auto back = deserialize_sctp_packet(w.data(), w.size());
+    check(std::get<heartbeat_chunk_value>(back.chunks[0].chunk_value).info == info,
+          "Heartbeat Info round-trip, padding stripped");
+
+    w = packet_with({{HEARTBEAT_ACK, 0, 0}, heartbeat_chunk_value{info}});
+    check(w[12] == 5, "HEARTBEAT ACK: type 5");
+    back = deserialize_sctp_packet(w.data(), w.size());
+    check(std::get<heartbeat_chunk_value>(back.chunks[0].chunk_value).info == info,
+          "HEARTBEAT ACK info round-trip");
+
+    // Parameter of type 2 instead of Heartbeat Info.
+    std::vector<uint8_t> bad = {0, 1, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0x00, 0x08, 0x00, 0x02, 0x00, 0x04};
+    bool threw = false;
+    try { deserialize_sctp_packet(bad.data(), bad.size()); } catch (const std::exception&) { threw = true; }
+    check(threw, "HEARTBEAT without Heartbeat Info is rejected");
+}
+
+static void test_unknown_chunk_is_preserved() {
+    std::printf("Unrecognized chunk types (RFC 9260 3.2):\n");
+
+    // Type 0xC5 (upper bits 11: skip and report), odd-length body, followed by
+    // a SHUTDOWN ACK that must still be parsed.
+    std::vector<uint8_t> w = {0, 1, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0,
+                              0xC5, 0x3C, 0x00, 0x07, 0xAA, 0xBB, 0xCC, 0x00,
+                              8, 0, 0x00, 0x04};
+    SCTP_Packet back;
+    bool threw = false;
+    try { back = deserialize_sctp_packet(w.data(), w.size()); } catch (const std::exception&) { threw = true; }
+    check(!threw && back.chunks.size() == 2, "unknown chunk does not abort parsing");
+    if (back.chunks.size() == 2) {
+        const auto& unknown = back.chunks[0];
+        check(unknown.chunk_header.type == 0xC5 && unknown.chunk_header.flag == 0x3C
+                  && unknown.chunk_header.length == 7,
+              "unknown chunk header preserved");
+        check(std::get<unknown_chunk_value>(unknown.chunk_value).body == std::vector<uint8_t>{0xAA, 0xBB, 0xCC},
+              "unknown chunk body preserved, padding stripped");
+        check(back.chunks[1].chunk_header.type == SHUTDOWN_ACK, "chunk after it still parsed");
+
+        SCTP_Packet again;
+        again.header = back.header;
+        again.chunks = back.chunks;
+        std::vector<uint8_t> rw = serialize_sctp_packet(again);
+        check(bytes_at(rw, 12, {0xC5, 0x3C, 0x00, 0x07, 0xAA, 0xBB, 0xCC, 0x00, 8, 0, 0x00, 0x04}),
+              "unknown chunk re-serializes byte for byte");
+    }
+}
+
 int main() {
     test_crc32c_check_vector();
     test_common_header_is_big_endian();
@@ -316,6 +439,10 @@ int main() {
     test_sack_deserialization_replaces_existing_value();
     test_sack_count_mismatch_is_rejected();
     test_malformed_input_is_rejected();
+    test_shutdown_family_wire_layout();
+    test_abort_wire_layout();
+    test_heartbeat_wire_layout();
+    test_unknown_chunk_is_preserved();
 
     std::printf("\n%s (%d failure%s)\n",
                 failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",

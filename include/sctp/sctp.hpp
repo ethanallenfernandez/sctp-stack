@@ -55,7 +55,10 @@ enum Chunk_Type : uint8_t {
     SHUTDOWN_COMPLETE = 14,
 };
 
+constexpr uint8_t CHUNK_FLAG_T_BIT = 0x01;   // ABORT, SHUTDOWN COMPLETE: tag is reflected
+
 enum Param_Type : uint16_t {
+    PARAM_HEARTBEAT_INFO = 1,
     PARAM_IPV4_ADDRESS = 5,
     PARAM_IPV6_ADDRESS = 6,
     PARAM_STATE_COOKIE = 7,
@@ -64,8 +67,19 @@ enum Param_Type : uint16_t {
 };
 
 enum Error_Cause_Code : uint16_t {
+    CAUSE_INVALID_STREAM_ID = 1,
+    CAUSE_MISSING_MANDATORY_PARAM = 2,
     CAUSE_STALE_COOKIE = 3,
+    CAUSE_OUT_OF_RESOURCE = 4,
+    CAUSE_UNRESOLVABLE_ADDRESS = 5,
+    CAUSE_UNRECOGNIZED_CHUNK = 6,
+    CAUSE_INVALID_MANDATORY_PARAM = 7,
+    CAUSE_UNRECOGNIZED_PARAMS = 8,
+    CAUSE_NO_USER_DATA = 9,
     CAUSE_COOKIE_WHILE_SHUTTING_DOWN = 10,
+    CAUSE_RESTART_WITH_NEW_ADDRESSES = 11,
+    CAUSE_USER_INITIATED_ABORT = 12,
+    CAUSE_PROTOCOL_VIOLATION = 13,
 };
 
 struct init_chunk_value {
@@ -103,13 +117,29 @@ struct cookie_echo_chunk_value {
     std::vector<uint8_t> cookie_data;
 };
 
-struct cookie_ack_chunk_value {};
+// COOKIE ACK, SHUTDOWN ACK, SHUTDOWN COMPLETE.
+struct empty_chunk_value {};
+
+struct shutdown_chunk_value {
+    uint32_t cumulative_tsn_ack;
+};
+
+// HEARTBEAT and HEARTBEAT ACK: the Heartbeat Info parameter's value, echoed verbatim.
+struct heartbeat_chunk_value {
+    std::vector<uint8_t> info;
+};
+
+// Body of a chunk type we do not implement; header fields stay in SCTP_Chunk_Header.
+struct unknown_chunk_value {
+    std::vector<uint8_t> body;
+};
 
 struct error_cause {
     uint16_t code;
     std::vector<uint8_t> info;
 };
 
+// ERROR and ABORT.
 struct error_chunk_value {
     std::vector<error_cause> causes;
 };
@@ -152,10 +182,13 @@ struct SCTP_Chunk_Header {
 using Chunk_Value_Type = std::variant<
     init_chunk_value, 
     cookie_echo_chunk_value,
-    cookie_ack_chunk_value, 
+    empty_chunk_value,
     data_chunk_value,
     sack_chunk_value,
-    error_chunk_value
+    error_chunk_value,
+    shutdown_chunk_value,
+    heartbeat_chunk_value,
+    unknown_chunk_value
 >;
 
 struct SCTP_Chunk {

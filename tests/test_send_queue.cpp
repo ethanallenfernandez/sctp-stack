@@ -250,7 +250,7 @@ static void test_send_priority_order() {
             .flag = 0,
             .length = 0,
         },
-        .chunk_value = cookie_ack_chunk_value{},
+        .chunk_value = empty_chunk_value{},
     });
     SCTP_Socket_Test_Access::enqueue(
         stack, Deliverable{key, std::move(control)},

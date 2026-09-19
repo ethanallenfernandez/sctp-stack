@@ -160,7 +160,7 @@ struct RawPeer {
                 .flag = 0,
                 .length = 0,
             },
-            .chunk_value = cookie_ack_chunk_value{},
+            .chunk_value = empty_chunk_value{},
         });
         send(cookie_ack);
 

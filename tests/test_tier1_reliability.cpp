@@ -249,7 +249,7 @@ struct RawPeer {
         SCTP_Packet ack = packet(COOKIE_ACK);
         ack.chunks.push_back(SCTP_Chunk{
             .chunk_header = {.type = COOKIE_ACK, .flag = 0, .length = 0},
-            .chunk_value = cookie_ack_chunk_value{}});
+            .chunk_value = empty_chunk_value{}});
         send(ack);
     }
 

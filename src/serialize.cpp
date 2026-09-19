@@ -245,9 +245,21 @@ void deserialize_chunk_value(
             out = std::move(v);
             break;
         }
-        case COOKIE_ACK: {
-            cookie_ack_chunk_value v;
-            deserialize_cookie_ack_chunk(data, len, v);
+        case COOKIE_ACK:
+        case SHUTDOWN_ACK:
+        case SHUTDOWN_COMPLETE:
+            out = empty_chunk_value{};
+            break;
+        case SHUTDOWN: {
+            shutdown_chunk_value v;
+            deserialize_shutdown_chunk(data, len, v);
+            out = v;
+            break;
+        }
+        case HEARTBEAT:
+        case HEARTBEAT_ACK: {
+            heartbeat_chunk_value v;
+            deserialize_heartbeat_chunk(data, len, v);
             out = std::move(v);
             break;
         }
@@ -263,14 +275,17 @@ void deserialize_chunk_value(
             out = std::move(v);
             break;
         }
-        case OP_ERROR: {
+        case OP_ERROR:
+        case ABORT: {
             error_chunk_value v;
             deserialize_error_chunk(data, len, v);
             out = std::move(v);
             break;
         }
         default:
-            throw std::runtime_error("unsupported chunk type");
+            // RFC 9260 3.2: the upper two type bits decide; the dispatcher acts on them.
+            out = unknown_chunk_value{std::vector<uint8_t>(data, data + len)};
+            break;
     }
 }
 
@@ -291,11 +306,15 @@ void deserialize_cookie_echo_chunk(const uint8_t* data, size_t len, cookie_echo_
     out.cookie_data.assign(data, data + len);
 }
 
-void deserialize_cookie_ack_chunk(const uint8_t* data, size_t len, cookie_ack_chunk_value& out) {
-    // COOKIE_ACK has no payload
-    (void)data;
-    (void)len;
-    (void)out;
+void deserialize_shutdown_chunk(const uint8_t* data, size_t len, shutdown_chunk_value& out) {
+    if (len != 4)
+        throw std::runtime_error("SHUTDOWN chunk has wrong length");
+    out.cumulative_tsn_ack = read32(data);
+}
+
+void deserialize_heartbeat_chunk(const uint8_t* data, size_t len, heartbeat_chunk_value& out) {
+    if (!find_parameter(std::vector<uint8_t>(data, data + len), PARAM_HEARTBEAT_INFO, out.info))
+        throw std::runtime_error("HEARTBEAT chunk has no Heartbeat Info parameter");
 }
 
 void deserialize_error_chunk(const uint8_t* data, size_t len, error_chunk_value& out) {
@@ -409,9 +428,21 @@ void serialize_chunk(const SCTP_Chunk& chunk, std::vector<uint8_t>& out) {
             serialize_cookie_echo_chunk(std::get<cookie_echo_chunk_value>(chunk.chunk_value), out);
             break;
         case COOKIE_ACK:
-            serialize_cookie_ack_chunk(std::get<cookie_ack_chunk_value>(chunk.chunk_value), out);
+        case SHUTDOWN_ACK:
+        case SHUTDOWN_COMPLETE:
+            (void)std::get<empty_chunk_value>(chunk.chunk_value);
             break;
+        case SHUTDOWN:
+            append32(out, std::get<shutdown_chunk_value>(chunk.chunk_value).cumulative_tsn_ack);
+            break;
+        case HEARTBEAT:
+        case HEARTBEAT_ACK: {
+            const auto& info = std::get<heartbeat_chunk_value>(chunk.chunk_value).info;
+            append_parameter(out, PARAM_HEARTBEAT_INFO, info.data(), info.size());
+            break;
+        }
         case OP_ERROR:
+        case ABORT:
             serialize_error_chunk(std::get<error_chunk_value>(chunk.chunk_value), out);
             break;
         case DATA:
@@ -420,8 +451,12 @@ void serialize_chunk(const SCTP_Chunk& chunk, std::vector<uint8_t>& out) {
         case SACK:
             serialize_sack_chunk(std::get<sack_chunk_value>(chunk.chunk_value), out);
             break;
-        default:
-            throw std::runtime_error("unsupported chunk type");
+        default: {
+            // Lets tests and cause-6 reports put an arbitrary chunk on the wire.
+            const auto& body = std::get<unknown_chunk_value>(chunk.chunk_value).body;
+            out.insert(out.end(), body.begin(), body.end());
+            break;
+        }
     }
 
     // Chunk Length covers the header and body but excludes trailing padding.
@@ -451,12 +486,6 @@ void serialize_init_chunk(const init_chunk_value& v, std::vector<uint8_t>& out) 
 
 void serialize_cookie_echo_chunk(const cookie_echo_chunk_value& v, std::vector<uint8_t>& out) {
     out.insert(out.end(), v.cookie_data.begin(), v.cookie_data.end());
-}
-
-void serialize_cookie_ack_chunk(const cookie_ack_chunk_value& v, std::vector<uint8_t>& out) {
-    // COOKIE_ACK has no payload
-    (void)v;
-    (void)out;
 }
 
 void serialize_error_chunk(const error_chunk_value& v, std::vector<uint8_t>& out) {
