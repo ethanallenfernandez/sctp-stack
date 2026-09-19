@@ -154,9 +154,7 @@ Association SCTP_Socket::init_new_association(const Association_Key& key) {
     result.primary_path = key.address;
     result.state = COOKIE_WAIT;
 
-    do {
-        generate_random(result.this_ver_tag);
-    } while (result.this_ver_tag == 0); // 0 tag reserved by INIT
+    result.this_ver_tag = generate_nonzero_tag();
     generate_random(result.next_tsn);
     result.cumulative_tsn_ack = result.next_tsn - 1;
     result.rto = sctp_parameters::RTO_INITIAL;
@@ -175,8 +173,6 @@ Association SCTP_Socket::init_new_association(const State_Cookie& cookie, const 
 
     result.this_ver_tag = cookie.local_ver_tag;
     result.peer_ver_tag = cookie.peer_ver_tag;
-    result.local_tie_tag = cookie.local_tie_tag;
-    result.peer_tie_tag = cookie.peer_tie_tag;
     result.next_tsn = cookie.local_initial_tsn;
     result.cumulative_tsn_ack = cookie.local_initial_tsn - 1;
     result.last_peer_tsn = cookie.peer_initial_tsn - 1;

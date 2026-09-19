@@ -49,8 +49,18 @@ void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockad
         return;
     }
 
-    bool carried_cookie_echo = false;
-    for (size_t i{}; i < in_pkt.chunks.size(); i++) {
+    // A COOKIE ECHO skipped the tag check, so it gates the rest of the packet.
+    // An accepted cookie proves the header tag: verify() matched it against the
+    // cookie's local tag, which every accepting path leaves in the TCB.
+    bool carried_cookie_echo = in_pkt.chunks[0].chunk_header.type == COOKIE_ECHO;
+    if (carried_cookie_echo) {
+        std::cout << "Recieved COOKIE_ECHO" << std::endl;
+        if (!handle_cookie_echo(in_pkt.header, in_pkt.chunks[0], src)) {
+            return;
+        }
+    }
+
+    for (size_t i = carried_cookie_echo ? 1 : 0; i < in_pkt.chunks.size(); i++) {
         switch(in_pkt.chunks[i].chunk_header.type) {
             case INIT:
                 std::cout << "Recieved INIT" << std::endl;
@@ -60,18 +70,12 @@ void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockad
                 std::cout << "Recieved INIT_ACK" << std::endl;
                 SCTP_Socket::handle_init_ack(in_pkt.header, in_pkt.chunks[i], src);
                 break;
-            case COOKIE_ECHO:
-                std::cout << "Recieved COOKIE_ECHO" << std::endl;
-                carried_cookie_echo = true;
-                SCTP_Socket::handle_cookie_echo(in_pkt.header, in_pkt.chunks[i], src);
-                break;
             case COOKIE_ACK:
                 std::cout << "Recieved COOKIE_ACK" << std::endl;
                 SCTP_Socket::handle_cookie_ack(in_pkt.header, in_pkt.chunks[i], src);
                 break;
             case DATA:
                 std::cout << "Recieved DATA" << std::endl;
-                SCTP_Socket::handle_data_packet(in_pkt, src, carried_cookie_echo);
                 break;
             case SACK:
                 std::cout << "Recieved SACK" << std::endl;
@@ -85,7 +89,8 @@ void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockad
                 break;
         }
     }
-    // Bundled DATA must skip the delayed-SACK timer.
+    // Once per packet, not per chunk: delayed-SACK counting is packet-granular.
+    // DATA bundled with a COOKIE ECHO must skip the delayed-SACK timer.
     handle_data_packet(in_pkt, src, carried_cookie_echo);
 }
 
@@ -98,39 +103,51 @@ bool SCTP_Socket::validate_verification_tag(const SCTP_Packet& pkt, const sockad
         return pkt.header.verification_tag == 0 && pkt.chunks.size() == 1;
     }
 
+    // 8.5.1 D: a restarting or colliding peer echoes under a tag the live TCB
+    // does not hold, so the cookie is checked instead. handle_recv_packet drops
+    // everything bundled behind it unless the cookie is accepted.
+    if (pkt.chunks[0].chunk_header.type == COOKIE_ECHO) {
+        return true;
+    }
+
     std::lock_guard<std::mutex> assoc_lock(associations_mutex);
     auto it = associations.find(Association_Key{src});
-
-    // This runs once per packet, not per chunk, so the COOKIE ECHO exemption
-    // must be confined to the no-TCB case. Extending it to a live association
-    // would let anything bundled behind a junk COOKIE ECHO through unchecked.
-    //
-    // TODO: a restarting peer echoes under a new tag, which this rejects.
-    // Needs the tie-tag table.
-    if (it == associations.end()) {
-        return pkt.chunks[0].chunk_header.type == COOKIE_ECHO;
-    }
-    return pkt.header.verification_tag == it->second.this_ver_tag;
+    return it != associations.end() && pkt.header.verification_tag == it->second.this_ver_tag;
 }
 
 void SCTP_Socket::handle_init(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src) {
     const auto& init = std::get<init_chunk_value>(chunk.chunk_value);
 
-    uint32_t local_tag;
-    do {
-        generate_random(local_tag);
-    } while (local_tag == 0); // 0 tag reserved by INIT
+    uint32_t local_tag = generate_nonzero_tag();
     uint32_t local_tsn;
     generate_random(local_tsn);
-
     uint32_t local_tie_tag = 0;
     uint32_t peer_tie_tag = 0;
     {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
         auto existing = associations.find(Association_Key{src});
         if (existing != associations.end()) {
-            local_tie_tag = existing->second.this_ver_tag;
-            peer_tie_tag = existing->second.peer_ver_tag;
+            Association& assoc = existing->second;
+
+            switch (assoc.state) {
+                case SHUTDOWN_ACK_SENT:
+                    return;
+                case COOKIE_WAIT:
+                case COOKIE_ECHOED:
+                    local_tag = assoc.this_ver_tag;
+                    local_tsn = assoc.next_tsn;
+                    if (assoc.state == COOKIE_WAIT) {
+                        break;
+                    }
+                    [[fallthrough]];
+                default:
+                    if (assoc.local_tie_tag == 0) {
+                        assoc.local_tie_tag = generate_nonzero_tag();
+                        assoc.peer_tie_tag = generate_nonzero_tag();
+                    }
+                    local_tie_tag = assoc.local_tie_tag;
+                    peer_tie_tag = assoc.peer_tie_tag;
+            }
         }
     }
 
@@ -246,21 +263,28 @@ void SCTP_Socket::send_stale_cookie_error(
         const sockaddr_in& src,
         const State_Cookie& cookie,
         uint32_t staleness_us) {
-    SCTP_Packet error_packet;
-
-    error_packet.header.src_port = header.des_port;
-    error_packet.header.des_port = header.src_port;
-    error_packet.header.verification_tag = cookie.peer_ver_tag;
-
     std::vector<uint8_t> staleness{
         static_cast<uint8_t>(staleness_us >> 24),
         static_cast<uint8_t>(staleness_us >> 16),
         static_cast<uint8_t>(staleness_us >> 8),
         static_cast<uint8_t>(staleness_us),
     };
+    send_error(header, src, cookie.peer_ver_tag, error_cause{CAUSE_STALE_COOKIE, std::move(staleness)});
+}
+
+void SCTP_Socket::send_error(
+        const SCTP_Common_Header& header,
+        const sockaddr_in& src,
+        uint32_t peer_tag,
+        error_cause cause) {
+    SCTP_Packet error_packet;
+
+    error_packet.header.src_port = header.des_port;
+    error_packet.header.des_port = header.src_port;
+    error_packet.header.verification_tag = peer_tag;
 
     error_chunk_value error;
-    error.causes.push_back(error_cause{CAUSE_STALE_COOKIE, std::move(staleness)});
+    error.causes.push_back(std::move(cause));
 
     error_packet.chunks.push_back(SCTP_Chunk{
         .chunk_header = {
@@ -274,7 +298,7 @@ void SCTP_Socket::send_stale_cookie_error(
     enqueue_packet(Deliverable{src, std::move(error_packet)});
 }
 
-void SCTP_Socket::handle_cookie_echo(
+bool SCTP_Socket::handle_cookie_echo(
         const SCTP_Common_Header& header,
         const SCTP_Chunk& chunk,
         const sockaddr_in& src) {
@@ -283,39 +307,78 @@ void SCTP_Socket::handle_cookie_echo(
     State_Cookie cookie{};
     uint32_t staleness_us = 0;
     Cookie_Result result = cookie_authorizer.verify(echo.cookie_data, header, src, cookie, staleness_us);
-
-    if (result == Cookie_Result::STALE) {
-        std::cout << "Dropped stale COOKIE_ECHO" << std::endl;
-        send_stale_cookie_error(header, src, cookie, staleness_us);
-        return;
-    }
-    if (result != Cookie_Result::VALID) {
+    if (result != Cookie_Result::VALID && result != Cookie_Result::STALE) {
         std::cout << "Dropped COOKIE_ECHO with an unverifiable cookie" << std::endl;
-        return;
+        return false;
     }
 
-    Association_Key assoc_key{src};
-    uint32_t peer_tag = cookie.peer_ver_tag;
-    {
-        std::unique_lock<std::mutex> assoc_lock(associations_mutex);
-        auto it = associations.find(assoc_key);
-
-        if (it == associations.end()) {
-            associations.insert_or_assign(assoc_key, init_new_association(cookie, assoc_key));
-        } else if (cookie.local_ver_tag == it->second.this_ver_tag
-                && cookie.peer_ver_tag == it->second.peer_ver_tag) {
-            if (it->second.state == COOKIE_ECHOED) {
-                it->second.state = ESTABLISHED;
-            }
-            assoc_lock.unlock();
-            cancel_expiration(Expiration_Key{assoc_key, Expiration_Timer_Type::T1_COOKIE});
-            sends.remove_retransmissions_of_type(assoc_key, COOKIE_ECHO);
-        } else {
-            std::cout << "Dropped COOKIE_ECHO that does not match the existing association" << std::endl;
-            return;
+    // Send and expiration queue locks are leaves, so it is safe to touch them
+    // here. Holding the lock through a restart's purge keeps an API-thread send
+    // on the new association from being purged with the old one's packets.
+    Association_Key key{src};
+    std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+    auto it = associations.find(key);
+    if (it == associations.end()) {
+        if (result == Cookie_Result::STALE) {
+            send_stale_cookie_error(header, src, cookie, staleness_us);
+            return false;
         }
+        associations.insert_or_assign(key, init_new_association(cookie, key));
+        send_cookie_ack(header, src, cookie.peer_ver_tag);
+        return true;
     }
-    send_cookie_ack(header, src, peer_tag);
+
+    // RFC 9260 5.2.4, Table 12. A zero Tie-Tag means "none" and never matches.
+    Association& tcb = it->second;
+    bool local_match = cookie.local_ver_tag == tcb.this_ver_tag;
+    bool peer_match = cookie.peer_ver_tag == tcb.peer_ver_tag;
+    bool tie_tags_match = cookie.local_tie_tag != 0
+        && cookie.local_tie_tag == tcb.local_tie_tag
+        && cookie.peer_tie_tag == tcb.peer_tie_tag;
+
+    // Step 3: a stale cookie whose tags both match is a retransmission (case E).
+    if (result == Cookie_Result::STALE && !(local_match && peer_match)) {
+        send_stale_cookie_error(header, src, cookie, staleness_us);
+        return false;
+    }
+
+    if (local_match && peer_match) {
+        // D
+        if (tcb.state == COOKIE_ECHOED) {
+            tcb.state = ESTABLISHED;
+        }
+    } else if (!local_match && !peer_match && tie_tags_match) {
+        // A: peer restart
+        if (tcb.state == SHUTDOWN_ACK_SENT) {
+            // TODO: also resend SHUTDOWN ACK. Needs Tier 3 shutdown.
+            send_error(header, src, cookie.peer_ver_tag, error_cause{CAUSE_COOKIE_WHILE_SHUTTING_DOWN, {}});
+            return false;
+        }
+        // TODO: RESTART notification to the ULP once there is a notification API.
+        std::cout << "Peer restarted, association reset" << std::endl;
+        cancel_expirations(key);
+        sends.purge(key);
+        tcb = init_new_association(cookie, key);
+    } else if (local_match) {
+        // B: collision, peer's tag is new or not yet known
+        tcb.peer_ver_tag = cookie.peer_ver_tag;
+        tcb.last_peer_tsn = cookie.peer_initial_tsn - 1;
+        tcb.peer_rwnd = cookie.peer_a_rwnd;
+        tcb.tsn_ooo_buffer.clear();
+        tcb.duplicate_tsns.clear();
+        tcb.state = ESTABLISHED;
+    } else {
+        // C, and anything not in the table
+        std::cout << "Dropped COOKIE_ECHO that does not match the existing association" << std::endl;
+        return false;
+    }
+
+    cancel_expiration(Expiration_Key{key, Expiration_Timer_Type::T1_INIT});
+    cancel_expiration(Expiration_Key{key, Expiration_Timer_Type::T1_COOKIE});
+    sends.remove_retransmissions_of_type(key, INIT);
+    sends.remove_retransmissions_of_type(key, COOKIE_ECHO);
+    send_cookie_ack(header, src, cookie.peer_ver_tag);
+    return true;
 }
 
 void SCTP_Socket::handle_error(const SCTP_Common_Header&, const SCTP_Chunk& chunk, const sockaddr_in& src) {

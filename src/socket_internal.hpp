@@ -51,4 +51,14 @@ inline auto generate_random(T& input) -> decltype(input) {
     random_bytes(reinterpret_cast<uint8_t*>(&input), sizeof(input));
     return input;
 }
+
+// Initiate Tags and Tie-Tags are drawn from 1..2^32-1 (RFC 9260 5.3.1); 0 is
+// reserved for INIT and, in a cookie, means "no Tie-Tag".
+inline uint32_t generate_nonzero_tag() {
+    uint32_t tag;
+    do {
+        generate_random(tag);
+    } while (tag == 0);
+    return tag;
+}
 #endif
