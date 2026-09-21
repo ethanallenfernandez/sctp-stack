@@ -280,6 +280,47 @@ void SCTP_Socket::sctp_send_data(const Association_Key& association_id, const st
     enqueue_packet(std::move(data_deliv), Send_Priority::NEW_DATA);
 }
 
+void SCTP_Socket::sctp_abort(const sockaddr_in& association_id, const std::vector<uint8_t>& reason) {
+    Association_Key key{association_id};
+    sctp_abort(key, reason);
+}
+
+void SCTP_Socket::sctp_abort(const Association_Key& association_id, const std::vector<uint8_t>& reason) {
+    uint32_t peer_tag;
+    size_t budget;
+    {
+        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+        auto it = associations.find(association_id);
+        if (it == associations.end()) {
+            return;
+        }
+        peer_tag = it->second.peer_ver_tag;
+        budget = it->second.pmdcs;
+    }
+
+    // Purge first so it drops the queued DATA that MUST NOT accompany the ABORT
+    remove_association(association_id);
+
+    // In COOKIE_WAIT there is no tag the peer would accept the ABORT under.
+    if (peer_tag == 0) {
+        return;
+    }
+
+    std::vector<uint8_t> abort_reason = reason;
+    abort_reason.resize(std::min(abort_reason.size(), budget - 2 * SCTP_CHUNK_HEADER_SIZE));
+
+    enqueue_packet(Deliverable{
+        association_id,
+        build_abort(
+            ntohs(local_address.sin_port),
+            ntohs(association_id.address.sin_port),
+            peer_tag,
+            false,
+            {error_cause{CAUSE_USER_INITIATED_ABORT, std::move(abort_reason)}}
+        )
+    });
+}
+
 size_t SCTP_Socket::sctp_recv_data(std::vector<uint8_t>& buffer, Association_Key* out_association_id) {
     std::unique_lock<std::mutex> assoc_lock(associations_mutex);
     for (auto& [key, assoc] : associations) {

@@ -243,11 +243,16 @@ void test_stream_negotiation() {
     Harness zero_ack;
     zero_ack.add(COOKIE_WAIT);
     zero_ack.receive(OUR_TAG, {init_chunk(INIT_ACK, 0, 5, param(PARAM_STATE_COOKIE, std::vector<uint8_t>(96, 0)))});
-    check(zero_ack.find() && zero_ack.find()->state == COOKIE_WAIT, "INIT ACK with OS 0 is discarded");
+    std::vector<SCTP_Packet> zero_ack_sent = zero_ack.drain_sends();
+    check(!zero_ack.find(), "INIT ACK with OS 0 destroys the TCB (3.3.3)");
+    check(zero_ack_sent.size() == 1 && zero_ack_sent[0].chunks[0].chunk_header.type == ABORT,
+          "and is aborted");
 
     Harness zero_init;
     zero_init.receive(0, {init_chunk(INIT, 1, 0)});
-    check(zero_init.drain_sends().empty(), "INIT with MIS 0 is discarded");
+    std::vector<SCTP_Packet> zero_init_sent = zero_init.drain_sends();
+    check(zero_init_sent.size() == 1 && zero_init_sent[0].chunks[0].chunk_header.type == ABORT,
+          "INIT with MIS 0 is aborted (3.3.2)");
 }
 
 void test_invalid_stream() {
