@@ -73,7 +73,6 @@ private:
     void event_loop();
     Association init_new_association(const Association_Key& key);
     Association init_new_association(const State_Cookie& cookie, const Association_Key& key);
-    SCTP_Packet build_init(const Association_Key& key, const Association& assoc, uint32_t cookie_preservative_ms = 0);
     void remove_association(const Association_Key& key);
     void notify_assoc_change(const Association_Key& key, Assoc_Change_State state);
     void run_expire();
@@ -94,7 +93,6 @@ private:
     void start_t3_if_stopped(const Association_Key& location);
     void restart_t3(const Association_Key& location);
     void handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src);
-    SCTP_Packet build_sack(const Association_Key& key, Association& assoc);
     void send_sack(const Association_Key& key);
     void schedule_pending_retransmission(const Association_Key& key);
     void update_rto(Association& assoc, std::chrono::microseconds measurement);
@@ -113,7 +111,6 @@ private:
     void send_cookie_ack(const SCTP_Common_Header& header, const sockaddr_in& src, uint32_t peer_tag);
     void send_stale_cookie_error(const SCTP_Common_Header& header, const sockaddr_in& src, const State_Cookie& cookie, uint32_t staleness_us);
     void send_error(const SCTP_Common_Header& header, const sockaddr_in& src, uint32_t peer_tag, std::vector<error_cause> causes);
-    SCTP_Packet build_abort(uint16_t src_port, uint16_t des_port, uint32_t tag, bool reflected, std::vector<error_cause> causes);
     void send_abort(const SCTP_Common_Header& header, const sockaddr_in& src, uint32_t tag, bool reflected, std::vector<error_cause> causes);
     void report_unrecognized_chunks(const SCTP_Common_Header& header, const sockaddr_in& src, std::vector<error_cause> causes);
     void handle_data_packet(const SCTP_Packet& packet, const sockaddr_in& src, bool acknowledge_immediately = false);

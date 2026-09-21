@@ -6,6 +6,7 @@
 #include <sctp/socket.hpp>
 #include <sctp/platform.hpp>
 #include "serialize.hpp"
+#include "builders.hpp"
 #include "socket_internal.hpp"
 
 #include <chrono>
@@ -127,32 +128,15 @@ Association_Key SCTP_Socket::sctp_associate(std::string_view ip_address, int por
     associations.insert_or_assign(key, assoc);
     assoc_lock.unlock();
 
-    enqueue_packet(Deliverable{key, build_init(key, assoc)});
+    // sin_port is already network order, so the builder's host-order ports need
+    // ntohs, not htons.
+    enqueue_packet(Deliverable{key, build_init(
+        ntohs(local_address.sin_port),
+        ntohs(key.address.sin_port),
+        assoc.this_ver_tag,
+        assoc.next_tsn
+    )});
     return key;
-}
-
-SCTP_Packet SCTP_Socket::build_init(const Association_Key& key, const Association& assoc, uint32_t cookie_preservative_ms) {
-    SCTP_Packet init_packet = INIT_PACKET;
-    // Header fields are host byte order; the serializer converts. sin_port is
-    // already network order, so it needs ntohs, not htons.
-    init_packet.header.src_port = ntohs(local_address.sin_port);
-    init_packet.header.des_port = ntohs(key.address.sin_port);
-    init_packet.header.verification_tag = 0;   // RFC 9260 §8.5, packet carries INIT
-
-    std::vector<uint8_t> parameters;
-    if (cookie_preservative_ms != 0) {
-        std::vector<uint8_t> increment = be32_bytes(cookie_preservative_ms);
-        append_parameter(parameters, PARAM_COOKIE_PRESERVATIVE, increment.data(), increment.size());
-    }
-    init_packet.chunks[0].chunk_value = init_chunk_value {
-        .initiate_tag = assoc.this_ver_tag,
-        .a_rwnd = RWND,
-        .out_streams = LOCAL_OUT_STREAMS,
-        .in_streams = LOCAL_MAX_IN_STREAMS,
-        .initial_tsn = assoc.next_tsn,
-        .optional_parameters = std::move(parameters)
-    };
-    return init_packet;
 }
 
 Association SCTP_Socket::init_new_association(const Association_Key& key) {
@@ -254,28 +238,21 @@ void SCTP_Socket::sctp_send_data(const Association_Key& association_id, const st
         return;
     }
 
-    SCTP_Packet data_packet;
-    data_packet.header.src_port = ntohs(local_address.sin_port);
-    data_packet.header.des_port = ntohs(association_id.address.sin_port);
-    data_packet.header.verification_tag = it->second.peer_ver_tag;
-
-    data_packet.chunks.push_back(SCTP_Chunk{
-        .chunk_header = {
-            .type = DATA,
-            .flag = 0,
-            .length = 0   // recomputed by serialize_chunk from the encoded body
-        },
-        .chunk_value = data_chunk_value {
+    SCTP_Packet data_packet = build_data(
+        ntohs(local_address.sin_port),
+        ntohs(association_id.address.sin_port),
+        it->second.peer_ver_tag,
+        {data_chunk_value{
             .tsn = it->second.next_tsn++,
             .stream_identifier = 0,
             .stream_seq_num = 0,
             .payload_protocal = 0,
             .user_data = data
-        }
-    });
+        }}
+    );
     assoc_lock.unlock();
 
-    Deliverable data_deliv{association_id, data_packet};
+    Deliverable data_deliv{association_id, std::move(data_packet)};
 
     enqueue_packet(std::move(data_deliv), Send_Priority::NEW_DATA);
 }

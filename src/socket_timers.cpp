@@ -5,6 +5,7 @@
 
 #include <sctp/socket.hpp>
 #include <sctp/utils.hpp>
+#include "builders.hpp"
 #include "socket_internal.hpp"
 
 #include <algorithm>
@@ -145,35 +146,29 @@ void SCTP_Socket::handle_t3_expiration(const Association_Key& location) {
             }
         );
 
-        SCTP_Packet packet;
-        packet.header.src_port = ntohs(local_address.sin_port);
-        packet.header.des_port = ntohs(location.address.sin_port);
-        packet.header.verification_tag = assoc.peer_ver_tag;
+        std::vector<data_chunk_value> bundle;
         size_t packet_size = SCTP_COMMON_HEADER_SIZE;
         for (const auto& [tsn, outstanding] : ordered) {
             if (outstanding->gap_acked) {
                 continue;
             }
-            size_t chunk_size = 16 + outstanding->data.user_data.size();
-            chunk_size = (chunk_size + 3) & ~size_t{3};
-            if (!packet.chunks.empty()
+            size_t chunk_size = data_chunk_wire_size(outstanding->data);
+            if (!bundle.empty()
                     && packet_size + chunk_size
                         > SCTP_COMMON_HEADER_SIZE + assoc.pmdcs) {
                 break;
             }
-            packet.chunks.push_back(SCTP_Chunk{
-                .chunk_header = {
-                    .type = DATA,
-                    .flag = 0,
-                    .length = 0,
-                },
-                .chunk_value = outstanding->data,
-            });
+            bundle.push_back(outstanding->data);
             packet_size += chunk_size;
             (void)tsn;
         }
 
-        retransmission = Deliverable{location, std::move(packet)};
+        retransmission = Deliverable{location, build_data(
+            ntohs(local_address.sin_port),
+            ntohs(location.address.sin_port),
+            assoc.peer_ver_tag,
+            std::move(bundle)
+        )};
         have_data = !retransmission.packet.chunks.empty();
     }
 
@@ -235,31 +230,29 @@ void SCTP_Socket::schedule_pending_retransmission(
                 < static_cast<uint32_t>(rhs.first - assoc.cumulative_tsn_ack);
         });
 
-        SCTP_Packet packet;
-        packet.header.src_port = ntohs(local_address.sin_port);
-        packet.header.des_port = ntohs(key.address.sin_port);
-        packet.header.verification_tag = assoc.peer_ver_tag;
+        std::vector<data_chunk_value> bundle;
         size_t packet_size = SCTP_COMMON_HEADER_SIZE;
         for (const auto& [tsn, outstanding] : ordered) {
-            size_t chunk_size = (16 + outstanding->data.user_data.size() + 3)
-                & ~size_t{3};
-            if (!packet.chunks.empty()
+            size_t chunk_size = data_chunk_wire_size(outstanding->data);
+            if (!bundle.empty()
                     && packet_size + chunk_size
                         > SCTP_COMMON_HEADER_SIZE + assoc.pmdcs) {
                 break;
             }
-            packet.chunks.push_back(SCTP_Chunk{
-                .chunk_header = {.type = DATA, .flag = 0, .length = 0},
-                .chunk_value = outstanding->data,
-            });
+            bundle.push_back(outstanding->data);
             outstanding->pending_retransmission = false;
             packet_size += chunk_size;
             (void)tsn;
         }
-        if (packet.chunks.empty()) {
+        if (bundle.empty()) {
             return;
         }
-        retransmission = Deliverable{key, std::move(packet)};
+        retransmission = Deliverable{key, build_data(
+            ntohs(local_address.sin_port),
+            ntohs(key.address.sin_port),
+            assoc.peer_ver_tag,
+            std::move(bundle)
+        )};
     }
     enqueue_packet(std::move(retransmission), Send_Priority::RETRANSMISSION);
 }

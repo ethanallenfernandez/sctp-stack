@@ -203,31 +203,4 @@ struct SCTP_Packet {
 
 constexpr int RWND = 65535;
 
-const SCTP_Packet INIT_PACKET = {
-    .header = {
-        .src_port = 0,          // set later if needed
-        .des_port = 0,          // set later if needed
-        .verification_tag = 0,     // MUST be 0 for INIT
-        .checksum = 0              // computed after serialization
-    },
-    .chunks = {
-        SCTP_Chunk {
-            .chunk_header = {
-                .type = INIT,
-                .flag = 0,
-                // Recomputed by serialize_chunk; sizeof() is not a wire length.
-                .length = 0
-            },
-            .chunk_value = init_chunk_value {
-                .initiate_tag = 0,
-                .a_rwnd = RWND,
-                .out_streams = 1,
-                .in_streams = 1,
-                .initial_tsn = 0,
-                .optional_parameters = {}
-            }
-        }
-    }
-};
-
 #endif

@@ -8,6 +8,7 @@
 #include <sctp/utils.hpp>
 #include "checksum.hpp"
 #include "serialize.hpp"
+#include "builders.hpp"
 #include "socket_internal.hpp"
 
 #include <algorithm>
@@ -304,34 +305,14 @@ void SCTP_Socket::handle_init(const SCTP_Common_Header& header, const SCTP_Chunk
         lifespan_increment_ms
     );
 
-    std::vector<uint8_t> parameters;
-    append_parameter(parameters, PARAM_STATE_COOKIE, cookie.data(), cookie.size());
-
-    SCTP_Packet init_ack_packet;
-
-    init_ack_packet.header.src_port = header.des_port;
-    init_ack_packet.header.des_port = header.src_port;
-    init_ack_packet.header.verification_tag = init.initiate_tag;
-
-    init_ack_packet.chunks.push_back(SCTP_Chunk{
-        .chunk_header = {
-            .type = INIT_ACK,
-            .flag = 0,
-            .length = 0   // recomputed by serialize_chunk
-        },
-        .chunk_value = init_chunk_value {
-            .initiate_tag = local_tag,
-            .a_rwnd = RWND,
-            .out_streams = LOCAL_OUT_STREAMS,
-            .in_streams = LOCAL_MAX_IN_STREAMS,
-            .initial_tsn = local_tsn,
-            .optional_parameters = std::move(parameters)
-        }
-    });
-
-    Deliverable init_ack_deliv{src, init_ack_packet};
-
-    enqueue_packet(std::move(init_ack_deliv));
+    enqueue_packet(Deliverable{src, build_init_ack(
+        header.des_port,
+        header.src_port,
+        init.initiate_tag,
+        local_tag,
+        local_tsn,
+        cookie
+    )});
 }
 
 void SCTP_Socket::handle_init_ack(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src) {
@@ -381,45 +362,12 @@ void SCTP_Socket::handle_init_ack(const SCTP_Common_Header& header, const SCTP_C
     cancel_expiration(Expiration_Key{assoc_key, Expiration_Timer_Type::T1_INIT});
     sends.remove_retransmissions_of_type(assoc_key, INIT);
 
-    SCTP_Packet cookie_echo_packet;
-
-    cookie_echo_packet.header.src_port = header.des_port;
-    cookie_echo_packet.header.des_port = header.src_port;
-    cookie_echo_packet.header.verification_tag = peer_tag;
-
-    cookie_echo_packet.chunks.push_back(SCTP_Chunk{
-        .chunk_header = {
-            .type = COOKIE_ECHO,
-            .flag = 0,
-            .length = 0   // recomputed by serialize_chunk
-        },
-        .chunk_value = cookie_echo_chunk_value {
-            .cookie_data = std::move(cookie)
-        }
-    });
-
-    Deliverable cookie_echo_deliv{src, cookie_echo_packet};
-
-    enqueue_packet(std::move(cookie_echo_deliv));
+    enqueue_packet(Deliverable{src, build_cookie_echo(
+        header.des_port, header.src_port, peer_tag, std::move(cookie))});
 }
 
 void SCTP_Socket::send_cookie_ack(const SCTP_Common_Header& header, const sockaddr_in& src, uint32_t peer_tag) {
-    SCTP_Packet cookie_ack_packet;
-
-    cookie_ack_packet.header.src_port = header.des_port;
-    cookie_ack_packet.header.des_port = header.src_port;
-    cookie_ack_packet.header.verification_tag = peer_tag;
-
-    cookie_ack_packet.chunks.push_back(SCTP_Chunk{
-        .chunk_header = {
-            .type = COOKIE_ACK,
-            .flag = 0,
-            .length = 0   // recomputed by serialize_chunk
-        },
-        .chunk_value = empty_chunk_value {}
-    });
-
-    enqueue_packet(Deliverable{src, std::move(cookie_ack_packet)});
+    enqueue_packet(Deliverable{src, build_cookie_ack(header.des_port, header.src_port, peer_tag)});
 }
 
 void SCTP_Socket::send_stale_cookie_error(
@@ -435,49 +383,8 @@ void SCTP_Socket::send_error(
         const sockaddr_in& src,
         uint32_t peer_tag,
         std::vector<error_cause> causes) {
-    SCTP_Packet error_packet;
-
-    error_packet.header.src_port = header.des_port;
-    error_packet.header.des_port = header.src_port;
-    error_packet.header.verification_tag = peer_tag;
-
-    error_chunk_value error{std::move(causes)};
-
-    error_packet.chunks.push_back(SCTP_Chunk{
-        .chunk_header = {
-            .type = OP_ERROR,
-            .flag = 0,
-            .length = 0   // recomputed by serialize_chunk
-        },
-        .chunk_value = std::move(error)
-    });
-
-    enqueue_packet(Deliverable{src, std::move(error_packet)});
-}
-
-SCTP_Packet SCTP_Socket::build_abort(
-    uint16_t src_port,
-    uint16_t des_port,
-    uint32_t tag,
-    bool reflected,
-    std::vector<error_cause> causes
-) {
-    SCTP_Packet abort_packet;
-
-    abort_packet.header.src_port = src_port;
-    abort_packet.header.des_port = des_port;
-    abort_packet.header.verification_tag = tag;
-
-    abort_packet.chunks.push_back(SCTP_Chunk{
-        .chunk_header = {
-            .type = ABORT,
-            .flag = static_cast<uint8_t>(reflected ? CHUNK_FLAG_T_BIT : 0),
-            .length = 0   // recomputed by serialize_chunk
-        },
-        .chunk_value = error_chunk_value{std::move(causes)}
-    });
-
-    return abort_packet;
+    enqueue_packet(Deliverable{src, build_error(
+        header.des_port, header.src_port, peer_tag, std::move(causes))});
 }
 
 void SCTP_Socket::send_abort(
@@ -617,7 +524,12 @@ void SCTP_Socket::handle_error(const SCTP_Common_Header&, const SCTP_Chunk& chun
                     assoc.peer_ver_tag = 0;
                     assoc.init_retransmits = 0;
                     assoc.cookie_retransmits = 0;
-                    retry_init = build_init(assoc_key, assoc, staleness_ms + std::min(staleness_ms, 1000U));
+                    retry_init = build_init(
+                        ntohs(local_address.sin_port),
+                        ntohs(assoc_key.address.sin_port),
+                        assoc.this_ver_tag,
+                        assoc.next_tsn,
+                        staleness_ms + std::min(staleness_ms, 1000U));
                     break;
                 }
                 case CAUSE_COOKIE_WHILE_SHUTTING_DOWN: // TODO
@@ -943,52 +855,6 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
     }
 }
 
-SCTP_Packet SCTP_Socket::build_sack(const Association_Key& key, Association& assoc) {
-    std::vector<uint16_t> offsets;
-    offsets.reserve(assoc.tsn_ooo_buffer.size());
-    for (const auto& [tsn, data] : assoc.tsn_ooo_buffer) {
-        uint32_t offset = tsn - assoc.last_peer_tsn;
-        if (offset > 0 && offset <= UINT16_MAX) {
-            offsets.push_back(static_cast<uint16_t>(offset));
-        }
-        (void)data;
-    }
-    std::sort(offsets.begin(), offsets.end());
-    offsets.erase(std::unique(offsets.begin(), offsets.end()), offsets.end()); // Should not be necessary, but nonetheless...
-
-    std::vector<sack_gap_ack_block> gaps;
-    for (uint16_t offset : offsets) {
-        if (gaps.empty() || static_cast<uint32_t>(gaps.back().end) + 1 != offset) {
-            gaps.push_back({offset, offset});
-        } else {
-            gaps.back().end = offset;
-        }
-    }
-
-    SCTP_Packet sack_packet;
-    sack_packet.header.src_port = ntohs(local_address.sin_port);
-    sack_packet.header.des_port = ntohs(key.address.sin_port);
-    sack_packet.header.verification_tag = assoc.peer_ver_tag;
-    sack_packet.chunks.push_back(SCTP_Chunk{
-        .chunk_header = {
-            .type = SACK,
-            .flag = 0,
-            .length = 0,
-        },
-        .chunk_value = sack_chunk_value{
-            .cumulative_tsn_ack = assoc.last_peer_tsn,
-            .a_rwnd = RWND, // Need to track available receive window for the peer
-            .number_of_gap_ack_blocks = static_cast<uint16_t>(gaps.size()),
-            .number_of_duplicate_tsns = static_cast<uint16_t>(assoc.duplicate_tsns.size()),
-            .gap_ack_blocks = std::move(gaps),
-            .duplicate_tsns = std::move(assoc.duplicate_tsns),
-        },
-    });
-    assoc.duplicate_tsns.clear();
-    assoc.delayed_sack_packet_count = 0;
-    return sack_packet;
-}
-
 void SCTP_Socket::send_sack(const Association_Key& key) {
     SCTP_Packet sack_packet;
     {
@@ -998,7 +864,39 @@ void SCTP_Socket::send_sack(const Association_Key& key) {
                 || association->second.state != ESTABLISHED) {
             return;
         }
-        sack_packet = build_sack(key, association->second);
+        Association& assoc = association->second;
+
+        std::vector<uint16_t> offsets;
+        offsets.reserve(assoc.tsn_ooo_buffer.size());
+        for (const auto& [tsn, data] : assoc.tsn_ooo_buffer) {
+            uint32_t offset = tsn - assoc.last_peer_tsn;
+            if (offset > 0 && offset <= UINT16_MAX) {
+                offsets.push_back(static_cast<uint16_t>(offset));
+            }
+            (void)data;
+        }
+        std::sort(offsets.begin(), offsets.end());
+        offsets.erase(std::unique(offsets.begin(), offsets.end()), offsets.end()); // Should not be necessary, but nonetheless...
+
+        std::vector<sack_gap_ack_block> gaps;
+        for (uint16_t offset : offsets) {
+            if (gaps.empty() || static_cast<uint32_t>(gaps.back().end) + 1 != offset) {
+                gaps.push_back({offset, offset});
+            } else {
+                gaps.back().end = offset;
+            }
+        }
+
+        sack_packet = build_sack(
+            ntohs(local_address.sin_port),
+            ntohs(key.address.sin_port),
+            assoc.peer_ver_tag,
+            assoc.last_peer_tsn,
+            std::move(gaps),
+            std::move(assoc.duplicate_tsns)
+        );
+        assoc.duplicate_tsns.clear();
+        assoc.delayed_sack_packet_count = 0;
     }
     cancel_expiration(
         Expiration_Key{key, Expiration_Timer_Type::DELAYED_SACK});
