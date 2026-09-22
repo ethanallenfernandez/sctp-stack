@@ -62,6 +62,21 @@ inline uint32_t read_be32(const uint8_t* p) {
     return static_cast<uint32_t>(p[0]) << 24 | static_cast<uint32_t>(p[1]) << 16 | static_cast<uint32_t>(p[2]) << 8 | p[3];
 }
 
+// The Heartbeat Info is ours to define: a nonce the ACK is matched against, and
+// the destination it went to, which tells paths apart once there is more than
+// one. The send time is not in here - the TCB records it after sendto, which is
+// both more accurate and not something the peer can forge.
+constexpr size_t HEARTBEAT_INFO_SIZE = 10;
+
+inline std::vector<uint8_t> heartbeat_info(uint32_t nonce, const sockaddr_in& destination) {
+    std::vector<uint8_t> info = be32_bytes(nonce);
+    const uint8_t* address = reinterpret_cast<const uint8_t*>(&destination.sin_addr.s_addr);
+    info.insert(info.end(), address, address + sizeof(destination.sin_addr.s_addr));
+    const uint8_t* port = reinterpret_cast<const uint8_t*>(&destination.sin_port);
+    info.insert(info.end(), port, port + sizeof(destination.sin_port));
+    return info;
+}
+
 // RFC 9260 3.3.10.1: Stream Identifier, then 16 reserved bits.
 inline error_cause invalid_stream_cause(uint16_t stream_id) {
     return error_cause{CAUSE_INVALID_STREAM_ID, {static_cast<uint8_t>(stream_id >> 8), static_cast<uint8_t>(stream_id), 0, 0}};

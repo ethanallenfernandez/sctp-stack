@@ -152,6 +152,7 @@ Association SCTP_Socket::init_new_association(const Association_Key& key) {
     result.out_streams = LOCAL_OUT_STREAMS;
     result.in_streams = LOCAL_MAX_IN_STREAMS;
     result.rto = sctp_parameters::RTO_INITIAL;
+    result.error_threshold = sctp_parameters::ASSOCIATION_MAX_RETRANS;
     result.pmdcs = DEFAULT_PMDCS;
     result.cwnd = std::min(4U * result.pmdcs, std::max(2U * result.pmdcs, 4380U));
     result.ssthresh = RWND;
@@ -176,6 +177,7 @@ Association SCTP_Socket::init_new_association(const State_Cookie& cookie, const 
     result.in_streams = std::min(cookie.local_in_streams, cookie.peer_out_streams);
 
     result.rto = sctp_parameters::RTO_INITIAL;
+    result.error_threshold = sctp_parameters::ASSOCIATION_MAX_RETRANS;
     result.pmdcs = DEFAULT_PMDCS;
     result.cwnd = std::min(4U * result.pmdcs, std::max(2U * result.pmdcs, 4380U));
     result.ssthresh = RWND;

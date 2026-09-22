@@ -23,6 +23,10 @@ void SCTP_Socket::handle_expiration(const Expiration_Fallback& fallback) {
         handle_delayed_sack_expiration(fallback.key.location);
         return;
     }
+    if (fallback.key.type == Expiration_Timer_Type::HEARTBEAT) {
+        handle_heartbeat_expiration(fallback.key.location);
+        return;
+    }
     if (fallback.key.type != Expiration_Timer_Type::T1_INIT && fallback.key.type != Expiration_Timer_Type::T1_COOKIE) {
         return;
     }
@@ -174,6 +178,77 @@ void SCTP_Socket::handle_t3_expiration(const Association_Key& location) {
 
     if (have_data) {
         enqueue_packet(std::move(retransmission), Send_Priority::RETRANSMISSION);
+    }
+}
+
+// RFC 9260 8.3: probe only destinations that are idle, on HB.interval plus the
+// RTO, jittered. Outstanding DATA is the idle test here: T3-rtx is already
+// probing the path, and its expiry counts the same error.
+void SCTP_Socket::handle_heartbeat_expiration(const Association_Key& location) {
+    Deliverable probe;
+    bool send_probe = false;
+    bool unreachable = false;
+    std::chrono::microseconds rto;
+    {
+        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+        auto association = associations.find(location);
+        if (association == associations.end() || association->second.state != ESTABLISHED) {
+            return;
+        }
+
+        Association& assoc = association->second;
+        if (assoc.hb_outstanding && ++assoc.error_count > assoc.error_threshold) {
+            unreachable = true;
+        }
+        assoc.hb_outstanding = false;
+        rto = assoc.rto;
+
+        if (!unreachable && !has_unacknowledged_data(assoc)) {
+            generate_random(assoc.hb_nonce);
+            assoc.hb_outstanding = true;
+            assoc.hb_sent_at = std::chrono::steady_clock::now();
+            probe = Deliverable{location, build_heartbeat(
+                ntohs(local_address.sin_port),
+                ntohs(location.address.sin_port),
+                assoc.peer_ver_tag,
+                heartbeat_info(assoc.hb_nonce, location.address)
+            )};
+            send_probe = true;
+        }
+    }
+
+    // 8.1: an unreachable peer is not sent an ABORT, it is simply gone.
+    if (unreachable) {
+        remove_association(location);
+        notify_assoc_change(location, Assoc_Change_State::COMM_LOST);
+        std::cout << "Association failed: peer unreachable" << std::endl;
+        return;
+    }
+
+    if (send_probe) {
+        enqueue_packet(std::move(probe));
+    }
+    schedule_heartbeat(location, rto);
+}
+
+void SCTP_Socket::schedule_heartbeat(const Association_Key& location, std::chrono::microseconds rto) {
+    uint32_t jitter;
+    generate_random(jitter);
+    int64_t span = rto.count();
+    std::chrono::microseconds offset{static_cast<int64_t>(jitter % static_cast<uint64_t>(span + 1)) - span / 2};
+
+    schedule_expiration(
+        Expiration_Key{location, Expiration_Timer_Type::HEARTBEAT},
+        std::chrono::steady_clock::now() + sctp_parameters::HB_INTERVAL + rto + offset,
+        Deliverable{location, SCTP_Packet{}}
+    );
+}
+
+void SCTP_Socket::record_heartbeat_sent(const Association_Key& location, std::chrono::steady_clock::time_point sent_at) {
+    std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+    auto association = associations.find(location);
+    if (association != associations.end() && association->second.hb_outstanding) {
+        association->second.hb_sent_at = sent_at;
     }
 }
 

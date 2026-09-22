@@ -118,6 +118,7 @@ void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockad
                 SCTP_Socket::handle_cookie_ack(in_pkt.header, in_pkt.chunks[i], src);
                 break;
             case DATA:
+                // Special, needs to be handled once per packet, not once per chunk. Handler called after the loop.
                 std::cout << "Recieved DATA" << std::endl;
                 break;
             case SACK:
@@ -131,12 +132,20 @@ void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockad
             case ABORT:
                 std::cout << "Recieved ABORT" << std::endl;
                 SCTP_Socket::handle_abort(in_pkt.header, in_pkt.chunks[i], src);
-                return;
+                return; // ABORT so stop processing packets
+            case HEARTBEAT:
+                std::cout << "Recieved HEARTBEAT" << std::endl;
+                SCTP_Socket::handle_heartbeat(in_pkt.header, in_pkt.chunks[i], src);
+                break;
+            case HEARTBEAT_ACK:
+                std::cout << "Recieved HEARTBEAT_ACK" << std::endl;
+                SCTP_Socket::handle_heartbeat_ack(in_pkt.header, in_pkt.chunks[i], src);
+                break;
             default:
                 break;
         }
     }
-    // Once per packet, not per chunk: delayed-SACK counting is packet-granular.
+
     // DATA bundled with a COOKIE ECHO must skip the delayed-SACK timer.
     handle_data_packet(in_pkt, src, carried_cookie_echo);
 
@@ -426,8 +435,9 @@ bool SCTP_Socket::handle_cookie_echo(
             send_stale_cookie_error(header, src, cookie, staleness_us);
             return false;
         }
-        associations.insert_or_assign(key, init_new_association(cookie, key));
+        auto created = associations.insert_or_assign(key, init_new_association(cookie, key));
         notify_assoc_change(key, Assoc_Change_State::COMM_UP);
+        schedule_heartbeat(key, created.first->second.rto);
         send_cookie_ack(header, src, cookie.peer_ver_tag);
         return true;
     }
@@ -451,6 +461,7 @@ bool SCTP_Socket::handle_cookie_echo(
         if (tcb.state == COOKIE_ECHOED) {
             tcb.state = ESTABLISHED;
             notify_assoc_change(key, Assoc_Change_State::COMM_UP);
+            schedule_heartbeat(key, tcb.rto);
         }
     } else if (!local_match && !peer_match && tie_tags_match) {
         // A: peer restart
@@ -464,6 +475,7 @@ bool SCTP_Socket::handle_cookie_echo(
         sends.purge(key);
         tcb = init_new_association(cookie, key);
         notify_assoc_change(key, Assoc_Change_State::RESTART);
+        schedule_heartbeat(key, tcb.rto);
     } else if (local_match) {
         // B: collision, peer's tag is new or not yet known
         tcb.peer_ver_tag = cookie.peer_ver_tag;
@@ -473,6 +485,7 @@ bool SCTP_Socket::handle_cookie_echo(
         tcb.duplicate_tsns.clear();
         if (tcb.state == COOKIE_WAIT || tcb.state == COOKIE_ECHOED) {
             notify_assoc_change(key, Assoc_Change_State::COMM_UP);
+            schedule_heartbeat(key, tcb.rto);
         }
         tcb.state = ESTABLISHED;
     } else {
@@ -622,10 +635,55 @@ void SCTP_Socket::handle_cookie_ack(const SCTP_Common_Header&, const SCTP_Chunk&
     Association& assoc = it->second;
     assoc.state = ESTABLISHED;
     notify_assoc_change(assoc_key, Assoc_Change_State::COMM_UP);
+    std::chrono::microseconds rto = assoc.rto;
     assoc_lock.unlock();
+    schedule_heartbeat(assoc_key, rto);
     cancel_expiration(
         Expiration_Key{assoc_key, Expiration_Timer_Type::T1_COOKIE});
     sends.remove_retransmissions_of_type(assoc_key, COOKIE_ECHO);
+}
+
+void SCTP_Socket::handle_heartbeat(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src) {
+    const auto& info = std::get<heartbeat_chunk_value>(chunk.chunk_value).info;
+    Association_Key key{src};
+    uint32_t peer_tag;
+    {
+        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+        auto it = associations.find(key);
+        // The Info is echoed verbatim and the peer chooses its length, so an
+        // oversized one would build a reply we cannot put on the wire.
+        if (it == associations.end() || 2 * SCTP_CHUNK_HEADER_SIZE + info.size() > it->second.pmdcs) {
+            return;
+        }
+        peer_tag = it->second.peer_ver_tag;
+    }
+
+    enqueue_packet(Deliverable{key, build_heartbeat_ack(header.des_port, header.src_port, peer_tag, info)});
+}
+
+void SCTP_Socket::handle_heartbeat_ack(const SCTP_Common_Header&, const SCTP_Chunk& chunk, const sockaddr_in& src) {
+    const auto& info = std::get<heartbeat_chunk_value>(chunk.chunk_value).info;
+    if (info.size() != HEARTBEAT_INFO_SIZE) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+    auto it = associations.find(Association_Key{src});
+    if (it == associations.end()) {
+        return;
+    }
+
+    // The nonce tells this ACK from one answering a heartbeat two intervals
+    // back, which would otherwise clear the error count of a failing path.
+    Association& assoc = it->second;
+    if (!assoc.hb_outstanding || read_be32(info.data()) != assoc.hb_nonce) {
+        return;
+    }
+
+    assoc.hb_outstanding = false;
+    assoc.error_count = 0;
+    update_rto(assoc, std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - assoc.hb_sent_at));
 }
 
 void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src) {

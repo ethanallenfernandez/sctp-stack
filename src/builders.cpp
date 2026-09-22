@@ -155,6 +155,28 @@ SCTP_Packet build_abort(
     return packet;
 }
 
+SCTP_Packet build_heartbeat(
+    uint16_t src_port,
+    uint16_t des_port,
+    uint32_t peer_tag,
+    std::vector<uint8_t> info
+) {
+    SCTP_Packet packet = packet_with_header(src_port, des_port, peer_tag);
+    append_chunk(packet, HEARTBEAT, 0, heartbeat_chunk_value{std::move(info)});
+    return packet;
+}
+
+SCTP_Packet build_heartbeat_ack(
+    uint16_t src_port,
+    uint16_t des_port,
+    uint32_t peer_tag,
+    std::vector<uint8_t> info
+) {
+    SCTP_Packet packet = packet_with_header(src_port, des_port, peer_tag);
+    append_chunk(packet, HEARTBEAT_ACK, 0, heartbeat_chunk_value{std::move(info)});
+    return packet;
+}
+
 size_t data_chunk_wire_size(const data_chunk_value& data) {
     // 16 = common DATA chunk header (4) + TSN, stream id, SSN, PPID (12).
     return (16 + data.user_data.size() + 3) & ~size_t{3};

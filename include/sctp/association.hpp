@@ -43,6 +43,9 @@ struct Association {
     sockaddr_in primary_path;
     uint16_t error_count;
     uint16_t error_threshold;
+    uint32_t hb_nonce;
+    bool hb_outstanding;
+    std::chrono::steady_clock::time_point hb_sent_at;
     uint32_t peer_rwnd;
     uint32_t our_rwnd;
     uint32_t next_tsn;

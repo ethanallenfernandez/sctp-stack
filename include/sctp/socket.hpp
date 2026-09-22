@@ -89,17 +89,19 @@ private:
     void handle_expiration(const Expiration_Fallback& fallback);
     void handle_t3_expiration(const Association_Key& location);
     void handle_delayed_sack_expiration(const Association_Key& location);
+    void handle_heartbeat_expiration(const Association_Key& location);
+    void schedule_heartbeat(const Association_Key& location, std::chrono::microseconds rto);
+    void record_heartbeat_sent(const Association_Key& location, std::chrono::steady_clock::time_point sent_at);
     void record_data_sent(const Association_Key& location, const data_chunk_value& data, std::chrono::steady_clock::time_point sent_at);
     void start_t3_if_stopped(const Association_Key& location);
     void restart_t3(const Association_Key& location);
-    void handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src);
-    void send_sack(const Association_Key& key);
     void schedule_pending_retransmission(const Association_Key& key);
     void update_rto(Association& assoc, std::chrono::microseconds measurement);
     void handle_recv_packet(const uint8_t* data, size_t n, const sockaddr_in& src);
     Packet_Validation validate_verification_tag(const SCTP_Packet& pkt, const sockaddr_in& src);
     Packet_Validation ootb_response(const SCTP_Packet& pkt);
     void read_ooo_buffer(Association& assoc);
+    void abort_association(const Association_Key& key, const SCTP_Common_Header& header, const sockaddr_in& src, std::vector<error_cause> causes);
 
     void handle_init(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src);
     void handle_init_ack(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src);
@@ -107,13 +109,16 @@ private:
     void handle_cookie_ack(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src);
     void handle_error(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src);
     void handle_abort(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src);
-    void abort_association(const Association_Key& key, const SCTP_Common_Header& header, const sockaddr_in& src, std::vector<error_cause> causes);
+    void handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src);
+    void handle_data_packet(const SCTP_Packet& packet, const sockaddr_in& src, bool acknowledge_immediately = false);
+    void handle_heartbeat(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src);
+    void handle_heartbeat_ack(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src);
+    void send_sack(const Association_Key& key);
     void send_cookie_ack(const SCTP_Common_Header& header, const sockaddr_in& src, uint32_t peer_tag);
     void send_stale_cookie_error(const SCTP_Common_Header& header, const sockaddr_in& src, const State_Cookie& cookie, uint32_t staleness_us);
     void send_error(const SCTP_Common_Header& header, const sockaddr_in& src, uint32_t peer_tag, std::vector<error_cause> causes);
     void send_abort(const SCTP_Common_Header& header, const sockaddr_in& src, uint32_t tag, bool reflected, std::vector<error_cause> causes);
     void report_unrecognized_chunks(const SCTP_Common_Header& header, const sockaddr_in& src, std::vector<error_cause> causes);
-    void handle_data_packet(const SCTP_Packet& packet, const sockaddr_in& src, bool acknowledge_immediately = false);
 };
 
 #endif

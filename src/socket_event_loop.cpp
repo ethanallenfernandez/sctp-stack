@@ -186,6 +186,14 @@ bool SCTP_Socket::handle_send_packet(const Deliverable& deliverable) {
 void SCTP_Socket::schedule_expirations_after_send( const Deliverable& deliverable, std::chrono::steady_clock::time_point sent_at) {
     bool sent_data = false;
     for (const auto& chunk : deliverable.packet.chunks) {
+        // A heartbeat arms no timer of its own: the periodic one is already
+        // running. It is timestamped here rather than at build time so the RTT
+        // it measures excludes however long the packet sat in the send queue.
+        if (chunk.chunk_header.type == HEARTBEAT) {
+            record_heartbeat_sent(deliverable.location, sent_at);
+            continue;
+        }
+
         auto handlers = EXPIRE_HANDLERS.find(chunk.chunk_header.type);
         if (handlers == EXPIRE_HANDLERS.end()) {
             continue;

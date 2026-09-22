@@ -26,6 +26,7 @@ enum class Expiration_Timer_Type {
     T1_COOKIE,
     T3_RTX,
     DELAYED_SACK,
+    HEARTBEAT,
 };
 
 struct Expiration_Key {

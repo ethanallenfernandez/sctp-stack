@@ -5,18 +5,6 @@
 #include <vector>
 #include <sctp/sctp.hpp>
 
-// One builder per packet type the stack emits (RFC 9260 3.3). Each takes plain
-// scalars and returns a finished packet: no SCTP_Socket, no Association, no
-// lock held. Callers read what they need out of the TCB under
-// associations_mutex, then build outside the critical section.
-//
-// Ports are host byte order, as SCTP_Common_Header expects; a caller working
-// from a sockaddr_in passes ntohs(...), one replying to a received header
-// passes header.des_port / header.src_port to swap the direction.
-//
-// chunk_header.length is left 0 throughout: serialize_chunk recomputes it from
-// the encoded body.
-
 SCTP_Packet build_init(
     uint16_t src_port,
     uint16_t des_port,
@@ -66,6 +54,20 @@ SCTP_Packet build_abort(
     uint32_t tag,
     bool reflected,
     std::vector<error_cause> causes);
+
+// The Heartbeat Info is opaque: the sender picks the bytes, the responder
+// echoes back the ones it was given without reading them.
+SCTP_Packet build_heartbeat(
+    uint16_t src_port,
+    uint16_t des_port,
+    uint32_t peer_tag,
+    std::vector<uint8_t> info);
+
+SCTP_Packet build_heartbeat_ack(
+    uint16_t src_port,
+    uint16_t des_port,
+    uint32_t peer_tag,
+    std::vector<uint8_t> info);
 
 // Padded wire footprint of one DATA chunk, for callers bundling against PMDCS.
 size_t data_chunk_wire_size(const data_chunk_value& data);
