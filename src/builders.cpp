@@ -155,6 +155,29 @@ SCTP_Packet build_abort(
     return packet;
 }
 
+SCTP_Packet build_shutdown(
+    uint16_t src_port,
+    uint16_t des_port,
+    uint32_t peer_tag,
+    uint32_t cumulative_tsn_ack
+) {
+    SCTP_Packet packet = packet_with_header(src_port, des_port, peer_tag);
+    append_chunk(packet, SHUTDOWN, 0, shutdown_chunk_value{cumulative_tsn_ack});
+    return packet;
+}
+
+SCTP_Packet build_shutdown_ack(uint16_t src_port, uint16_t des_port, uint32_t peer_tag) {
+    SCTP_Packet packet = packet_with_header(src_port, des_port, peer_tag);
+    append_chunk(packet, SHUTDOWN_ACK, 0, empty_chunk_value{});
+    return packet;
+}
+
+SCTP_Packet build_shutdown_complete(uint16_t src_port, uint16_t des_port, uint32_t tag, bool reflected) {
+    SCTP_Packet packet = packet_with_header(src_port, des_port, tag);
+    append_chunk(packet, SHUTDOWN_COMPLETE, static_cast<uint8_t>(reflected ? CHUNK_FLAG_T_BIT : 0), empty_chunk_value{});
+    return packet;
+}
+
 SCTP_Packet build_heartbeat(
     uint16_t src_port,
     uint16_t des_port,

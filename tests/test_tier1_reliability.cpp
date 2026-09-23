@@ -1,6 +1,7 @@
 // End-to-end coverage for the Tier 1 handshake and DATA reliability rules.
 
 #include <sctp/socket.hpp>
+#include <sctp/utils.hpp>
 #include "serialize.hpp"
 
 #include <chrono>
@@ -71,6 +72,7 @@ struct SCTP_Socket_Test_Access {
         association.state = ESTABLISHED;
         association.peer_ver_tag = 0x10203040;
         association.cumulative_tsn_ack = cumulative_tsn_ack;
+        association.next_tsn = cumulative_tsn_ack + 1;
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
         stack.associations.insert_or_assign(key, std::move(association));
         return key;
@@ -88,7 +90,11 @@ struct SCTP_Socket_Test_Access {
             .payload_protocal = 0,
             .user_data = std::vector<uint8_t>(payload_size, 0x5a)};
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
-        stack.associations.at(key).outstanding_data.insert_or_assign(
+        Association& association = stack.associations.at(key);
+        if (!tsn_lt(tsn, association.next_tsn)) {
+            association.next_tsn = tsn + 1;
+        }
+        association.outstanding_data.insert_or_assign(
             tsn, Outstanding_Data{
                 data, now, now, false, gap_acked, missing_reports,
                 false, false});
@@ -373,6 +379,7 @@ struct RawPeer {
 };
 
 bool start(SCTP_Socket& stack, RawPeer& peer) {
+    stack.sctp_set_linger(0); // the raw peer never answers a SHUTDOWN
     return peer.open() && stack.sctp_bind("127.0.0.1", STACK_PORT)
         && stack.sctp_run();
 }

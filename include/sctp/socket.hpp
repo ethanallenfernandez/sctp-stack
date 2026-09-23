@@ -8,6 +8,7 @@
 #include <sctp/send_queue.hpp>
 #include <sctp/cookie_auth.hpp>
 #include <sctp/notification_queue.hpp>
+#include <sctp/receive_queue.hpp>
 
 #include <string_view>
 #include <string>
@@ -28,7 +29,13 @@ enum class Packet_Validation {
     ACCEPT,
     DISCARD,
     ABORT_OOTB,
+    SHUTDOWN_COMPLETE_OOTB,
 };
+
+// How long sctp_close waits for associations to shut down gracefully before
+// aborting the rest. 0 aborts everything at once.
+constexpr int DEFAULT_CLOSE_LINGER_MS = 5000;
+constexpr int USE_SOCKET_LINGER = -1;
 
 class SCTP_Socket {
 friend struct SCTP_Socket_Test_Access;
@@ -40,7 +47,9 @@ public:
 public:
     bool sctp_bind(std::string_view ip_address, int port);
     bool sctp_run();
-    void sctp_close();
+    // linger_ms defaults to the socket's own, as sctp_set_linger left it.
+    void sctp_close(int linger_ms = USE_SOCKET_LINGER);
+    void sctp_set_linger(int linger_ms);
     Association_Key sctp_associate(std::string_view ip_address, int port);
     int await_established_association(const Association_Key& association_id, int timeout_ms);
     void sctp_send_data(const sockaddr_in& association_id, const std::vector<uint8_t>& data);
@@ -50,12 +59,18 @@ public:
     size_t sctp_recv_data(std::vector<uint8_t>& buffer, Association_Key* out_association_id = nullptr);
     size_t sctp_recv_data_from(const sockaddr_in& association_id, std::vector<uint8_t>& buffer);
     size_t sctp_recv_data_from(const Association_Key& association_id, std::vector<uint8_t>& buffer);
-    Association_Key get_this_association_key();
+    void sctp_shutdown(const sockaddr_in& association_id);
+    void sctp_shutdown(const Association_Key& association_id);
     std::optional<Notification> sctp_recv_notification(int timeout_ms = 0);
     void sctp_subscribe(Notification_Type type, bool on);
+    
+    inline Association_Key get_this_association_key() {
+        return Association_Key{local_address};
+    }
 
 private:
     std::atomic<bool> running{false};
+    std::atomic<int> linger_ms{DEFAULT_CLOSE_LINGER_MS};
     bool platform_started{false};
     int receive_buffer_size;
     sockaddr_in local_address;
@@ -64,6 +79,7 @@ private:
     std::unordered_map<Association_Key, Association, Association_Hash> associations;
     std::mutex associations_mutex;
     Send_Queue sends;
+    Receive_Queue receives;
     Expiration_Queue expirations;
     Notification_Queue notifications;
     std::thread event_loop_thread;
@@ -74,6 +90,7 @@ private:
     Association init_new_association(const Association_Key& key);
     Association init_new_association(const State_Cookie& cookie, const Association_Key& key);
     void remove_association(const Association_Key& key);
+    void close_associations(std::chrono::milliseconds linger);
     void notify_assoc_change(const Association_Key& key, Assoc_Change_State state);
     void run_expire();
     void run_sending();
@@ -95,13 +112,17 @@ private:
     void record_data_sent(const Association_Key& location, const data_chunk_value& data, std::chrono::steady_clock::time_point sent_at);
     void start_t3_if_stopped(const Association_Key& location);
     void restart_t3(const Association_Key& location);
+    void handle_t2_expiration(const Association_Key& location);
+    void handle_t5_expiration(const Association_Key& location);
+    void restart_t2(const Association_Key& location);
     void schedule_pending_retransmission(const Association_Key& key);
     void update_rto(Association& assoc, std::chrono::microseconds measurement);
     void handle_recv_packet(const uint8_t* data, size_t n, const sockaddr_in& src);
     Packet_Validation validate_verification_tag(const SCTP_Packet& pkt, const sockaddr_in& src);
     Packet_Validation ootb_response(const SCTP_Packet& pkt);
-    void read_ooo_buffer(Association& assoc);
+    void read_ooo_buffer(Association& assoc, std::vector<std::vector<uint8_t>>& delivered);
     void abort_association(const Association_Key& key, const SCTP_Common_Header& header, const sockaddr_in& src, std::vector<error_cause> causes);
+    void do_next_shutdown_step(const Association_Key& key);
 
     void handle_init(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src);
     void handle_init_ack(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src);
@@ -113,7 +134,11 @@ private:
     void handle_data_packet(const SCTP_Packet& packet, const sockaddr_in& src, bool acknowledge_immediately = false);
     void handle_heartbeat(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src);
     void handle_heartbeat_ack(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src);
+    void handle_shutdown(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src);
+    void handle_shutdown_ack(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src);
+    void handle_shutdown_complete(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src);
     void send_sack(const Association_Key& key);
+    SCTP_Packet make_sack(const Association_Key& key, Association& assoc);
     void send_cookie_ack(const SCTP_Common_Header& header, const sockaddr_in& src, uint32_t peer_tag);
     void send_stale_cookie_error(const SCTP_Common_Header& header, const sockaddr_in& src, const State_Cookie& cookie, uint32_t staleness_us);
     void send_error(const SCTP_Common_Header& header, const sockaddr_in& src, uint32_t peer_tag, std::vector<error_cause> causes);

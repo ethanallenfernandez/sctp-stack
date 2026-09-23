@@ -7,7 +7,6 @@
 #include <string>
 #include <functional>
 #include <map>
-#include <queue>
 #include <chrono>
 #include <sctp/platform.hpp>
 #include <sctp/sctp.hpp>
@@ -73,7 +72,6 @@ struct Association {
     uint16_t ack_state;
     uint16_t in_streams;
     uint16_t out_streams;
-    std::queue<std::vector<uint8_t>> ulp_buffer;
     // Include reassembly buffer
 };
 

@@ -159,6 +159,7 @@ void settle() {
 }
 
 bool start(SCTP_Socket& stack, uint16_t port) {
+    stack.sctp_set_linger(0); // the raw peer never answers a SHUTDOWN
     return stack.sctp_bind("127.0.0.1", port) && stack.sctp_run();
 }
 

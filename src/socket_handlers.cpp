@@ -33,6 +33,12 @@ namespace {
         return error_cause{CAUSE_UNRECOGNIZED_CHUNK, std::move(info)};
     }
 
+    bool contains_chunk(const SCTP_Packet& packet, Chunk_Type type) {
+        return std::any_of(packet.chunks.begin(), packet.chunks.end(), [type](const SCTP_Chunk& chunk) {
+            return chunk.chunk_header.type == type;
+        });
+    }
+
     bool carries_stale_cookie(const SCTP_Chunk& chunk) {
         const auto& error = std::get<error_chunk_value>(chunk.chunk_value);
         return std::any_of(error.causes.begin(), error.causes.end(), [](const error_cause& cause) {
@@ -74,6 +80,11 @@ void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockad
             std::cout << "Aborting out of the blue packet" << std::endl;
             send_abort(in_pkt.header, src, in_pkt.header.verification_tag, true, {});
             return;
+        case Packet_Validation::SHUTDOWN_COMPLETE_OOTB:
+            std::cout << "Answering out of the blue SHUTDOWN_ACK" << std::endl;
+            enqueue_packet(Deliverable{src, build_shutdown_complete(
+                in_pkt.header.des_port, in_pkt.header.src_port, in_pkt.header.verification_tag, true)});
+            return;
         case Packet_Validation::DISCARD:
             std::cout << "Dropped packet with bad verification tag" << std::endl;
             return;
@@ -101,6 +112,20 @@ void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockad
         if (!handle_cookie_echo(in_pkt.header, in_pkt.chunks[0], src)) {
             return;
         }
+    }
+
+    // 9.2: any packet from the peer in SHUTDOWN-SENT gives it more time.
+    bool shutdown_sent = false;
+    {
+        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+        auto it = associations.find(Association_Key{src});
+        if (it != associations.end() && it->second.state == SHUTDOWN_SENT) {
+            it->second.error_count = 0;
+            shutdown_sent = true;
+        }
+    }
+    if (shutdown_sent) {
+        restart_t2(Association_Key{src});
     }
 
     for (size_t i = carried_cookie_echo ? 1 : 0; i < in_pkt.chunks.size(); i++) {
@@ -141,6 +166,18 @@ void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockad
                 std::cout << "Recieved HEARTBEAT_ACK" << std::endl;
                 SCTP_Socket::handle_heartbeat_ack(in_pkt.header, in_pkt.chunks[i], src);
                 break;
+            case SHUTDOWN:
+                std::cout << "Recieved SHUTDOWN" << std::endl;
+                SCTP_Socket::handle_shutdown(in_pkt.header, in_pkt.chunks[i], src);
+                break;
+            case SHUTDOWN_ACK:
+                std::cout << "Recieved SHUTDOWN_ACK" << std::endl;
+                SCTP_Socket::handle_shutdown_ack(in_pkt.header, in_pkt.chunks[i], src);
+                break;
+            case SHUTDOWN_COMPLETE:
+                std::cout << "Recieved SHUTDOWN_COMPLETE" << std::endl;
+                SCTP_Socket::handle_shutdown_complete(in_pkt.header, in_pkt.chunks[i], src);
+                break;
             default:
                 break;
         }
@@ -180,16 +217,21 @@ Packet_Validation SCTP_Socket::validate_verification_tag(const SCTP_Packet& pkt,
         return ootb_response(pkt);
     }
 
-    // 8.5.1 B: the T bit says which tag the sender could reach for. Set, it had
-    // no TCB and echoed ours back, so the match is against the tag we handed the
-    // peer; clear, it held a TCB and addressed us under our own.
-    if (first.type == ABORT) {
+    // 8.5.1 B and C: the T bit says which tag the sender could reach for. Set, it
+    // had no TCB and echoed ours back, so the match is against the tag we handed
+    // the peer; clear, it held a TCB and addressed us under our own.
+    if (first.type == ABORT || first.type == SHUTDOWN_COMPLETE) {
         uint32_t expected = (first.flag & CHUNK_FLAG_T_BIT)
             ? it->second.peer_ver_tag
             : it->second.this_ver_tag;
         return expected != 0 && pkt.header.verification_tag == expected
             ? Packet_Validation::ACCEPT
             : Packet_Validation::DISCARD;
+    }
+
+    // 8.5.1 E: the SHUTDOWN ACK belongs to an association this TCB replaced.
+    if ((it->second.state == COOKIE_WAIT || it->second.state == COOKIE_ECHOED) && contains_chunk(pkt, SHUTDOWN_ACK)) {
+        return ootb_response(pkt);
     }
 
     return pkt.header.verification_tag == it->second.this_ver_tag
@@ -199,24 +241,19 @@ Packet_Validation SCTP_Socket::validate_verification_tag(const SCTP_Packet& pkt,
 
 // 8.4: an unattributable packet is answered with an ABORT, except where a reply
 // would bounce forever or the sender is already tearing the association down.
+// The rules are ordered: an ABORT anywhere in the packet outranks the rest.
 Packet_Validation SCTP_Socket::ootb_response(const SCTP_Packet& pkt) {
-    for (const auto& chunk : pkt.chunks) {
-        switch (chunk.chunk_header.type) {
-            case ABORT:
-            case COOKIE_ACK:
-            case SHUTDOWN_COMPLETE:
-                return Packet_Validation::DISCARD;
-            case SHUTDOWN_ACK:
-                // Owed a SHUTDOWN COMPLETE with the T bit, which needs Tier 3 shutdown.
-                return Packet_Validation::DISCARD;
-            case OP_ERROR:
-                if (carries_stale_cookie(chunk)) {
-                    return Packet_Validation::DISCARD;
-                }
-                break;
-            default:
-                break;
-        }
+    if (contains_chunk(pkt, ABORT)) {
+        return Packet_Validation::DISCARD;
+    }
+    if (contains_chunk(pkt, SHUTDOWN_ACK)) {
+        return Packet_Validation::SHUTDOWN_COMPLETE_OOTB;
+    }
+    bool stale_cookie = std::any_of(pkt.chunks.begin(), pkt.chunks.end(), [](const SCTP_Chunk& chunk) {
+        return chunk.chunk_header.type == OP_ERROR && carries_stale_cookie(chunk);
+    });
+    if (stale_cookie || contains_chunk(pkt, SHUTDOWN_COMPLETE) || contains_chunk(pkt, COOKIE_ACK)) {
+        return Packet_Validation::DISCARD;
     }
     return Packet_Validation::ABORT_OOTB;
 }
@@ -283,6 +320,7 @@ void SCTP_Socket::handle_init(const SCTP_Common_Header& header, const SCTP_Chunk
 
             switch (assoc.state) {
                 case SHUTDOWN_ACK_SENT:
+                    enqueue_packet(Deliverable{src, build_shutdown_ack(header.des_port, header.src_port, assoc.peer_ver_tag)});
                     return;
                 case COOKIE_WAIT:
                 case COOKIE_ECHOED:
@@ -465,8 +503,10 @@ bool SCTP_Socket::handle_cookie_echo(
         }
     } else if (!local_match && !peer_match && tie_tags_match) {
         // A: peer restart
+        // The SHUTDOWN ACK is for the old association, so it goes under the old
+        // tag: the restarted peer reflects it back, which is what we accept.
         if (tcb.state == SHUTDOWN_ACK_SENT) {
-            // TODO: also resend SHUTDOWN ACK. Needs Tier 3 shutdown.
+            enqueue_packet(Deliverable{src, build_shutdown_ack(header.des_port, header.src_port, tcb.peer_ver_tag)});
             send_error(header, src, cookie.peer_ver_tag, {error_cause{CAUSE_COOKIE_WHILE_SHUTTING_DOWN, {}}});
             return false;
         }
@@ -483,11 +523,12 @@ bool SCTP_Socket::handle_cookie_echo(
         tcb.peer_rwnd = cookie.peer_a_rwnd;
         tcb.tsn_ooo_buffer.clear();
         tcb.duplicate_tsns.clear();
+        // A shutdown in progress is kept rather than silently cancelled.
         if (tcb.state == COOKIE_WAIT || tcb.state == COOKIE_ECHOED) {
+            tcb.state = ESTABLISHED;
             notify_assoc_change(key, Assoc_Change_State::COMM_UP);
             schedule_heartbeat(key, tcb.rto);
         }
-        tcb.state = ESTABLISHED;
     } else {
         // C, and anything not in the table
         std::cout << "Dropped COOKIE_ECHO that does not match the existing association" << std::endl;
@@ -624,6 +665,53 @@ void SCTP_Socket::abort_association(
     notify_assoc_change(key, forming ? Assoc_Change_State::CANT_STR_ASSOC : Assoc_Change_State::COMM_LOST);
 }
 
+// Cumulative against next_tsn rather than outstanding_data being empty: DATA
+// still in the send queue has a TSN but no outstanding entry yet.
+void SCTP_Socket::do_next_shutdown_step(const Association_Key& key) {
+    SCTP_Packet packet;
+    bool guard = false;
+    {
+        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+        auto it = associations.find(key);
+        if (it == associations.end()) {
+            return;
+        }
+        Association& assoc = it->second;
+        if (assoc.cumulative_tsn_ack != assoc.next_tsn - 1) {
+            return;
+        }
+
+        uint16_t src_port = ntohs(local_address.sin_port);
+        uint16_t des_port = ntohs(key.address.sin_port);
+        switch (assoc.state) {
+            case SHUTDOWN_PENDING:
+                packet = build_shutdown(src_port, des_port, assoc.peer_ver_tag, assoc.last_peer_tsn);
+                assoc.state = SHUTDOWN_SENT;
+                guard = true;
+                break;
+            case SHUTDOWN_RECEIVED:
+                packet = build_shutdown_ack(src_port, des_port, assoc.peer_ver_tag);
+                assoc.state = SHUTDOWN_ACK_SENT;
+                break;
+            default:
+                return;
+        }
+    }
+
+    cancel_expiration(Expiration_Key{key, Expiration_Timer_Type::HEARTBEAT});
+    cancel_expiration(Expiration_Key{key, Expiration_Timer_Type::DELAYED_SACK});
+    cancel_expiration(Expiration_Key{key, Expiration_Timer_Type::T3_RTX});
+    enqueue_packet(Deliverable{key, std::move(packet)});
+    restart_t2(key);
+    if (guard) {
+        schedule_expiration(
+            Expiration_Key{key, Expiration_Timer_Type::T5_SHUTDOWN_GUARD},
+            std::chrono::steady_clock::now() + T5_SHUTDOWN_GUARD,
+            Deliverable{key, SCTP_Packet{}}
+        );
+    }
+}
+
 void SCTP_Socket::handle_cookie_ack(const SCTP_Common_Header&, const SCTP_Chunk&, const sockaddr_in& src) {
     std::unique_lock<std::mutex> assoc_lock(associations_mutex);
     Association_Key assoc_key{src};
@@ -652,7 +740,8 @@ void SCTP_Socket::handle_heartbeat(const SCTP_Common_Header& header, const SCTP_
         auto it = associations.find(key);
         // The Info is echoed verbatim and the peer chooses its length, so an
         // oversized one would build a reply we cannot put on the wire.
-        if (it == associations.end() || 2 * SCTP_CHUNK_HEADER_SIZE + info.size() > it->second.pmdcs) {
+        if (it == associations.end() || it->second.state == SHUTDOWN_SENT || it->second.state == SHUTDOWN_ACK_SENT
+                || 2 * SCTP_CHUNK_HEADER_SIZE + info.size() > it->second.pmdcs) {
             return;
         }
         peer_tag = it->second.peer_ver_tag;
@@ -686,10 +775,148 @@ void SCTP_Socket::handle_heartbeat_ack(const SCTP_Common_Header&, const SCTP_Chu
         std::chrono::steady_clock::now() - assoc.hb_sent_at));
 }
 
+// The Cumulative TSN Ack is applied as a SACK with no Gap Ack Blocks, except
+// that the missing blocks are not a renege (3.3.8): gap-acked chunks stay so.
+void SCTP_Socket::handle_shutdown(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src) {
+    uint32_t cumulative_tsn_ack = std::get<shutdown_chunk_value>(chunk.chunk_value).cumulative_tsn_ack;
+    Association_Key key{src};
+    bool reply_ack = false;
+    bool violation = false;
+    bool first_shutdown = false;
+    bool advanced = false;
+    bool data_remains = false;
+    uint32_t peer_tag;
+    {
+        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+        auto it = associations.find(key);
+        if (it == associations.end()) {
+            return;
+        }
+        Association& assoc = it->second;
+        peer_tag = assoc.peer_ver_tag;
+
+        switch (assoc.state) {
+            case COOKIE_WAIT:
+            case COOKIE_ECHOED:
+                return;
+            case SHUTDOWN_SENT:
+                assoc.state = SHUTDOWN_ACK_SENT;
+                [[fallthrough]];
+            case SHUTDOWN_ACK_SENT:
+                reply_ack = true;
+                break;
+            default:
+                if (!tsn_lt(cumulative_tsn_ack, assoc.next_tsn)) {
+                    violation = true;
+                    break;
+                }
+                advanced = tsn_gt(cumulative_tsn_ack, assoc.cumulative_tsn_ack);
+                if (advanced) {
+                    bool acked_new = false;
+                    for (auto entry = assoc.outstanding_data.begin(); entry != assoc.outstanding_data.end();) {
+                        if (!tsn_lte(entry->first, cumulative_tsn_ack)) {
+                            ++entry;
+                            continue;
+                        }
+                        acked_new = acked_new || !entry->second.gap_acked;
+                        entry = assoc.outstanding_data.erase(entry);
+                    }
+                    assoc.cumulative_tsn_ack = cumulative_tsn_ack;
+                    if (assoc.has_rtt_measurement_tsn && tsn_lte(assoc.rtt_measurement_tsn, cumulative_tsn_ack)) {
+                        assoc.has_rtt_measurement_tsn = false;
+                    }
+                    if (assoc.in_fast_recovery && tsn_gte(cumulative_tsn_ack, assoc.fast_recovery_exit_tsn)) {
+                        assoc.in_fast_recovery = false;
+                    }
+                    if (acked_new) {
+                        assoc.error_count = 0;
+                    }
+                }
+                first_shutdown = assoc.state != SHUTDOWN_RECEIVED;
+                assoc.state = SHUTDOWN_RECEIVED;
+                data_remains = has_unacknowledged_data(assoc);
+        }
+    }
+
+    if (violation) {
+        std::cout << "Aborting association: SHUTDOWN acknowledges a TSN never sent" << std::endl;
+        abort_association(key, header, src, {error_cause{CAUSE_PROTOCOL_VIOLATION, {}}});
+        return;
+    }
+    if (reply_ack) {
+        enqueue_packet(Deliverable{key, build_shutdown_ack(header.des_port, header.src_port, peer_tag)});
+        restart_t2(key);
+        return;
+    }
+
+    if (first_shutdown) {
+        notifications.enqueue(Notification{Notification_Type::SCTP_SHUTDOWN_EVENT, key, 0, Shutdown_Event{}});
+    }
+    if (advanced) {
+        sends.remove_acked_retransmissions(key, sack_chunk_value{cumulative_tsn_ack, 0, 0, 0, {}, {}});
+        if (!data_remains) {
+            cancel_expiration(Expiration_Key{key, Expiration_Timer_Type::T3_RTX});
+        } else {
+            restart_t3(key);
+        }
+    }
+    do_next_shutdown_step(key);
+}
+
+void SCTP_Socket::handle_shutdown_ack(const SCTP_Common_Header& header, const SCTP_Chunk&, const sockaddr_in& src) {
+    Association_Key key{src};
+    uint32_t peer_tag;
+    {
+        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+        auto it = associations.find(key);
+        if (it == associations.end() || (it->second.state != SHUTDOWN_SENT && it->second.state != SHUTDOWN_ACK_SENT)) {
+            return;
+        }
+        peer_tag = it->second.peer_ver_tag;
+    }
+
+    remove_association(key);
+    enqueue_packet(Deliverable{key, build_shutdown_complete(header.des_port, header.src_port, peer_tag, false)});
+    notify_assoc_change(key, Assoc_Change_State::SHUTDOWN_COMP);
+}
+
+void SCTP_Socket::handle_shutdown_complete(const SCTP_Common_Header&, const SCTP_Chunk&, const sockaddr_in& src) {
+    Association_Key key{src};
+    {
+        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+        auto it = associations.find(key);
+        if (it == associations.end() || it->second.state != SHUTDOWN_ACK_SENT) {
+            return;
+        }
+    }
+
+    remove_association(key);
+    notify_assoc_change(key, Assoc_Change_State::SHUTDOWN_COMP);
+}
+
 void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src) {
-    (void)header;
     const auto& sack = std::get<sack_chunk_value>(chunk.chunk_value);
     Association_Key key{src};
+
+    bool acks_unsent;
+    {
+        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+        auto association = associations.find(key);
+        if (association == associations.end() || !transmits_data(association->second.state)) {
+            return;
+        }
+        uint32_t next_tsn = association->second.next_tsn;
+        acks_unsent = !tsn_lt(sack.cumulative_tsn_ack, next_tsn)
+            || std::any_of(sack.gap_ack_blocks.begin(), sack.gap_ack_blocks.end(), [&](const sack_gap_ack_block& block) {
+                return !tsn_lt(sack.cumulative_tsn_ack + block.end, next_tsn);
+            });
+    }
+    if (acks_unsent) {
+        std::cout << "Aborting association: SACK acknowledges a TSN never sent" << std::endl;
+        abort_association(key, header, src, {error_cause{CAUSE_PROTOCOL_VIOLATION, {}}});
+        return;
+    }
+
     bool stop = false;
     bool restart = false;
     bool start = false;
@@ -699,7 +926,7 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
     { // Scope for association lock
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
         auto association = associations.find(key);
-        if (association == associations.end() || (association->second.state != ESTABLISHED && association->second.state != SHUTDOWN_PENDING && association->second.state != SHUTDOWN_RECEIVED)) {
+        if (association == associations.end() || !transmits_data(association->second.state)) {
             return;
         }
 
@@ -911,6 +1138,7 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
     } else if (start) {
         start_t3_if_stopped(key);
     }
+    do_next_shutdown_step(key);
 }
 
 void SCTP_Socket::send_sack(const Association_Key& key) {
@@ -919,46 +1147,50 @@ void SCTP_Socket::send_sack(const Association_Key& key) {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
         auto association = associations.find(key);
         if (association == associations.end()
-                || association->second.state != ESTABLISHED) {
+                || !receives_data(association->second.state)) {
             return;
         }
-        Association& assoc = association->second;
-
-        std::vector<uint16_t> offsets;
-        offsets.reserve(assoc.tsn_ooo_buffer.size());
-        for (const auto& [tsn, data] : assoc.tsn_ooo_buffer) {
-            uint32_t offset = tsn - assoc.last_peer_tsn;
-            if (offset > 0 && offset <= UINT16_MAX) {
-                offsets.push_back(static_cast<uint16_t>(offset));
-            }
-            (void)data;
-        }
-        std::sort(offsets.begin(), offsets.end());
-        offsets.erase(std::unique(offsets.begin(), offsets.end()), offsets.end()); // Should not be necessary, but nonetheless...
-
-        std::vector<sack_gap_ack_block> gaps;
-        for (uint16_t offset : offsets) {
-            if (gaps.empty() || static_cast<uint32_t>(gaps.back().end) + 1 != offset) {
-                gaps.push_back({offset, offset});
-            } else {
-                gaps.back().end = offset;
-            }
-        }
-
-        sack_packet = build_sack(
-            ntohs(local_address.sin_port),
-            ntohs(key.address.sin_port),
-            assoc.peer_ver_tag,
-            assoc.last_peer_tsn,
-            std::move(gaps),
-            std::move(assoc.duplicate_tsns)
-        );
-        assoc.duplicate_tsns.clear();
-        assoc.delayed_sack_packet_count = 0;
+        sack_packet = make_sack(key, association->second);
     }
     cancel_expiration(
         Expiration_Key{key, Expiration_Timer_Type::DELAYED_SACK});
     enqueue_packet(Deliverable{key, std::move(sack_packet)});
+}
+
+// Caller must hold associations_mutex.
+SCTP_Packet SCTP_Socket::make_sack(const Association_Key& key, Association& assoc) {
+    std::vector<uint16_t> offsets;
+    offsets.reserve(assoc.tsn_ooo_buffer.size());
+    for (const auto& [tsn, data] : assoc.tsn_ooo_buffer) {
+        uint32_t offset = tsn - assoc.last_peer_tsn;
+        if (offset > 0 && offset <= UINT16_MAX) {
+            offsets.push_back(static_cast<uint16_t>(offset));
+        }
+        (void)data;
+    }
+    std::sort(offsets.begin(), offsets.end());
+    offsets.erase(std::unique(offsets.begin(), offsets.end()), offsets.end()); // Should not be necessary, but nonetheless...
+
+    std::vector<sack_gap_ack_block> gaps;
+    for (uint16_t offset : offsets) {
+        if (gaps.empty() || static_cast<uint32_t>(gaps.back().end) + 1 != offset) {
+            gaps.push_back({offset, offset});
+        } else {
+            gaps.back().end = offset;
+        }
+    }
+
+    SCTP_Packet sack_packet = build_sack(
+        ntohs(local_address.sin_port),
+        ntohs(key.address.sin_port),
+        assoc.peer_ver_tag,
+        assoc.last_peer_tsn,
+        std::move(gaps),
+        std::move(assoc.duplicate_tsns)
+    );
+    assoc.duplicate_tsns.clear();
+    assoc.delayed_sack_packet_count = 0;
+    return sack_packet;
 }
 
 void SCTP_Socket::handle_delayed_sack_expiration(
@@ -987,14 +1219,17 @@ void SCTP_Socket::handle_data_packet(
     }
 
     bool have_data = false;
+    bool reply_shutdown = false;
+    SCTP_Packet shutdown_reply;
     bool send_immediately = acknowledge_immediately;
     bool start_delayed_timer = false;
     std::vector<error_cause> invalid_streams;
+    std::vector<std::vector<uint8_t>> delivered;
     uint32_t peer_tag = 0;
     {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
         auto it = associations.find(assoc_key);
-        if (it == associations.end() || it->second.state != ESTABLISHED) {
+        if (it == associations.end() || !receives_data(it->second.state)) {
             return;
         }
 
@@ -1017,11 +1252,11 @@ void SCTP_Socket::handle_data_packet(
             if (tsn == assoc.last_peer_tsn + 1) {
                 assoc.last_peer_tsn = tsn;
                 if (valid_stream) {
-                    assoc.ulp_buffer.push(data.user_data);
+                    delivered.push_back(data.user_data);
                 } else {
                     invalid_streams.push_back(invalid_stream_cause(data.stream_identifier));
                 }
-                read_ooo_buffer(assoc);
+                read_ooo_buffer(assoc, delivered);
             } else if (tsn_lt(assoc.last_peer_tsn + 1, tsn)) {
                 auto inserted = assoc.tsn_ooo_buffer.emplace(tsn, data);
                 if (!inserted.second) {
@@ -1040,19 +1275,35 @@ void SCTP_Socket::handle_data_packet(
         if (!have_data) {
             return;
         }
+        // 9.2: in SHUTDOWN-SENT every DATA packet is answered with a SHUTDOWN,
+        // and with a SACK as well whenever the SHUTDOWN alone would not say it all.
+        if (assoc.state == SHUTDOWN_SENT) {
+            reply_shutdown = true;
+            shutdown_reply = build_shutdown(ntohs(local_address.sin_port), ntohs(assoc_key.address.sin_port), peer_tag, assoc.last_peer_tsn);
+            if (!assoc.tsn_ooo_buffer.empty() || !assoc.duplicate_tsns.empty()) {
+                shutdown_reply.chunks.push_back(std::move(make_sack(assoc_key, assoc).chunks[0]));
+            }
+        }
         send_immediately = send_immediately || saw_duplicate
             || hole_existed || !assoc.tsn_ooo_buffer.empty();
-        if (!send_immediately) {
+        if (!reply_shutdown && !send_immediately) {
             ++assoc.delayed_sack_packet_count;
             send_immediately = assoc.delayed_sack_packet_count >= 2;
             start_delayed_timer = !send_immediately;
         }
     }
 
+    for (auto& message : delivered) {
+        receives.push(assoc_key, std::move(message));
+    }
     if (!invalid_streams.empty()) {
         send_error(packet.header, src, peer_tag, std::move(invalid_streams));
     }
-    if (send_immediately) {
+    if (reply_shutdown) {
+        cancel_expiration(Expiration_Key{assoc_key, Expiration_Timer_Type::DELAYED_SACK});
+        enqueue_packet(Deliverable{assoc_key, std::move(shutdown_reply)});
+        restart_t2(assoc_key);
+    } else if (send_immediately) {
         send_sack(assoc_key);
     } else if (start_delayed_timer) {
         schedule_expiration(
@@ -1062,11 +1313,11 @@ void SCTP_Socket::handle_data_packet(
     }
 }
 
-void SCTP_Socket::read_ooo_buffer(Association& assoc) {
+void SCTP_Socket::read_ooo_buffer(Association& assoc, std::vector<std::vector<uint8_t>>& delivered) {
     uint32_t tsn = assoc.last_peer_tsn + 1;
     for (auto it = assoc.tsn_ooo_buffer.find(tsn); it != assoc.tsn_ooo_buffer.end(); it = assoc.tsn_ooo_buffer.find(++tsn)) {
         if (it->second.stream_identifier < assoc.in_streams) {
-            assoc.ulp_buffer.push(std::move(it->second.user_data));
+            delivered.push_back(std::move(it->second.user_data));
         }
         assoc.tsn_ooo_buffer.erase(it);
     }

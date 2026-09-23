@@ -9,6 +9,7 @@
 #include "builders.hpp"
 #include "socket_internal.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <iostream>
 #include <mutex>
@@ -88,7 +89,10 @@ bool SCTP_Socket::sctp_run() {
     return true;
 }
 
-void SCTP_Socket::sctp_close() {
+void SCTP_Socket::sctp_close(int linger) {
+    if (running.load()) {
+        close_associations(std::chrono::milliseconds(std::max(linger == USE_SOCKET_LINGER ? linger_ms.load() : linger, 0)));
+    }
     running.store(false);
     notifications.close();
     if (event_loop_thread.joinable()) {
@@ -97,6 +101,7 @@ void SCTP_Socket::sctp_close() {
     }
     expirations.clear();
     sends.clear();
+    receives.clear();
     wakeup.close();
     if (udp_socket != INVALID_SOCKET) {
         sctp_close_socket(udp_socket);
@@ -107,6 +112,40 @@ void SCTP_Socket::sctp_close() {
         platform_started = false;
         std::cout << "Socket closed successfully" << std::endl;
     }
+}
+
+void SCTP_Socket::sctp_set_linger(int linger) {
+    linger_ms.store(std::max(linger, 0));
+}
+
+// Graceful where the linger allows, abortive for whatever it does not. The event
+// loop keeps running throughout: it is what completes the shutdowns and puts the
+// final chunks on the wire.
+void SCTP_Socket::close_associations(std::chrono::milliseconds linger) {
+    auto keys = [this] {
+        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+        std::vector<Association_Key> result;
+        for (const auto& entry : associations) {
+            result.push_back(entry.first);
+        }
+        return result;
+    };
+    auto wait_until = [](std::chrono::steady_clock::time_point deadline, auto done) {
+        while (!done() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(CLOSE_POLL_INTERVAL);
+        }
+    };
+
+    if (linger.count() > 0) {
+        for (const auto& key : keys()) {
+            sctp_shutdown(key);
+        }
+        wait_until(std::chrono::steady_clock::now() + linger, [&] { return keys().empty(); });
+    }
+    for (const auto& key : keys()) {
+        sctp_abort(key);
+    }
+    wait_until(std::chrono::steady_clock::now() + CLOSE_DRAIN_TIMEOUT, [this] { return sends.size() == 0; });
 }
 
 Association_Key SCTP_Socket::sctp_associate(std::string_view ip_address, int port) {
@@ -236,7 +275,7 @@ void SCTP_Socket::sctp_send_data(const sockaddr_in& association_id, const std::v
 void SCTP_Socket::sctp_send_data(const Association_Key& association_id, const std::vector<uint8_t>& data) {
     std::unique_lock<std::mutex> assoc_lock(associations_mutex);
     auto it = associations.find(association_id);
-    if (it == associations.end() || (it->second.state != ESTABLISHED && it->second.state != SHUTDOWN_PENDING && it->second.state != SHUTDOWN_RECEIVED)) {
+    if (it == associations.end() || it->second.state != ESTABLISHED) {
         return;
     }
 
@@ -300,29 +339,19 @@ void SCTP_Socket::sctp_abort(const Association_Key& association_id, const std::v
     });
 }
 
+
+
 size_t SCTP_Socket::sctp_recv_data(std::vector<uint8_t>& buffer, Association_Key* out_association_id) {
-    std::unique_lock<std::mutex> assoc_lock(associations_mutex);
-    for (auto& [key, assoc] : associations) {
-        if ((assoc.state != ESTABLISHED && assoc.state != SHUTDOWN_PENDING && assoc.state != SHUTDOWN_RECEIVED)) {
-            continue;
-        }
-        if (assoc.ulp_buffer.empty()) {
-            continue;
-        }
-
-        auto key_copy = key;
-        std::vector<uint8_t> data = assoc.ulp_buffer.front();
-        assoc.ulp_buffer.pop();
-        assoc_lock.unlock();
-
-        size_t to_copy = std::min(buffer.size(), data.size());
-        std::memcpy(const_cast<uint8_t*>(buffer.data()), data.data(), to_copy);
-        if (out_association_id) {
-            *out_association_id = key_copy;
-        }
-        return to_copy;
+    auto message = receives.pop_any();
+    if (!message) {
+        return 0;
     }
-    return 0;
+    if (out_association_id) {
+        *out_association_id = message->first;
+    }
+    size_t to_copy = std::min(buffer.size(), message->second.size());
+    std::memcpy(buffer.data(), message->second.data(), to_copy);
+    return to_copy;
 }
 
 size_t SCTP_Socket::sctp_recv_data_from(const sockaddr_in& association_id, std::vector<uint8_t>& buffer) {
@@ -331,26 +360,44 @@ size_t SCTP_Socket::sctp_recv_data_from(const sockaddr_in& association_id, std::
 }
 
 size_t SCTP_Socket::sctp_recv_data_from(const Association_Key& association_id, std::vector<uint8_t>& buffer) {
-    std::unique_lock<std::mutex> assoc_lock(associations_mutex);
-    auto it = associations.find(association_id);
-    if (it == associations.end() || (it->second.state != ESTABLISHED && it->second.state != SHUTDOWN_PENDING && it->second.state != SHUTDOWN_RECEIVED)) {
+    auto message = receives.pop_from(association_id);
+    if (!message) {
         return 0;
     }
-
-    Association& assoc = it->second;
-    if (assoc.ulp_buffer.empty()) {
-        return 0;
-    }
-
-    std::vector<uint8_t> data = assoc.ulp_buffer.front();
-    assoc.ulp_buffer.pop();
-    assoc_lock.unlock();
-
-    size_t to_copy = std::min(buffer.size(), data.size());
-    std::memcpy(const_cast<uint8_t*>(buffer.data()), data.data(), to_copy);
+    size_t to_copy = std::min(buffer.size(), message->size());
+    std::memcpy(buffer.data(), message->data(), to_copy);
     return to_copy;
 }
 
-Association_Key SCTP_Socket::get_this_association_key() {
-    return Association_Key{local_address};
+void SCTP_Socket::sctp_shutdown(const sockaddr_in& association_id) {
+    Association_Key key{association_id};
+    sctp_shutdown(key);
+}
+
+void SCTP_Socket::sctp_shutdown(const Association_Key& association_id) {
+    std::unique_lock<std::mutex> assoc_lock(associations_mutex);
+    auto it = associations.find(association_id);
+    if (it == associations.end()) {
+        return;
+    }
+
+    // Before COMMUNICATION UP there is nothing to close gracefully. As Linux does,
+    // the TCB goes without a word to the peer and without a notification.
+    switch (it->second.state) {
+        case COOKIE_WAIT:
+        case COOKIE_ECHOED:
+            associations.erase(it);
+            assoc_lock.unlock();
+            cancel_expirations(association_id);
+            sends.purge(association_id);
+            return;
+        case ESTABLISHED:
+            it->second.state = SHUTDOWN_PENDING;
+            break;
+        default:
+            return;
+    }
+    assoc_lock.unlock();
+
+    do_next_shutdown_step(association_id);
 }

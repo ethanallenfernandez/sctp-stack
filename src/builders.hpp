@@ -55,6 +55,16 @@ SCTP_Packet build_abort(
     bool reflected,
     std::vector<error_cause> causes);
 
+SCTP_Packet build_shutdown(
+    uint16_t src_port,
+    uint16_t des_port,
+    uint32_t peer_tag,
+    uint32_t cumulative_tsn_ack);
+
+SCTP_Packet build_shutdown_ack(uint16_t src_port, uint16_t des_port, uint32_t peer_tag);
+
+SCTP_Packet build_shutdown_complete(uint16_t src_port, uint16_t des_port, uint32_t tag, bool reflected);
+
 // The Heartbeat Info is opaque: the sender picks the bytes, the responder
 // echoes back the ones it was given without reading them.
 SCTP_Packet build_heartbeat(

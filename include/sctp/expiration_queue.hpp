@@ -27,6 +27,8 @@ enum class Expiration_Timer_Type {
     T3_RTX,
     DELAYED_SACK,
     HEARTBEAT,
+    T2_SHUTDOWN,
+    T5_SHUTDOWN_GUARD,
 };
 
 struct Expiration_Key {

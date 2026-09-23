@@ -138,6 +138,7 @@ static void test_out_of_order_delivery(uint32_t base_tsn, const char* label) {
                 label, base_tsn);
 
     SCTP_Socket server{};
+    server.sctp_set_linger(0); // the raw peer never answers a SHUTDOWN
     if (!server.sctp_bind("127.0.0.1", SERVER_PORT)) {
         check(false, "server bind"); return;
     }

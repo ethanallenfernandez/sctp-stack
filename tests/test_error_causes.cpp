@@ -76,6 +76,10 @@ struct SCTP_Socket_Test_Access {
         return stack.associations.insert_or_assign(peer_key(), assoc).first->second;
     }
 
+    size_t delivered() {
+        return stack.receives.messages(peer_key());
+    }
+
     Association* find() {
         auto it = stack.associations.find(peer_key());
         return it == stack.associations.end() ? nullptr : &it->second;
@@ -262,7 +266,7 @@ void test_invalid_stream() {
     h.add(ESTABLISHED);
     h.receive(OUR_TAG, {data(1, 0), data(2, 5), data(3, 0)});
     Association* assoc = h.find();
-    check(assoc && assoc->ulp_buffer.size() == 2, "valid-stream DATA on either side is delivered");
+    check(h.delivered() == 2, "valid-stream DATA on either side is delivered");
     check(assoc && assoc->last_peer_tsn == 3, "the invalid chunk's TSN is still acknowledged");
 
     std::vector<SCTP_Packet> sent = h.drain_sends();
@@ -281,7 +285,7 @@ void test_invalid_stream() {
     check(first_chunk(ooo.drain_sends(), OP_ERROR) != nullptr, "reported when it arrives out of order");
     ooo.receive(OUR_TAG, {data(1, 0)});
     assoc = ooo.find();
-    check(assoc && assoc->ulp_buffer.size() == 2 && assoc->last_peer_tsn == 3,
+    check(assoc && ooo.delivered() == 2 && assoc->last_peer_tsn == 3,
           "gap filled: TSNs 1 and 3 delivered, 2 skipped");
     check(first_chunk(ooo.drain_sends(), OP_ERROR) == nullptr, "not reported again when drained");
 

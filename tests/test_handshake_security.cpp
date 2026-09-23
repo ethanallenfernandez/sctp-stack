@@ -154,6 +154,7 @@ void test_cookie_echo_does_not_bypass_tag_check() {
     constexpr uint32_t WRONG_TAG = 0xBADBAD00;
 
     SCTP_Socket stack;
+    stack.sctp_set_linger(0); // the raw peer never answers a SHUTDOWN
     if (!stack.sctp_bind("127.0.0.1", STACK_PORT) || !stack.sctp_run()) {
         check(false, "stack started"); return;
     }

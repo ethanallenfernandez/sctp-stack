@@ -27,6 +27,14 @@ void SCTP_Socket::handle_expiration(const Expiration_Fallback& fallback) {
         handle_heartbeat_expiration(fallback.key.location);
         return;
     }
+    if (fallback.key.type == Expiration_Timer_Type::T2_SHUTDOWN) {
+        handle_t2_expiration(fallback.key.location);
+        return;
+    }
+    if (fallback.key.type == Expiration_Timer_Type::T5_SHUTDOWN_GUARD) {
+        handle_t5_expiration(fallback.key.location);
+        return;
+    }
     if (fallback.key.type != Expiration_Timer_Type::T1_INIT && fallback.key.type != Expiration_Timer_Type::T1_COOKIE) {
         return;
     }
@@ -65,7 +73,7 @@ void SCTP_Socket::handle_expiration(const Expiration_Fallback& fallback) {
 void SCTP_Socket::record_data_sent(const Association_Key& location, const data_chunk_value& data, std::chrono::steady_clock::time_point sent_at) {
     std::lock_guard<std::mutex> assoc_lock(associations_mutex);
     auto association = associations.find(location);
-    if (association == associations.end() || association->second.state != ESTABLISHED) {
+    if (association == associations.end() || !transmits_data(association->second.state)) {
         return;
     }
 
@@ -120,13 +128,86 @@ void SCTP_Socket::restart_t3(const Association_Key& location) {
     );
 }
 
+void SCTP_Socket::restart_t2(const Association_Key& location) {
+    std::chrono::microseconds rto;
+    {
+        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+        auto association = associations.find(location);
+        if (association == associations.end()) {
+            return;
+        }
+        rto = association->second.rto;
+    }
+
+    schedule_expiration(
+        Expiration_Key{location, Expiration_Timer_Type::T2_SHUTDOWN},
+        std::chrono::steady_clock::now() + rto,
+        Deliverable{location, SCTP_Packet{}}
+    );
+}
+
+// Rebuilt rather than replayed: a resent SHUTDOWN carries the Cumulative TSN
+// Ack as it stands now.
+void SCTP_Socket::handle_t2_expiration(const Association_Key& location) {
+    SCTP_Packet packet;
+    bool unreachable;
+    {
+        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+        auto association = associations.find(location);
+        if (association == associations.end()
+                || (association->second.state != SHUTDOWN_SENT && association->second.state != SHUTDOWN_ACK_SENT)) {
+            return;
+        }
+
+        Association& assoc = association->second;
+        assoc.rto = std::min(assoc.rto * 2, std::chrono::duration_cast<std::chrono::microseconds>(sctp_parameters::RTO_MAX));
+        unreachable = ++assoc.error_count > assoc.error_threshold;
+        uint16_t src_port = ntohs(local_address.sin_port);
+        uint16_t des_port = ntohs(location.address.sin_port);
+        packet = assoc.state == SHUTDOWN_SENT
+            ? build_shutdown(src_port, des_port, assoc.peer_ver_tag, assoc.last_peer_tsn)
+            : build_shutdown_ack(src_port, des_port, assoc.peer_ver_tag);
+    }
+
+    if (unreachable) {
+        remove_association(location);
+        notify_assoc_change(location, Assoc_Change_State::COMM_LOST);
+        std::cout << "Association failed: shutdown unanswered" << std::endl;
+        return;
+    }
+    enqueue_packet(Deliverable{location, std::move(packet)});
+    restart_t2(location);
+}
+
+// Armed once, on entering SHUTDOWN-SENT, and never restarted: T2's count is
+// cleared by every packet the peer sends, so this is the only bound it cannot
+// push back.
+void SCTP_Socket::handle_t5_expiration(const Association_Key& location) {
+    uint32_t peer_tag;
+    {
+        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+        auto association = associations.find(location);
+        if (association == associations.end()
+                || (association->second.state != SHUTDOWN_SENT && association->second.state != SHUTDOWN_ACK_SENT)) {
+            return;
+        }
+        peer_tag = association->second.peer_ver_tag;
+    }
+
+    remove_association(location);
+    enqueue_packet(Deliverable{location, build_abort(
+        ntohs(local_address.sin_port), ntohs(location.address.sin_port), peer_tag, false, {})});
+    notify_assoc_change(location, Assoc_Change_State::COMM_LOST);
+    std::cout << "Association aborted: shutdown did not complete in time" << std::endl;
+}
+
 void SCTP_Socket::handle_t3_expiration(const Association_Key& location) {
     Deliverable retransmission;
     bool have_data = false;
     {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
         auto association = associations.find(location);
-        if (association == associations.end() || association->second.state != ESTABLISHED || !has_unacknowledged_data(association->second)) {
+        if (association == associations.end() || !transmits_data(association->second.state) || !has_unacknowledged_data(association->second)) {
             return;
         }
 
@@ -192,7 +273,7 @@ void SCTP_Socket::handle_heartbeat_expiration(const Association_Key& location) {
     {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
         auto association = associations.find(location);
-        if (association == associations.end() || association->second.state != ESTABLISHED) {
+        if (association == associations.end() || !transmits_data(association->second.state)) {
             return;
         }
 

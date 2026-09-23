@@ -54,10 +54,7 @@ struct SCTP_Socket_Test_Access {
         stack.handle_recv_packet(wire.data(), wire.size(), src);
 
         Result result{0, {}};
-        auto it = stack.associations.find(key);
-        if (it != stack.associations.end()) {
-            result.delivered = it->second.ulp_buffer.size();
-        }
+        result.delivered = stack.receives.messages(key);
         auto now = std::chrono::steady_clock::now();
         while (auto pending = stack.sends.peek(now)) {
             const SCTP_Packet& sent = pending->deliverable.packet;

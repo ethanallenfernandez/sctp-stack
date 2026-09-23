@@ -28,7 +28,11 @@ inline const std::unordered_map<Chunk_Type, std::vector<Expiration_Policy>> EXPI
 };
 
 constexpr std::chrono::microseconds CLOCK_GRANULARITY{1000};
+constexpr std::chrono::milliseconds T5_SHUTDOWN_GUARD = 5 * sctp_parameters::RTO_MAX;
 constexpr std::chrono::milliseconds SEND_RETRY_DELAY{10};
+constexpr std::chrono::milliseconds CLOSE_POLL_INTERVAL{10};
+// Time given to the last SHUTDOWN COMPLETE or ABORT to reach the wire.
+constexpr std::chrono::milliseconds CLOSE_DRAIN_TIMEOUT{100};
 constexpr uint32_t DEFAULT_PMDCS = 1200;
 constexpr size_t MAX_RECEIVE_BATCH = 64;
 constexpr uint8_t DATA_IMMEDIATE_SACK_FLAG = 0x08;
@@ -52,6 +56,16 @@ inline bool has_unacknowledged_data(const Association& assoc) {
             return !entry.second.gap_acked;
         }
     );
+}
+
+// RFC 9260 6: DATA is sent and SACKs processed in these states...
+inline bool transmits_data(Association_State state) {
+    return state == ESTABLISHED || state == SHUTDOWN_PENDING || state == SHUTDOWN_RECEIVED;
+}
+
+// ...and DATA is received in these.
+inline bool receives_data(Association_State state) {
+    return state == ESTABLISHED || state == SHUTDOWN_PENDING || state == SHUTDOWN_SENT;
 }
 
 inline std::vector<uint8_t> be32_bytes(uint32_t v) {

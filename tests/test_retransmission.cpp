@@ -222,6 +222,7 @@ bool setup(SCTP_Socket& stack, RawPeer& peer, Association_Key& key) {
     if (!peer.open()) {
         return false;
     }
+    stack.sctp_set_linger(0); // the raw peer never answers a SHUTDOWN
     if (!stack.sctp_bind("127.0.0.1", STACK_PORT)
             || !stack.sctp_run()) {
         return false;

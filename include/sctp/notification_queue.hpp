@@ -40,11 +40,14 @@ struct Remote_Error {
     std::vector<error_cause> causes;
 };
 
+// The peer has begun a graceful close: sends are refused from here on.
+struct Shutdown_Event {};
+
 struct Notification {
     Notification_Type type;
     Association_Key src;
     uint64_t sequence_number;   // assigned by enqueue
-    std::variant<Assoc_Change, Remote_Error> payload;
+    std::variant<Assoc_Change, Remote_Error, Shutdown_Event> payload;
 };
 
 constexpr size_t MAX_QUEUED_NOTIFICATIONS = 1024;
