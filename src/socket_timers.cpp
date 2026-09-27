@@ -35,6 +35,10 @@ void SCTP_Socket::handle_expiration(const Expiration_Fallback& fallback) {
         handle_t5_expiration(fallback.key.location);
         return;
     }
+    if (fallback.key.type == Expiration_Timer_Type::ZERO_WINDOW_PROBE) {
+        handle_zero_window_probe_expiration(fallback.key.location);
+        return;
+    }
     if (fallback.key.type != Expiration_Timer_Type::T1_INIT && fallback.key.type != Expiration_Timer_Type::T1_COOKIE) {
         return;
     }
@@ -78,8 +82,15 @@ void SCTP_Socket::record_data_sent(const Association_Key& location, const data_c
     }
 
     Association& assoc = association->second;
+    assoc.data_sent_at = sent_at;
+    assoc.idle_decaying = false;
+    uint32_t chunk_size = static_cast<uint32_t>(data_chunk_wire_size(data));
+    bool exceeds_rwnd = chunk_size > assoc.peer_rwnd;
+    assoc.peer_rwnd -= std::min(assoc.peer_rwnd, chunk_size);
     auto outstanding = assoc.outstanding_data.find(data.tsn);
     if (outstanding == assoc.outstanding_data.end()) {
+        assoc.zero_window_probing = assoc.zero_window_probe_allowed && exceeds_rwnd;
+        assoc.zero_window_probe_allowed = false;
         assoc.outstanding_data.emplace(
             data.tsn,
             Outstanding_Data{data, sent_at, sent_at, false, false, 0, false, false}
@@ -202,8 +213,7 @@ void SCTP_Socket::handle_t5_expiration(const Association_Key& location) {
 }
 
 void SCTP_Socket::handle_t3_expiration(const Association_Key& location) {
-    Deliverable retransmission;
-    bool have_data = false;
+    bool unreachable = false;
     {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
         auto association = associations.find(location);
@@ -212,54 +222,39 @@ void SCTP_Socket::handle_t3_expiration(const Association_Key& location) {
         }
 
         Association& assoc = association->second;
-        assoc.ssthresh = std::max(assoc.cwnd / 2, 4U * assoc.pmdcs);
-        assoc.cwnd = assoc.pmdcs;
-        assoc.partial_bytes_acked = 0;
-        assoc.rto = std::min(assoc.rto * 2, std::chrono::duration_cast<std::chrono::microseconds>(sctp_parameters::RTO_MAX));
-        ++assoc.error_count;
-
-        std::vector<std::pair<uint32_t, Outstanding_Data*>> ordered;
-        ordered.reserve(assoc.outstanding_data.size());
-        for (auto& entry : assoc.outstanding_data) {
-            ordered.push_back({entry.first, &entry.second});
+        if (!assoc.zero_window_probing) {
+            assoc.ssthresh = std::max(assoc.cwnd / 2, 4U * assoc.pmdcs);
+            assoc.cwnd = assoc.pmdcs;
+            assoc.partial_bytes_acked = 0;
+            assoc.single_packet_in_flight = true;
         }
-        std::sort(
-            ordered.begin(),
-            ordered.end(),
-            [&](const auto& lhs, const auto& rhs) {
-                return static_cast<uint32_t>(lhs.first - assoc.cumulative_tsn_ack) < static_cast<uint32_t>(rhs.first - assoc.cumulative_tsn_ack);
-            }
-        );
+        assoc.rto = std::min(assoc.rto * 2, std::chrono::duration_cast<std::chrono::microseconds>(sctp_parameters::RTO_MAX));
+        if (!assoc.zero_window_probing || !assoc.sack_since_t3) {
+            unreachable = ++assoc.error_count > assoc.error_threshold;
+        }
+        assoc.sack_since_t3 = false;
 
-        std::vector<data_chunk_value> bundle;
-        size_t packet_size = SCTP_COMMON_HEADER_SIZE;
-        for (const auto& [tsn, outstanding] : ordered) {
-            if (outstanding->gap_acked) {
+        for (auto& [tsn, outstanding] : assoc.outstanding_data) {
+            if (outstanding.gap_acked || outstanding.pending_retransmission) {
                 continue;
             }
-            size_t chunk_size = data_chunk_wire_size(outstanding->data);
-            if (!bundle.empty()
-                    && packet_size + chunk_size
-                        > SCTP_COMMON_HEADER_SIZE + assoc.pmdcs) {
-                break;
-            }
-            bundle.push_back(outstanding->data);
-            packet_size += chunk_size;
+            outstanding.pending_retransmission = true;
+            assoc.peer_rwnd += static_cast<uint32_t>(data_chunk_wire_size(outstanding.data));
             (void)tsn;
         }
-
-        retransmission = Deliverable{location, build_data(
-            ntohs(local_address.sin_port),
-            ntohs(location.address.sin_port),
-            assoc.peer_ver_tag,
-            std::move(bundle)
-        )};
-        have_data = !retransmission.packet.chunks.empty();
     }
 
-    if (have_data) {
-        enqueue_packet(std::move(retransmission), Send_Priority::RETRANSMISSION);
+    if (unreachable) {
+        remove_association(location);
+        notify_assoc_change(location, Assoc_Change_State::COMM_LOST);
+        std::cout << "Association failed: peer unreachable" << std::endl;
+        return;
     }
+
+    // Everything unacknowledged is now marked, so a queued packet would only
+    // duplicate chunks the first one below is about to carry.
+    sends.remove_retransmissions_of_type(location, DATA);
+    schedule_pending_retransmission(location);
 }
 
 // RFC 9260 8.3: probe only destinations that are idle, on HB.interval plus the
@@ -310,6 +305,14 @@ void SCTP_Socket::handle_heartbeat_expiration(const Association_Key& location) {
         enqueue_packet(std::move(probe));
     }
     schedule_heartbeat(location, rto);
+}
+
+void SCTP_Socket::handle_zero_window_probe_expiration(const Association_Key& location) {
+    std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+    auto association = associations.find(location);
+    if (association != associations.end() && association->second.outstanding_data.empty()) {
+        association->second.zero_window_probe_allowed = true;
+    }
 }
 
 void SCTP_Socket::schedule_heartbeat(const Association_Key& location, std::chrono::microseconds rto) {
@@ -377,7 +380,7 @@ void SCTP_Socket::schedule_pending_retransmission(
         Association& assoc = association->second;
         std::vector<std::pair<uint32_t, Outstanding_Data*>> ordered;
         for (auto& entry : assoc.outstanding_data) {
-            if (entry.second.pending_retransmission) {
+            if (entry.second.pending_retransmission && !entry.second.gap_acked) {
                 ordered.push_back({entry.first, &entry.second});
             }
         }

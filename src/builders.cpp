@@ -112,13 +112,14 @@ SCTP_Packet build_sack(
     uint16_t des_port,
     uint32_t peer_tag,
     uint32_t cumulative_tsn_ack,
+    uint32_t a_rwnd,
     std::vector<sack_gap_ack_block> gaps,
     std::vector<uint32_t> duplicate_tsns
 ) {
     SCTP_Packet packet = packet_with_header(src_port, des_port, peer_tag);
     append_chunk(packet, SACK, 0, sack_chunk_value{
         .cumulative_tsn_ack = cumulative_tsn_ack,
-        .a_rwnd = RWND, // Need to track available receive window for the peer
+        .a_rwnd = a_rwnd,
         .number_of_gap_ack_blocks = static_cast<uint16_t>(gaps.size()),
         .number_of_duplicate_tsns = static_cast<uint16_t>(duplicate_tsns.size()),
         .gap_ack_blocks = std::move(gaps),

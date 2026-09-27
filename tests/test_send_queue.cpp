@@ -34,6 +34,9 @@ struct SCTP_Socket_Test_Access {
         association.peer_ver_tag = 0x10203040;
         association.next_tsn = initial_tsn;
         association.rto = sctp_parameters::RTO_INITIAL;
+        association.pmdcs = 1200;
+        association.cwnd = 4380;
+        association.peer_rwnd = 65535;
 
         Association_Key key{peer};
         {

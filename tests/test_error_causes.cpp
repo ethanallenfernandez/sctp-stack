@@ -98,7 +98,7 @@ struct SCTP_Socket_Test_Access {
         auto now = std::chrono::steady_clock::now();
         while (auto pending = stack.sends.peek(now)) {
             out.push_back(pending->deliverable.packet);
-            stack.sends.commit(pending->priority);
+            stack.sends.commit(*pending);
         }
         return out;
     }

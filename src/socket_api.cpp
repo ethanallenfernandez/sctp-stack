@@ -193,7 +193,8 @@ Association SCTP_Socket::init_new_association(const Association_Key& key) {
     result.rto = sctp_parameters::RTO_INITIAL;
     result.error_threshold = sctp_parameters::ASSOCIATION_MAX_RETRANS;
     result.pmdcs = DEFAULT_PMDCS;
-    result.cwnd = std::min(4U * result.pmdcs, std::max(2U * result.pmdcs, 4380U));
+    result.cwnd = initial_cwnd(result.pmdcs);
+    result.our_rwnd = RWND;
     result.ssthresh = RWND;
 
     return result;
@@ -218,7 +219,8 @@ Association SCTP_Socket::init_new_association(const State_Cookie& cookie, const 
     result.rto = sctp_parameters::RTO_INITIAL;
     result.error_threshold = sctp_parameters::ASSOCIATION_MAX_RETRANS;
     result.pmdcs = DEFAULT_PMDCS;
-    result.cwnd = std::min(4U * result.pmdcs, std::max(2U * result.pmdcs, 4380U));
+    result.cwnd = initial_cwnd(result.pmdcs);
+    result.our_rwnd = RWND;
     result.ssthresh = RWND;
 
     return result;
@@ -351,6 +353,7 @@ size_t SCTP_Socket::sctp_recv_data(std::vector<uint8_t>& buffer, Association_Key
     }
     size_t to_copy = std::min(buffer.size(), message->second.size());
     std::memcpy(buffer.data(), message->second.data(), to_copy);
+    maybe_send_window_update(message->first);
     return to_copy;
 }
 
@@ -366,6 +369,7 @@ size_t SCTP_Socket::sctp_recv_data_from(const Association_Key& association_id, s
     }
     size_t to_copy = std::min(buffer.size(), message->size());
     std::memcpy(buffer.data(), message->data(), to_copy);
+    maybe_send_window_update(association_id);
     return to_copy;
 }
 

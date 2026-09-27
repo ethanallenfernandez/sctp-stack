@@ -27,11 +27,13 @@ bool Wakeup_Pair::open() {
     sockaddr_in wakeup_address{};
     wakeup_address.sin_family = AF_INET;
     wakeup_address.sin_port = 0;
-    if (!sctp_parse_ipv4("127.0.0.1", wakeup_address.sin_addr)
-            || bind(
-                reader,
-                reinterpret_cast<const sockaddr*>(&wakeup_address),
-                sizeof(wakeup_address)) == SOCKET_ERROR) {
+    if (!sctp_parse_ipv4("127.0.0.1", wakeup_address.sin_addr) || 
+        bind(
+            reader,
+            reinterpret_cast<const sockaddr*>(&wakeup_address),
+            sizeof(wakeup_address)) == SOCKET_ERROR
+        ) 
+    {
         int err = sctp_last_error();
         close();
         sctp_set_last_error(err);

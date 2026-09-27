@@ -75,29 +75,202 @@ void SCTP_Socket::run_expire() {
     }
 }
 
+namespace {
+    // A no-op unless cwnd is above 4 * PMDCS: the decay is never allowed to
+    // raise cwnd, as it would after a T3-rtx expiry left cwnd at one PMDCS.
+    void decay_idle_cwnd(Association& assoc, std::chrono::steady_clock::time_point now) {
+        if (assoc.rto.count() <= 0 || now - assoc.data_sent_at < assoc.rto) {
+            return;
+        }
+        auto periods = (now - assoc.data_sent_at) / assoc.rto;
+        assoc.data_sent_at += periods * assoc.rto;
+        uint32_t floor = 4 * assoc.pmdcs;
+        if (assoc.cwnd <= floor) {
+            return;
+        }
+        if (!assoc.idle_decaying) {
+            assoc.ssthresh = assoc.cwnd;
+            assoc.idle_decaying = true;
+        }
+        for (; periods > 0 && assoc.cwnd > floor; --periods) {
+            assoc.cwnd = std::max(assoc.cwnd / 2, floor);
+        }
+    }
+}
+
 void SCTP_Socket::run_sending() {
-    // handle_send_packet must not run under the send queue's lock.
-    std::optional<Send_Queue::Pending> pending =
-        sends.peek(std::chrono::steady_clock::now());
-    if (!pending) {
+    start_transmission_opportunity();
+    for (size_t sent = 0; sent < MAX_SEND_BATCH; ++sent) {
+        std::optional<Send_Queue::Pending> pending = next_packet();
+        if (!pending) {
+            return;
+        }
+        // handle_send_packet must not run under the send queue's lock.
+        if (!handle_send_packet(pending->deliverable)) {
+            sends.defer(std::chrono::steady_clock::now() + SEND_RETRY_DELAY);
+            requeue_bundled_sack(*pending);
+            return;
+        }
+        packet_sent(*pending);
+    }
+}
+
+std::optional<Send_Queue::Pending> SCTP_Socket::next_packet() {
+    Send_Allowances allowances = send_allowances();
+    refill_retransmissions(allowances);
+    std::optional<Send_Queue::Pending> pending = sends.peek(std::chrono::steady_clock::now(), allowances);
+    arm_zero_window_probes(allowances);
+    if (pending && pending->priority != Send_Priority::CONTROL) {
+        prepare_data_packet(pending->deliverable, pending->priority == Send_Priority::NEW_DATA);
+    }
+    return pending;
+}
+
+void SCTP_Socket::packet_sent(const Send_Queue::Pending& pending) {
+    sends.commit(pending);
+    schedule_expirations_after_send(pending.deliverable, std::chrono::steady_clock::now());
+    if (pending.priority != Send_Priority::NEW_DATA) {
+        return;
+    }
+    std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+    auto association = associations.find(pending.deliverable.location);
+    if (association != associations.end()) {
+        ++association->second.burst_count;
+    }
+}
+
+// The queued copy of a packet never carries the SACK prepare_data_packet
+// bundled into it, so a failed send would otherwise lose that SACK.
+void SCTP_Socket::requeue_bundled_sack(const Send_Queue::Pending& pending) {
+    const auto& chunks = pending.deliverable.packet.chunks;
+    if (pending.priority == Send_Priority::CONTROL || chunks.empty() || chunks.front().chunk_header.type != SACK) {
+        return;
+    }
+    SCTP_Packet sack;
+    sack.header = pending.deliverable.packet.header;
+    sack.chunks.push_back(chunks.front());
+    enqueue_packet(Deliverable{pending.deliverable.location, std::move(sack)});
+}
+
+// Max.Burst (6.1 D) is applied by counting the new-DATA packets each association
+// sends in one pass of the send loop, rather than by clamping cwnd.
+void SCTP_Socket::start_transmission_opportunity() {
+    std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+    for (auto& [key, assoc] : associations) {
+        assoc.burst_count = 0;
+        (void)key;
+    }
+}
+
+Send_Allowances SCTP_Socket::send_allowances() {
+    Send_Allowances allowances;
+    auto now = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+    for (auto& [key, assoc] : associations) {
+        if (!transmits_data(assoc.state)) {
+            continue;
+        }
+        decay_idle_cwnd(assoc, now);
+        size_t flight_size = bytes_in_flight(assoc);
+        allowances.emplace(key, Send_Allowance{
+            .flight_size = flight_size,
+            .cwnd_open = assoc.single_packet_in_flight ? flight_size == 0 : flight_size < assoc.cwnd,
+            .burst_spent = assoc.burst_count >= sctp_parameters::MAX_BURST,
+            .rwnd = assoc.peer_rwnd,
+            .zero_window_probe = assoc.zero_window_probe_allowed && flight_size == 0,
+        });
+    }
+    return allowances;
+}
+
+// Sets the I bit on the last DATA chunk when the packet fills the congestion or
+// receiver window, or in SHUTDOWN-PENDING, so the SACK that reopens the window
+// or completes the shutdown is not delayed. Also bundles a SACK that is being
+// delayed, sending it on its own instead when the packet has no room for it.
+void SCTP_Socket::prepare_data_packet(Deliverable& deliverable, bool new_data) {
+    auto& chunks = deliverable.packet.chunks;
+    auto last_data = std::find_if(chunks.rbegin(), chunks.rend(), [](const SCTP_Chunk& chunk) {
+        return chunk.chunk_header.type == DATA;
+    });
+    if (last_data == chunks.rend()) {
         return;
     }
 
-    if (!handle_send_packet(pending->deliverable)) {
-        sends.defer(std::chrono::steady_clock::now() + SEND_RETRY_DELAY);
-        return;
+    Expiration_Key delayed_sack{deliverable.location, Expiration_Timer_Type::DELAYED_SACK};
+    bool sack_pending = expirations.is_active(delayed_sack);
+    SCTP_Packet sack;
+    uint32_t pmdcs;
+    {
+        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+        auto association = associations.find(deliverable.location);
+        if (association == associations.end()) {
+            return;
+        }
+        Association& assoc = association->second;
+        size_t data_size = 0;
+        for (const auto& chunk : chunks) {
+            if (chunk.chunk_header.type == DATA) {
+                data_size += data_chunk_wire_size(std::get<data_chunk_value>(chunk.chunk_value));
+            }
+        }
+        size_t flight_after = bytes_in_flight(assoc) + (new_data ? data_size : 0);
+        if (flight_after >= assoc.cwnd || data_size >= assoc.peer_rwnd || assoc.state == SHUTDOWN_PENDING) {
+            last_data->chunk_header.flag |= DATA_IMMEDIATE_SACK_FLAG;
+        }
+        if (!sack_pending || !receives_data(assoc.state)) {
+            return;
+        }
+        sack = make_sack(deliverable.location, assoc);
+        pmdcs = assoc.pmdcs;
     }
 
-    sends.commit(pending->priority);
-    schedule_expirations_after_send(pending->deliverable, std::chrono::steady_clock::now());
-    if (pending->priority == Send_Priority::RETRANSMISSION) {
-        schedule_pending_retransmission(pending->deliverable.location);
+    cancel_expiration(delayed_sack);
+    size_t sack_size = serialize_sctp_packet(sack).size() - SCTP_COMMON_HEADER_SIZE;
+    if (serialize_sctp_packet(deliverable.packet).size() + sack_size <= SCTP_COMMON_HEADER_SIZE + pmdcs) {
+        chunks.insert(chunks.begin(), std::move(sack.chunks.front()));
+    } else {
+        enqueue_packet(Deliverable{deliverable.location, std::move(sack)});
+    }
+}
+
+// Chunks marked for retransmission go out one packet at a time as cwnd allows,
+// each built only once there is room for it. The packet T3-rtx or a Fast
+// Retransmit sends first is queued by them directly, and is not held here.
+void SCTP_Socket::refill_retransmissions(const Send_Allowances& allowances) {
+    for (const auto& [key, allowance] : allowances) {
+        if (allowance.cwnd_open && !sends.has_retransmission_for(key)) {
+            schedule_pending_retransmission(key);
+        }
+    }
+}
+
+// 6.1 A: the first probe goes one RTO after the window is found closed with
+// nothing in flight. T3-rtx then retransmits it with exponential backoff.
+void SCTP_Socket::arm_zero_window_probes(const Send_Allowances& allowances) {
+    for (const auto& [key, allowance] : allowances) {
+        if (!allowance.rwnd_blocked || allowance.flight_size != 0) {
+            continue;
+        }
+        Expiration_Key timer{key, Expiration_Timer_Type::ZERO_WINDOW_PROBE};
+        if (expirations.is_active(timer)) {
+            continue;
+        }
+        std::chrono::microseconds rto;
+        {
+            std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+            auto association = associations.find(key);
+            if (association == associations.end() || association->second.zero_window_probe_allowed) {
+                continue;
+            }
+            rto = association->second.rto;
+        }
+        schedule_expiration(timer, std::chrono::steady_clock::now() + rto, Deliverable{key, SCTP_Packet{}});
     }
 }
 
 void SCTP_Socket::run_receiving() {
     for (size_t received_packets = 0; received_packets < MAX_RECEIVE_BATCH; ++received_packets) {
-        uint8_t buffer[RWND];
+        uint8_t buffer[MAX_UDP_DATAGRAM];
         sockaddr_in src{};
         socklen_t src_len = sizeof(src);
         int n = recvfrom(udp_socket, reinterpret_cast<char*>(buffer), sizeof(buffer), 0, reinterpret_cast<sockaddr*>(&src), &src_len);

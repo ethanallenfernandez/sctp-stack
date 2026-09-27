@@ -94,6 +94,14 @@ private:
     void notify_assoc_change(const Association_Key& key, Assoc_Change_State state);
     void run_expire();
     void run_sending();
+    void start_transmission_opportunity();
+    std::optional<Send_Queue::Pending> next_packet();
+    void packet_sent(const Send_Queue::Pending& pending);
+    void requeue_bundled_sack(const Send_Queue::Pending& pending);
+    Send_Allowances send_allowances();
+    void arm_zero_window_probes(const Send_Allowances& allowances);
+    void refill_retransmissions(const Send_Allowances& allowances);
+    void prepare_data_packet(Deliverable& deliverable, bool new_data);
     void run_receiving();
     void enqueue_packet(Deliverable deliverable, Send_Priority priority = Send_Priority::CONTROL);
     void wake_event_loop();
@@ -107,6 +115,7 @@ private:
     void handle_t3_expiration(const Association_Key& location);
     void handle_delayed_sack_expiration(const Association_Key& location);
     void handle_heartbeat_expiration(const Association_Key& location);
+    void handle_zero_window_probe_expiration(const Association_Key& location);
     void schedule_heartbeat(const Association_Key& location, std::chrono::microseconds rto);
     void record_heartbeat_sent(const Association_Key& location, std::chrono::steady_clock::time_point sent_at);
     void record_data_sent(const Association_Key& location, const data_chunk_value& data, std::chrono::steady_clock::time_point sent_at);
@@ -139,6 +148,8 @@ private:
     void handle_shutdown_complete(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const sockaddr_in& src);
     void send_sack(const Association_Key& key);
     SCTP_Packet make_sack(const Association_Key& key, Association& assoc);
+    uint32_t receive_window(const Association_Key& key, const Association& assoc);
+    void maybe_send_window_update(const Association_Key& key);
     void send_cookie_ack(const SCTP_Common_Header& header, const sockaddr_in& src, uint32_t peer_tag);
     void send_stale_cookie_error(const SCTP_Common_Header& header, const sockaddr_in& src, const State_Cookie& cookie, uint32_t staleness_us);
     void send_error(const SCTP_Common_Header& header, const sockaddr_in& src, uint32_t peer_tag, std::vector<error_cause> causes);

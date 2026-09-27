@@ -66,7 +66,7 @@ struct SCTP_Socket_Test_Access {
         auto now = Clock::now();
         while (auto pending = stack.sends.peek(now)) {
             sent.push_back(pending->deliverable.packet);
-            stack.sends.commit(pending->priority);
+            stack.sends.commit(*pending);
         }
         return sent;
     }

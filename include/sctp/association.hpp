@@ -7,6 +7,7 @@
 #include <string>
 #include <functional>
 #include <map>
+#include <deque>
 #include <chrono>
 #include <sctp/platform.hpp>
 #include <sctp/sctp.hpp>
@@ -46,6 +47,10 @@ struct Association {
     bool hb_outstanding;
     std::chrono::steady_clock::time_point hb_sent_at;
     uint32_t peer_rwnd;
+    bool zero_window_probe_allowed;
+    bool zero_window_probing;
+    bool sack_since_t3;
+    // The a_rwnd we last advertised.
     uint32_t our_rwnd;
     uint32_t next_tsn;
     uint32_t last_peer_tsn;
@@ -64,6 +69,17 @@ struct Association {
     uint32_t cwnd;
     uint32_t ssthresh;
     uint32_t partial_bytes_acked;
+    // Set by a T3-rtx expiry, cleared by the next SACK acknowledging new DATA:
+    // until then only one packet may be in flight.
+    bool single_packet_in_flight;
+    // New-DATA packets sent in the current transmission opportunity.
+    uint32_t burst_count;
+    // TSN and size of retransmitted chunks recently acked cumulatively, which
+    // the peer may yet report as Duplicate TSNs.
+    std::deque<std::pair<uint32_t, uint32_t>> acked_retransmissions;
+    // Last DATA transmission, moved forward by each idle cwnd decay.
+    std::chrono::steady_clock::time_point data_sent_at;
+    bool idle_decaying;
     bool in_fast_recovery;
     uint32_t fast_recovery_exit_tsn;
     std::map<uint32_t, data_chunk_value> tsn_ooo_buffer;

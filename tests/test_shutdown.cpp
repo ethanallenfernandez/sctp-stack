@@ -103,7 +103,7 @@ struct SCTP_Socket_Test_Access {
             auto now = std::chrono::steady_clock::now();
             while (auto pending = socket.sends.peek(now)) {
                 result.sent.push_back(pending->deliverable.packet);
-                socket.sends.commit(pending->priority);
+                socket.sends.commit(*pending);
             }
             result.t2_armed = socket.expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::T2_SHUTDOWN});
             result.t3_armed = socket.expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::T3_RTX});

@@ -61,7 +61,7 @@ struct SCTP_Socket_Test_Access {
             if (!sent.chunks.empty() && sent.chunks[0].chunk_header.type == OP_ERROR) {
                 result.errors.push_back(sent);
             }
-            stack.sends.commit(pending->priority);
+            stack.sends.commit(*pending);
         }
         return result;
     }

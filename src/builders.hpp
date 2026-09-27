@@ -39,6 +39,7 @@ SCTP_Packet build_sack(
     uint16_t des_port,
     uint32_t peer_tag,
     uint32_t cumulative_tsn_ack,
+    uint32_t a_rwnd,
     std::vector<sack_gap_ack_block> gaps,
     std::vector<uint32_t> duplicate_tsns);
 

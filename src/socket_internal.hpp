@@ -7,6 +7,7 @@
 #include <sctp/expiration_queue.hpp>
 #include <sctp/sctp.hpp>
 #include <sctp/platform.hpp>
+#include "builders.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -34,7 +35,11 @@ constexpr std::chrono::milliseconds CLOSE_POLL_INTERVAL{10};
 // Time given to the last SHUTDOWN COMPLETE or ABORT to reach the wire.
 constexpr std::chrono::milliseconds CLOSE_DRAIN_TIMEOUT{100};
 constexpr uint32_t DEFAULT_PMDCS = 1200;
+constexpr uint32_t SLOW_START_INCREASE_PMDCS = 1;
+constexpr size_t ACKED_RETRANSMISSION_MEMORY = 64;
 constexpr size_t MAX_RECEIVE_BATCH = 64;
+constexpr size_t MAX_UDP_DATAGRAM = 65535;
+constexpr size_t MAX_SEND_BATCH = 64;
 constexpr uint8_t DATA_IMMEDIATE_SACK_FLAG = 0x08;
 // Must exceed any cookie lifespan, so a cookie still inside it always has its
 // signing key retained.
@@ -48,6 +53,10 @@ constexpr uint8_t MAX_STALE_COOKIE_RETRIES = 2;
 constexpr uint16_t LOCAL_OUT_STREAMS = 1;
 constexpr uint16_t LOCAL_MAX_IN_STREAMS = 1;
 
+inline uint32_t initial_cwnd(uint32_t pmdcs) {
+    return std::min(4U * pmdcs, std::max(2U * pmdcs, 4404U));
+}
+
 inline bool has_unacknowledged_data(const Association& assoc) {
     return std::any_of(
         assoc.outstanding_data.begin(),
@@ -56,6 +65,16 @@ inline bool has_unacknowledged_data(const Association& assoc) {
             return !entry.second.gap_acked;
         }
     );
+}
+
+inline size_t bytes_in_flight(const Association& assoc) {
+    size_t total = 0;
+    for (const auto& [tsn, outstanding] : assoc.outstanding_data) {
+        if (!outstanding.gap_acked && !outstanding.pending_retransmission) {
+            total += data_chunk_wire_size(outstanding.data);
+        }
+    }
+    return total;
 }
 
 // RFC 9260 6: DATA is sent and SACKs processed in these states...

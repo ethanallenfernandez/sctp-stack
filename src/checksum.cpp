@@ -6,9 +6,6 @@ namespace {
 const std::array<uint32_t, 256>& crc32c_table() {
     static const std::array<uint32_t, 256> table = [] {
         std::array<uint32_t, 256> result{};
-        // CRC-32C (Castagnoli), reflected to pair with the right-shifting
-        // table below; normal form is 0x1EDC6F41. RFC 3309 check value:
-        // CRC32C("123456789") == 0xE3069283.
         const uint32_t poly = 0x82F63B78;
 
         for (int i = 0; i < 256; i++) {

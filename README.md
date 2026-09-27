@@ -8,15 +8,23 @@ Builds on Linux and Windows from one source tree.
 ```
 include/sctp/     public API — what a consumer of the library includes
   sctp.hpp          protocol types and wire constants (no platform deps)
-  association.hpp   per-association state
+  association.hpp   per-association state (the TCB)
   socket.hpp        SCTP_Socket, the entry point
   platform.hpp      Winsock/POSIX socket compatibility layer
+  send_queue.hpp    outbound scheduling and per-association send gating
+  receive_queue.hpp messages delivered but not yet read by the application
+  expiration_queue.hpp  timer heap
+  notification_queue.hpp, cookie_auth.hpp, wakeup_pair.hpp, ...
 src/              implementation + internal headers (not installed)
-  socket.cpp        event loop, handshake, association handling
-  serialize.{hpp,cpp}  wire codec — byte order lives here
-  checksum.{hpp,cpp}   CRC-32C
+  socket_api.cpp        public API, association setup and teardown
+  socket_event_loop.cpp poll loop, send path, flow and congestion gating
+  socket_handlers.cpp   inbound chunks: handshake, DATA, SACK, shutdown, ...
+  socket_timers.cpp     T1/T2/T3/T5, heartbeat, zero window probe, RTO
+  builders.{hpp,cpp}    outbound packet construction
+  serialize.{hpp,cpp}   wire codec — byte order lives here
+  checksum.{hpp,cpp}    CRC-32C
 examples/         runnable demos, linked against the library
-tests/            wire-format conformance tests
+tests/            conformance tests, one binary per area
 build/            all build output (gitignored, never written in-tree)
 ```
 
@@ -41,9 +49,19 @@ Sanitized objects build into `build/asan` so they never mix with the plain ones.
 
 ## Status
 
-Implemented: four-way handshake (INIT / INIT_ACK / COOKIE_ECHO / COOKIE_ACK),
-DATA transfer with TSN ordering and an out-of-order buffer, CRC-32C, verification
-tag validation (RFC 9260 §8.5).
+Implemented:
 
-**DATA is not yet reliable** — there are no timers, so nothing is acknowledged or
-retransmitted. That is the next major piece of work.
+- Association setup: four-way handshake with signed state cookies, INIT
+  collision and peer restart handling (§5).
+- Reliable DATA transfer: SACK with gap ack blocks and duplicate TSNs, delayed
+  SACK, T3-rtx, fast retransmit and fast recovery, RTO estimation (§6).
+- Flow and congestion control (§6.1, §6.2, §7.2): cwnd and rwnd gating per
+  association, zero window probing, Max.Burst, slow start, congestion avoidance,
+  idle cwnd decay, an advertised receive window with receiver SWS avoidance and
+  window updates, SACKs bundled with outgoing DATA.
+- Path heartbeats and failure detection (§8.1, §8.3), ABORT and ERROR handling,
+  graceful shutdown (§9), verification tag rules (§8.5), CRC-32C.
+
+Not yet implemented: fragmentation and reassembly (§6.9) — every message is sent
+as a single DATA chunk — multiple streams and unordered delivery (§6.5, §6.6),
+multi-homing (§6.4), and IPv6.

@@ -29,6 +29,7 @@ enum class Expiration_Timer_Type {
     HEARTBEAT,
     T2_SHUTDOWN,
     T5_SHUTDOWN_GUARD,
+    ZERO_WINDOW_PROBE,
 };
 
 struct Expiration_Key {

@@ -20,6 +20,54 @@
 #include <vector>
 
 namespace {
+    size_t reorder_bytes(const Association& assoc) {
+        size_t total = 0;
+        for (const auto& [tsn, data] : assoc.tsn_ooo_buffer) {
+            total += data.user_data.size();
+            (void)tsn;
+        }
+        return total;
+    }
+
+    // With the receive buffer full, a new chunk above everything received is
+    // dropped. One below it instead takes the place of the highest TSN held for
+    // reordering, which is dropped even if a Gap Ack Block already reported it.
+    // Each report is counted once: an entry is consumed when it is matched.
+    uint32_t duplicate_bytes(Association& assoc, const sack_chunk_value& sack) {
+        uint32_t total = 0;
+        for (uint32_t tsn : sack.duplicate_tsns) {
+            auto outstanding = assoc.outstanding_data.find(tsn);
+            if (outstanding != assoc.outstanding_data.end()) {
+                total += static_cast<uint32_t>(data_chunk_wire_size(outstanding->second.data));
+                continue;
+            }
+            auto& acked = assoc.acked_retransmissions;
+            auto match = std::find_if(acked.begin(), acked.end(), [tsn](const auto& entry) {
+                return entry.first == tsn;
+            });
+            if (match != acked.end()) {
+                total += match->second;
+                acked.erase(match);
+            }
+        }
+        return total;
+    }
+
+    bool make_room(Association& assoc, uint32_t tsn, size_t& used) {
+        auto highest = assoc.tsn_ooo_buffer.end();
+        for (auto it = assoc.tsn_ooo_buffer.begin(); it != assoc.tsn_ooo_buffer.end(); ++it) {
+            if (highest == assoc.tsn_ooo_buffer.end() || tsn_gt(it->first, highest->first)) {
+                highest = it;
+            }
+        }
+        if (highest == assoc.tsn_ooo_buffer.end() || tsn_gt(tsn, highest->first)) {
+            return false;
+        }
+        used -= highest->second.user_data.size();
+        assoc.tsn_ooo_buffer.erase(highest);
+        return true;
+    }
+
     error_cause unrecognized_chunk_cause(const SCTP_Chunk& chunk) {
         const auto& body = std::get<unknown_chunk_value>(chunk.chunk_value).body;
         uint16_t length = static_cast<uint16_t>(SCTP_CHUNK_HEADER_SIZE + body.size());
@@ -31,6 +79,26 @@ namespace {
         };
         info.insert(info.end(), body.begin(), body.end());
         return error_cause{CAUSE_UNRECOGNIZED_CHUNK, std::move(info)};
+    }
+
+    // flight_before is the flightsize before this SACK was applied. It is what
+    // says whether the window being grown was actually in use.
+    void grow_cwnd(Association& assoc, uint32_t bytes_acked, uint32_t duplicate_bytes, size_t flight_before) {
+        bool cwnd_full = flight_before >= assoc.cwnd;
+        if (assoc.cwnd <= assoc.ssthresh) {
+            if (cwnd_full && !assoc.in_fast_recovery) {
+                assoc.cwnd += std::min(bytes_acked, SLOW_START_INCREASE_PMDCS * assoc.pmdcs);
+            }
+            return;
+        }
+
+        assoc.partial_bytes_acked += bytes_acked + duplicate_bytes;
+        if (assoc.partial_bytes_acked >= assoc.cwnd && cwnd_full) {
+            assoc.partial_bytes_acked -= assoc.cwnd;
+            assoc.cwnd += assoc.pmdcs;
+        } else if (assoc.partial_bytes_acked > assoc.cwnd) {
+            assoc.partial_bytes_acked = assoc.cwnd;
+        }
     }
 
     bool contains_chunk(const SCTP_Packet& packet, Chunk_Type type) {
@@ -921,6 +989,7 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
     bool restart = false;
     bool start = false;
     bool schedule_fast_retransmission = false;
+    bool entered_fast_recovery = false;
     bool fast_retransmits_lowest = false;
 
     { // Scope for association lock
@@ -935,6 +1004,7 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
             return;
         }
         uint32_t previous_cumulative_tsn_ack = assoc.cumulative_tsn_ack;
+        size_t flight_before = bytes_in_flight(assoc);
         bool cumulative_ack_advanced =
             tsn_gt(sack.cumulative_tsn_ack, previous_cumulative_tsn_ack);
 
@@ -955,6 +1025,7 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
         bool earliest_acknowledged = have_earliest && sack_acknowledges(sack, earliest_tsn);
 
         bool newly_acknowledged = false;
+        uint32_t bytes_acked = 0;
         bool reneged = false;
         std::vector<uint32_t> reneged_tsns;
         bool have_htna = false;
@@ -987,6 +1058,7 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
 
             if (acknowledged && !outstanding.gap_acked) {
                 newly_acknowledged = true;
+                bytes_acked += static_cast<uint32_t>(data_chunk_wire_size(outstanding.data));
                 if (assoc.has_rtt_measurement_tsn && tsn == assoc.rtt_measurement_tsn && !outstanding.retransmitted) {
                     update_rto(assoc, std::chrono::duration_cast<std::chrono::microseconds>(now - outstanding.first_sent));
                     assoc.has_rtt_measurement_tsn = false;
@@ -994,12 +1066,19 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
             }
 
             if (cumulatively_acknowledged) {
+                if (outstanding.retransmitted) {
+                    assoc.acked_retransmissions.emplace_back(tsn, static_cast<uint32_t>(data_chunk_wire_size(outstanding.data)));
+                    if (assoc.acked_retransmissions.size() > ACKED_RETRANSMISSION_MEMORY) {
+                        assoc.acked_retransmissions.pop_front();
+                    }
+                }
                 it = assoc.outstanding_data.erase(it);
                 continue;
             }
 
             if (acknowledged) {
                 outstanding.gap_acked = true;
+                outstanding.pending_retransmission = false;
             } else if (outstanding.gap_acked) {
                 outstanding.gap_acked = false;
                 reneged = true;
@@ -1014,6 +1093,14 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
         assoc.cumulative_tsn_ack = sack.cumulative_tsn_ack;
         if (newly_acknowledged) {
             assoc.error_count = 0;
+            assoc.single_packet_in_flight = false;
+        }
+        uint32_t reported_duplicates = duplicate_bytes(assoc, sack);
+        if (newly_acknowledged || reported_duplicates > 0) {
+            grow_cwnd(assoc, bytes_acked, reported_duplicates, flight_before);
+        }
+        if (assoc.outstanding_data.empty()) {
+            assoc.partial_bytes_acked = 0;
         }
 
         for (auto& [tsn, outstanding] : assoc.outstanding_data) {
@@ -1067,6 +1154,7 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
                 if (have_exit) {
                     assoc.in_fast_recovery = true;
                     assoc.fast_recovery_exit_tsn = exit_tsn;
+                    entered_fast_recovery = true;
                 }
             }
         }
@@ -1107,15 +1195,12 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
             }
         }
 
-        size_t outstanding_bytes = 0;
-        for (const auto& [tsn, outstanding] : assoc.outstanding_data) {
-            if (!outstanding.gap_acked) {
-                size_t chunk_size = 16 + outstanding.data.user_data.size();
-                outstanding_bytes += (chunk_size + 3) & ~size_t{3};
-            }
-            (void)tsn;
+        size_t flight_size = bytes_in_flight(assoc);
+        assoc.peer_rwnd = flight_size >= sack.a_rwnd ? 0 : sack.a_rwnd - static_cast<uint32_t>(flight_size);
+        assoc.sack_since_t3 = true;
+        if (sack.a_rwnd > 0) {
+            assoc.zero_window_probing = false;
         }
-        assoc.peer_rwnd = outstanding_bytes >= sack.a_rwnd ? 0 : sack.a_rwnd - static_cast<uint32_t>(outstanding_bytes);
 
         if (!has_unacknowledged_data(assoc)) {
             stop = true;
@@ -1128,7 +1213,7 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
 
     Expiration_Key timer{key, Expiration_Timer_Type::T3_RTX};
     sends.remove_acked_retransmissions(key, sack);
-    if (schedule_fast_retransmission) {
+    if (entered_fast_recovery) {
         schedule_pending_retransmission(key);
     }
     if (stop) {
@@ -1180,11 +1265,20 @@ SCTP_Packet SCTP_Socket::make_sack(const Association_Key& key, Association& asso
         }
     }
 
+    // Receiver SWS avoidance: an opening too small to be worth a packet is held
+    // back until it grows. A shrinking window is always advertised as it is.
+    uint32_t window = receive_window(key, assoc);
+    if (window > assoc.our_rwnd && window - assoc.our_rwnd < std::min<uint32_t>(RWND / 2, assoc.pmdcs)) {
+        window = assoc.our_rwnd;
+    }
+    assoc.our_rwnd = window;
+
     SCTP_Packet sack_packet = build_sack(
         ntohs(local_address.sin_port),
         ntohs(key.address.sin_port),
         assoc.peer_ver_tag,
         assoc.last_peer_tsn,
+        window,
         std::move(gaps),
         std::move(assoc.duplicate_tsns)
     );
@@ -1237,6 +1331,8 @@ void SCTP_Socket::handle_data_packet(
         peer_tag = assoc.peer_ver_tag;
         bool hole_existed = !assoc.tsn_ooo_buffer.empty();
         bool saw_duplicate = false;
+        bool dropped = false;
+        size_t used = receives.buffered_bytes(assoc_key) + reorder_bytes(assoc);
 
         for (const auto& chunk : packet.chunks) {
             if (chunk.chunk_header.type != DATA) {
@@ -1249,26 +1345,31 @@ void SCTP_Socket::handle_data_packet(
             uint32_t tsn = data.tsn;
             // RFC 9260 6.5: an invalid stream is still acked, but reported and never delivered.
             bool valid_stream = data.stream_identifier < assoc.in_streams;
+            if (tsn_lte(tsn, assoc.last_peer_tsn) || assoc.tsn_ooo_buffer.count(tsn) != 0) {
+                assoc.duplicate_tsns.push_back(tsn);
+                saw_duplicate = true;
+                continue;
+            }
+            if (used >= RWND && !make_room(assoc, tsn, used)) {
+                dropped = true;
+                continue;
+            }
+            if (valid_stream) {
+                used += data.user_data.size();
+            } else {
+                invalid_streams.push_back(invalid_stream_cause(data.stream_identifier));
+            }
             if (tsn == assoc.last_peer_tsn + 1) {
                 assoc.last_peer_tsn = tsn;
                 if (valid_stream) {
                     delivered.push_back(data.user_data);
-                } else {
-                    invalid_streams.push_back(invalid_stream_cause(data.stream_identifier));
                 }
                 read_ooo_buffer(assoc, delivered);
-            } else if (tsn_lt(assoc.last_peer_tsn + 1, tsn)) {
-                auto inserted = assoc.tsn_ooo_buffer.emplace(tsn, data);
-                if (!inserted.second) {
-                    assoc.duplicate_tsns.push_back(tsn);
-                    saw_duplicate = true;
-                } else if (!valid_stream) {
-                    inserted.first->second.user_data.clear();
-                    invalid_streams.push_back(invalid_stream_cause(data.stream_identifier));
-                }
             } else {
-                assoc.duplicate_tsns.push_back(tsn);
-                saw_duplicate = true;
+                auto inserted = assoc.tsn_ooo_buffer.emplace(tsn, data);
+                if (!valid_stream) {
+                    inserted.first->second.user_data.clear();
+                }
             }
         }
 
@@ -1280,11 +1381,11 @@ void SCTP_Socket::handle_data_packet(
         if (assoc.state == SHUTDOWN_SENT) {
             reply_shutdown = true;
             shutdown_reply = build_shutdown(ntohs(local_address.sin_port), ntohs(assoc_key.address.sin_port), peer_tag, assoc.last_peer_tsn);
-            if (!assoc.tsn_ooo_buffer.empty() || !assoc.duplicate_tsns.empty()) {
+            if (!assoc.tsn_ooo_buffer.empty() || !assoc.duplicate_tsns.empty() || dropped) {
                 shutdown_reply.chunks.push_back(std::move(make_sack(assoc_key, assoc).chunks[0]));
             }
         }
-        send_immediately = send_immediately || saw_duplicate
+        send_immediately = send_immediately || saw_duplicate || dropped
             || hole_existed || !assoc.tsn_ooo_buffer.empty();
         if (!reply_shutdown && !send_immediately) {
             ++assoc.delayed_sack_packet_count;
@@ -1311,6 +1412,28 @@ void SCTP_Socket::handle_data_packet(
             std::chrono::steady_clock::now() + sctp_parameters::SACK_DELAY,
             Deliverable{assoc_key, SCTP_Packet{}});
     }
+}
+
+// Receive buffer space not yet taken by messages waiting for the ULP or by DATA
+// held for reordering, in bytes of user data.
+uint32_t SCTP_Socket::receive_window(const Association_Key& key, const Association& assoc) {
+    size_t used = receives.buffered_bytes(key) + reorder_bytes(assoc);
+    return used >= RWND ? 0 : static_cast<uint32_t>(RWND - used);
+}
+
+void SCTP_Socket::maybe_send_window_update(const Association_Key& key) {
+    {
+        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+        auto association = associations.find(key);
+        if (association == associations.end() || !receives_data(association->second.state)) {
+            return;
+        }
+        uint32_t window = receive_window(key, association->second);
+        if (window < association->second.our_rwnd + RWND / 4) {
+            return;
+        }
+    }
+    send_sack(key);
 }
 
 void SCTP_Socket::read_ooo_buffer(Association& assoc, std::vector<std::vector<uint8_t>>& delivered) {
