@@ -111,7 +111,7 @@ struct RawPeer {
         SCTP_Packet p = packet(vtag);
         p.chunks.push_back(SCTP_Chunk{{COOKIE_ECHO, 0, 0}, cookie_echo_chunk_value{cookie}});
         if (!bundled.empty()) {
-            p.chunks.push_back(SCTP_Chunk{{DATA, 0, 0},
+            p.chunks.push_back(SCTP_Chunk{{DATA, DATA_FLAG_B | DATA_FLAG_E, 0},
                 data_chunk_value{tsn, 0, 0, 0, std::vector<uint8_t>(bundled.begin(), bundled.end())}});
         }
         send(p);
@@ -119,7 +119,7 @@ struct RawPeer {
 
     void send_data(uint32_t vtag, uint32_t tsn, const std::string& payload) {
         SCTP_Packet p = packet(vtag);
-        p.chunks.push_back(SCTP_Chunk{{DATA, 0, 0},
+        p.chunks.push_back(SCTP_Chunk{{DATA, DATA_FLAG_B | DATA_FLAG_E, 0},
             data_chunk_value{tsn, 0, 0, 0, std::vector<uint8_t>(payload.begin(), payload.end())}});
         send(p);
     }

@@ -213,6 +213,9 @@ SCTP_Packet deserialize_sctp_packet(const uint8_t* data, size_t len) {
 
         const uint8_t* body = read_ptr(body_len);
         deserialize_chunk_value(ch.type, body, body_len, chunk.chunk_value);
+        if (ch.type == DATA) {
+            std::get<data_chunk_value>(chunk.chunk_value).flags = ch.flag & (DATA_FLAG_U | DATA_FLAG_B | DATA_FLAG_E);
+        }
 
         out.chunks.push_back(std::move(chunk));
 

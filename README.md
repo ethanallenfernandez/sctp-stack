@@ -61,7 +61,9 @@ Implemented:
   window updates, SACKs bundled with outgoing DATA.
 - Path heartbeats and failure detection (§8.1, §8.3), ABORT and ERROR handling,
   graceful shutdown (§9), verification tag rules (§8.5), CRC-32C.
+- Fragmentation and reassembly (§6.9): messages larger than the PMDCS are split
+  on send and reassembled on receive, with partial delivery when a message
+  outgrows the receive buffer. Receive calls report a partial flag (§11.1.7).
 
-Not yet implemented: fragmentation and reassembly (§6.9) — every message is sent
-as a single DATA chunk — multiple streams and unordered delivery (§6.5, §6.6),
-multi-homing (§6.4), and IPv6.
+Not yet implemented: multiple streams and unordered delivery (§6.5, §6.6),
+multi-homing (§6.4), PMTU discovery (§7.3), and IPv6.

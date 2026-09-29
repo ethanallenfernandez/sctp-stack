@@ -350,7 +350,7 @@ struct RawPeer {
         SCTP_Packet data = packet(DATA);
         for (uint32_t tsn : tsns) {
             data.chunks.push_back(SCTP_Chunk{
-                .chunk_header = {.type = DATA, .flag = flags, .length = 0},
+                .chunk_header = {.type = DATA, .flag = static_cast<uint8_t>(DATA_FLAG_B | DATA_FLAG_E | flags), .length = 0},
                 .chunk_value = data_chunk_value{
                     .tsn = tsn,
                     .stream_identifier = 0,

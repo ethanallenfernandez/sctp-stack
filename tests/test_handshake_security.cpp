@@ -201,7 +201,7 @@ void test_cookie_echo_does_not_bypass_tag_check() {
     // Control: the tag check works on a bare DATA chunk.
     SCTP_Packet plain = header_only(PEER_PORT, STACK_PORT, WRONG_TAG);
     plain.chunks.push_back(SCTP_Chunk{
-        .chunk_header = {.type = DATA, .flag = 0, .length = 0},
+        .chunk_header = {.type = DATA, .flag = DATA_FLAG_B | DATA_FLAG_E, .length = 0},
         .chunk_value = data_chunk_value{PEER_TSN, 0, 0, 0, payload}});
     peer.send(plain);
     settle();
@@ -215,7 +215,7 @@ void test_cookie_echo_does_not_bypass_tag_check() {
         .chunk_header = {.type = COOKIE_ECHO, .flag = 0, .length = 0},
         .chunk_value = cookie_echo_chunk_value{std::vector<uint8_t>(STATE_COOKIE_SIZE, 0xFF)}});
     bundled.chunks.push_back(SCTP_Chunk{
-        .chunk_header = {.type = DATA, .flag = 0, .length = 0},
+        .chunk_header = {.type = DATA, .flag = DATA_FLAG_B | DATA_FLAG_E, .length = 0},
         .chunk_value = data_chunk_value{PEER_TSN, 0, 0, 0, payload}});
     peer.send(bundled);
     settle();

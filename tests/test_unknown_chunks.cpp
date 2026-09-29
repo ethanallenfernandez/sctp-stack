@@ -81,7 +81,7 @@ SCTP_Chunk unknown(uint8_t type, std::vector<uint8_t> body = {0xAA, 0xBB, 0xCC},
 }
 
 SCTP_Chunk data(uint32_t tsn) {
-    return {{DATA, 0, 0}, data_chunk_value{tsn, 0, 0, 0, {'x'}}};
+    return {{DATA, DATA_FLAG_B | DATA_FLAG_E, 0}, data_chunk_value{tsn, 0, 0, 0, {'x'}}};
 }
 
 const Association_State ESTABLISHED_STATE = ESTABLISHED;

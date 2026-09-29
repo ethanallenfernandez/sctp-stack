@@ -40,7 +40,7 @@ SCTP_Chunk init_chunk(Chunk_Type type, uint16_t os, uint16_t mis, std::vector<ui
 }
 
 SCTP_Chunk data(uint32_t tsn, uint16_t stream) {
-    return {{DATA, 0, 0}, data_chunk_value{tsn, stream, 0, 0, {'x'}}};
+    return {{DATA, DATA_FLAG_B | DATA_FLAG_E, 0}, data_chunk_value{tsn, stream, 0, 0, {'x'}}};
 }
 
 std::vector<uint8_t> param(uint16_t type, std::vector<uint8_t> value) {

@@ -301,7 +301,7 @@ void test_abort_suppresses_replies() {
 
     // 0x40: unrecognized, report it. Alone it draws an ERROR; behind an ABORT it must not.
     SCTP_Chunk unknown{{static_cast<Chunk_Type>(0x40), 0, 0}, unknown_chunk_value{{0xAA, 0xBB, 0xCC}}};
-    SCTP_Chunk data{{DATA, 0, 0}, data_chunk_value{1, 0, 0, 0, {'x'}}};
+    SCTP_Chunk data{{DATA, DATA_FLAG_B | DATA_FLAG_E, 0}, data_chunk_value{1, 0, 0, 0, {'x'}}};
 
     auto r = Access::deliver_to(&ESTABLISHED_STATE, inbound(OUR_TAG, {unknown, data}));
     check(r.sent.size() == 1, "without the ABORT, the packet draws a reply");
@@ -341,7 +341,7 @@ void test_ootb() {
 void test_no_user_data() {
     std::printf("DATA with no user data (3.3.1):\n");
 
-    SCTP_Chunk empty{{DATA, 0, 0}, data_chunk_value{7, 0, 0, 0, {}}};
+    SCTP_Chunk empty{{DATA, DATA_FLAG_B | DATA_FLAG_E, 0}, data_chunk_value{7, 0, 0, 0, {}}};
     auto r = Access::deliver_to(&ESTABLISHED_STATE, inbound(OUR_TAG, {empty}));
     check(!r.has_association, "association gone");
     check(r.sent.size() == 1 && is_abort(r.sent[0]), "one ABORT sent, and no SACK");

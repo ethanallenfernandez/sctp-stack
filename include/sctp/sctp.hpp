@@ -10,6 +10,7 @@
 // These are intentionally NOT sizeof() of the structs below: struct fields hold HOST byte order.
 constexpr size_t SCTP_COMMON_HEADER_SIZE = 12;
 constexpr size_t SCTP_CHUNK_HEADER_SIZE  = 4;
+constexpr size_t DATA_CHUNK_HEADER_SIZE  = 16;
 constexpr size_t SCTP_CHECKSUM_OFFSET    = 8;
 
 // RFC 9260 section 16 recommended values. Names match the RFC's.
@@ -56,6 +57,9 @@ enum Chunk_Type : uint8_t {
 };
 
 constexpr uint8_t CHUNK_FLAG_T_BIT = 0x01;   // ABORT, SHUTDOWN COMPLETE: tag is reflected
+constexpr uint8_t DATA_FLAG_E = 0x01;
+constexpr uint8_t DATA_FLAG_B = 0x02;
+constexpr uint8_t DATA_FLAG_U = 0x04;
 
 enum Param_Type : uint16_t {
     PARAM_HEARTBEAT_INFO = 1,
@@ -97,6 +101,8 @@ struct data_chunk_value {
     uint16_t stream_seq_num;
     uint32_t payload_protocal;
     std::vector<uint8_t> user_data;
+    // U, B and E. The I bit is not kept here: it is set per transmission.
+    uint8_t flags{DATA_FLAG_B | DATA_FLAG_E};
 };
 
 struct sack_gap_ack_block {

@@ -108,7 +108,7 @@ SCTP_Packet make_header(uint32_t ver_tag) {
 SCTP_Packet make_data(uint32_t ver_tag, uint32_t tsn, const std::string& payload) {
     SCTP_Packet p = make_header(ver_tag);
     p.chunks.push_back(SCTP_Chunk{
-        .chunk_header = { .type = DATA, .flag = 0, .length = 0 },
+        .chunk_header = { .type = DATA, .flag = DATA_FLAG_B | DATA_FLAG_E, .length = 0 },
         .chunk_value = data_chunk_value{
             .tsn = tsn, .stream_identifier = 0, .stream_seq_num = 0,
             .payload_protocal = 0,

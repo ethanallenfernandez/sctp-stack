@@ -35,7 +35,7 @@ sockaddr_in peer_address() {
 
 SCTP_Packet data_packet_at(uint32_t tsn) {
     SCTP_Packet packet;
-    packet.chunks.push_back({{DATA, 0, 0}, data_chunk_value{tsn, 0, 0, 0, {'h', 'i'}}});
+    packet.chunks.push_back({{DATA, DATA_FLAG_B | DATA_FLAG_E, 0}, data_chunk_value{tsn, 0, 0, 0, {'h', 'i'}}});
     return packet;
 }
 
@@ -384,7 +384,7 @@ void test_no_user_data_while_shutting_down() {
 
 SCTP_Packet data_packet(uint32_t tsn) {
     SCTP_Packet packet;
-    packet.chunks.push_back({{DATA, 0, 0}, data_chunk_value{tsn, 0, 0, 0, {'h', 'i'}}});
+    packet.chunks.push_back({{DATA, DATA_FLAG_B | DATA_FLAG_E, 0}, data_chunk_value{tsn, 0, 0, 0, {'h', 'i'}}});
     return packet;
 }
 

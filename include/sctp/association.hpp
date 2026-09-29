@@ -33,6 +33,18 @@ struct Outstanding_Data {
     bool pending_retransmission;
 };
 
+// The message whose fragments are being consumed in TSN order.
+struct Reassembly {
+    bool open{false};
+    // Part of the message has gone to the ULP ahead of its end: the rest
+    // follows as it arrives.
+    bool partially_delivered{false};
+    bool unordered{false};
+    uint16_t stream{0};
+    uint16_t ssn{0};
+    std::vector<uint8_t> bytes;
+};
+
 struct Association {
     uint32_t peer_ver_tag;
     uint32_t this_ver_tag;
@@ -88,7 +100,8 @@ struct Association {
     uint16_t ack_state;
     uint16_t in_streams;
     uint16_t out_streams;
-    // Include reassembly buffer
+    std::vector<uint16_t> next_ssn; // Indexed into by stream number
+    Reassembly reassembly;
 };
 
 struct Association_Key {

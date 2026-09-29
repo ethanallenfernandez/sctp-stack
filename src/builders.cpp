@@ -16,7 +16,7 @@ SCTP_Packet packet_with_header(uint16_t src_port, uint16_t des_port, uint32_t ta
     return packet;
 }
 
-void append_chunk(SCTP_Packet& packet, Chunk_Type type, uint8_t flag, Chunk_Value_Type value) {
+void append_chunk(SCTP_Packet& packet, Chunk_Type type, Chunk_Value_Type value, uint8_t flag = 0) {
     packet.chunks.push_back(SCTP_Chunk{
         .chunk_header = {.type = type, .flag = flag, .length = 0},
         .chunk_value = std::move(value)
@@ -41,7 +41,7 @@ SCTP_Packet build_init(
         append_parameter(parameters, PARAM_COOKIE_PRESERVATIVE, increment.data(), increment.size());
     }
 
-    append_chunk(packet, INIT, 0, init_chunk_value{
+    append_chunk(packet, INIT, init_chunk_value{
         .initiate_tag = initiate_tag,
         .a_rwnd = RWND,
         .out_streams = LOCAL_OUT_STREAMS,
@@ -65,7 +65,7 @@ SCTP_Packet build_init_ack(
     std::vector<uint8_t> parameters;
     append_parameter(parameters, PARAM_STATE_COOKIE, cookie.data(), cookie.size());
 
-    append_chunk(packet, INIT_ACK, 0, init_chunk_value{
+    append_chunk(packet, INIT_ACK, init_chunk_value{
         .initiate_tag = initiate_tag,
         .a_rwnd = RWND,
         .out_streams = LOCAL_OUT_STREAMS,
@@ -83,13 +83,13 @@ SCTP_Packet build_cookie_echo(
     std::vector<uint8_t> cookie
 ) {
     SCTP_Packet packet = packet_with_header(src_port, des_port, peer_tag);
-    append_chunk(packet, COOKIE_ECHO, 0, cookie_echo_chunk_value{.cookie_data = std::move(cookie)});
+    append_chunk(packet, COOKIE_ECHO, cookie_echo_chunk_value{.cookie_data = std::move(cookie)});
     return packet;
 }
 
 SCTP_Packet build_cookie_ack(uint16_t src_port, uint16_t des_port, uint32_t peer_tag) {
     SCTP_Packet packet = packet_with_header(src_port, des_port, peer_tag);
-    append_chunk(packet, COOKIE_ACK, 0, empty_chunk_value{});
+    append_chunk(packet, COOKIE_ACK, empty_chunk_value{});
     return packet;
 }
 
@@ -102,7 +102,8 @@ SCTP_Packet build_data(
     SCTP_Packet packet = packet_with_header(src_port, des_port, peer_tag);
     packet.chunks.reserve(chunks.size());
     for (data_chunk_value& data : chunks) {
-        append_chunk(packet, DATA, 0, std::move(data));
+        uint8_t flags = data.flags;
+        append_chunk(packet, DATA, std::move(data), flags);
     }
     return packet;
 }
@@ -117,7 +118,7 @@ SCTP_Packet build_sack(
     std::vector<uint32_t> duplicate_tsns
 ) {
     SCTP_Packet packet = packet_with_header(src_port, des_port, peer_tag);
-    append_chunk(packet, SACK, 0, sack_chunk_value{
+    append_chunk(packet, SACK, sack_chunk_value{
         .cumulative_tsn_ack = cumulative_tsn_ack,
         .a_rwnd = a_rwnd,
         .number_of_gap_ack_blocks = static_cast<uint16_t>(gaps.size()),
@@ -135,7 +136,7 @@ SCTP_Packet build_error(
     std::vector<error_cause> causes
 ) {
     SCTP_Packet packet = packet_with_header(src_port, des_port, peer_tag);
-    append_chunk(packet, OP_ERROR, 0, error_chunk_value{std::move(causes)});
+    append_chunk(packet, OP_ERROR, error_chunk_value{std::move(causes)});
     return packet;
 }
 
@@ -150,8 +151,8 @@ SCTP_Packet build_abort(
     append_chunk(
         packet,
         ABORT,
-        static_cast<uint8_t>(reflected ? CHUNK_FLAG_T_BIT : 0),
-        error_chunk_value{std::move(causes)}
+        error_chunk_value{std::move(causes)},
+        static_cast<uint8_t>(reflected ? CHUNK_FLAG_T_BIT : 0)
     );
     return packet;
 }
@@ -163,19 +164,19 @@ SCTP_Packet build_shutdown(
     uint32_t cumulative_tsn_ack
 ) {
     SCTP_Packet packet = packet_with_header(src_port, des_port, peer_tag);
-    append_chunk(packet, SHUTDOWN, 0, shutdown_chunk_value{cumulative_tsn_ack});
+    append_chunk(packet, SHUTDOWN, shutdown_chunk_value{cumulative_tsn_ack});
     return packet;
 }
 
 SCTP_Packet build_shutdown_ack(uint16_t src_port, uint16_t des_port, uint32_t peer_tag) {
     SCTP_Packet packet = packet_with_header(src_port, des_port, peer_tag);
-    append_chunk(packet, SHUTDOWN_ACK, 0, empty_chunk_value{});
+    append_chunk(packet, SHUTDOWN_ACK, empty_chunk_value{});
     return packet;
 }
 
 SCTP_Packet build_shutdown_complete(uint16_t src_port, uint16_t des_port, uint32_t tag, bool reflected) {
     SCTP_Packet packet = packet_with_header(src_port, des_port, tag);
-    append_chunk(packet, SHUTDOWN_COMPLETE, static_cast<uint8_t>(reflected ? CHUNK_FLAG_T_BIT : 0), empty_chunk_value{});
+    append_chunk(packet, SHUTDOWN_COMPLETE, empty_chunk_value{}, static_cast<uint8_t>(reflected ? CHUNK_FLAG_T_BIT : 0));
     return packet;
 }
 
@@ -186,7 +187,7 @@ SCTP_Packet build_heartbeat(
     std::vector<uint8_t> info
 ) {
     SCTP_Packet packet = packet_with_header(src_port, des_port, peer_tag);
-    append_chunk(packet, HEARTBEAT, 0, heartbeat_chunk_value{std::move(info)});
+    append_chunk(packet, HEARTBEAT, heartbeat_chunk_value{std::move(info)});
     return packet;
 }
 
@@ -197,11 +198,10 @@ SCTP_Packet build_heartbeat_ack(
     std::vector<uint8_t> info
 ) {
     SCTP_Packet packet = packet_with_header(src_port, des_port, peer_tag);
-    append_chunk(packet, HEARTBEAT_ACK, 0, heartbeat_chunk_value{std::move(info)});
+    append_chunk(packet, HEARTBEAT_ACK, heartbeat_chunk_value{std::move(info)});
     return packet;
 }
 
 size_t data_chunk_wire_size(const data_chunk_value& data) {
-    // 16 = common DATA chunk header (4) + TSN, stream id, SSN, PPID (12).
-    return (16 + data.user_data.size() + 3) & ~size_t{3};
+    return (DATA_CHUNK_HEADER_SIZE + data.user_data.size() + 3) & ~size_t{3};
 }

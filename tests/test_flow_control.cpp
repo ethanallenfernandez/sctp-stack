@@ -101,7 +101,7 @@ struct SCTP_Socket_Test_Access {
     static void deliver_data(SCTP_Socket& stack, uint16_t peer_port, uint32_t tsn, size_t size, bool immediate = true) {
         SCTP_Packet packet = build_data(peer_port, LOCAL_PORT, OUR_TAG,
             {data_chunk_value{tsn, 0, 0, 0, std::vector<uint8_t>(size, 'p')}});
-        packet.chunks[0].chunk_header.flag = immediate ? DATA_IMMEDIATE_SACK_FLAG : 0;
+        packet.chunks[0].chunk_header.flag |= immediate ? DATA_IMMEDIATE_SACK_FLAG : 0;
         std::vector<uint8_t> wire = serialize_sctp_packet(packet);
         stack.handle_recv_packet(wire.data(), wire.size(), peer_address(peer_port));
     }

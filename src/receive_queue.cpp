@@ -2,52 +2,68 @@
 
 #include <algorithm>
 
-void Receive_Queue::push(const Association_Key& key, std::vector<uint8_t> message) {
+void Receive_Queue::push(const Association_Key& key, std::vector<uint8_t> bytes, bool complete) {
     std::lock_guard<std::mutex> lock(mutex);
     Pending& entry = pending[key];
     if (entry.messages.empty()) {
         ready.push_back(key);
     }
-    entry.bytes += message.size();
-    entry.messages.push(std::move(message));
+    entry.bytes += bytes.size();
+    if (!entry.messages.empty() && !entry.messages.back().complete) {
+        Message& tail = entry.messages.back();
+        tail.bytes.insert(tail.bytes.end(), bytes.begin(), bytes.end());
+        tail.complete = complete;
+    } else {
+        entry.messages.push_back(Message{std::move(bytes), 0, complete});
+    }
 }
 
-std::optional<std::pair<Association_Key, std::vector<uint8_t>>> Receive_Queue::pop_any() {
+std::optional<Receive_Queue::Read> Receive_Queue::read_any(uint8_t* out, size_t capacity) {
     std::lock_guard<std::mutex> lock(mutex);
     if (ready.empty()) {
         return std::nullopt;
     }
     Association_Key key = ready.front();
     ready.pop_front();
-    auto it = pending.find(key);
-    std::vector<uint8_t> message = pop_locked(it);
+    Read read = read_locked(pending.find(key), out, capacity);
     if (pending.count(key) != 0) {
-        ready.push_back(key);
+        if (read.partial) {
+            ready.push_front(key);
+        } else {
+            ready.push_back(key);
+        }
     }
-    return std::make_pair(key, std::move(message));
+    return read;
 }
 
-std::optional<std::vector<uint8_t>> Receive_Queue::pop_from(const Association_Key& key) {
+std::optional<Receive_Queue::Read> Receive_Queue::read_from(const Association_Key& key, uint8_t* out, size_t capacity) {
     std::lock_guard<std::mutex> lock(mutex);
     auto it = pending.find(key);
     if (it == pending.end()) {
         return std::nullopt;
     }
-    std::vector<uint8_t> message = pop_locked(it);
+    Read read = read_locked(it, out, capacity);
     if (pending.count(key) == 0) {
         ready.erase(std::find(ready.begin(), ready.end(), key));
     }
-    return message;
+    return read;
 }
 
-std::vector<uint8_t> Receive_Queue::pop_locked(std::unordered_map<Association_Key, Pending, Association_Hash>::iterator it) {
-    std::vector<uint8_t> message = std::move(it->second.messages.front());
-    it->second.messages.pop();
-    it->second.bytes -= message.size();
-    if (it->second.messages.empty()) {
-        pending.erase(it);
+Receive_Queue::Read Receive_Queue::read_locked(std::unordered_map<Association_Key, Pending, Association_Hash>::iterator it, uint8_t* out, size_t capacity) {
+    Message& front = it->second.messages.front();
+    size_t count = std::min(capacity, front.bytes.size() - front.offset);
+    std::copy_n(front.bytes.begin() + static_cast<long>(front.offset), count, out);
+    front.offset += count;
+    it->second.bytes -= count;
+
+    Read read{it->first, count, front.offset < front.bytes.size() || !front.complete};
+    if (front.offset == front.bytes.size()) {
+        it->second.messages.pop_front();
+        if (it->second.messages.empty()) {
+            pending.erase(it);
+        }
     }
-    return message;
+    return read;
 }
 
 void Receive_Queue::clear() {

@@ -56,9 +56,12 @@ public:
     void sctp_send_data(const Association_Key& association_id, const std::vector<uint8_t>& data);
     void sctp_abort(const sockaddr_in& association_id, const std::vector<uint8_t>& reason = {});
     void sctp_abort(const Association_Key& association_id, const std::vector<uint8_t>& reason = {});
-    size_t sctp_recv_data(std::vector<uint8_t>& buffer, Association_Key* out_association_id = nullptr);
-    size_t sctp_recv_data_from(const sockaddr_in& association_id, std::vector<uint8_t>& buffer);
-    size_t sctp_recv_data_from(const Association_Key& association_id, std::vector<uint8_t>& buffer);
+    // Reads at most one message. *out_partial is set when more of it remains: the
+    // buffer was too small, or the message is being handed up before all of it
+    // has arrived. The rest is returned by the following reads.
+    size_t sctp_recv_data(std::vector<uint8_t>& buffer, Association_Key* out_association_id = nullptr, bool* out_partial = nullptr);
+    size_t sctp_recv_data_from(const sockaddr_in& association_id, std::vector<uint8_t>& buffer, bool* out_partial = nullptr);
+    size_t sctp_recv_data_from(const Association_Key& association_id, std::vector<uint8_t>& buffer, bool* out_partial = nullptr);
     void sctp_shutdown(const sockaddr_in& association_id);
     void sctp_shutdown(const Association_Key& association_id);
     std::optional<Notification> sctp_recv_notification(int timeout_ms = 0);
@@ -129,7 +132,7 @@ private:
     void handle_recv_packet(const uint8_t* data, size_t n, const sockaddr_in& src);
     Packet_Validation validate_verification_tag(const SCTP_Packet& pkt, const sockaddr_in& src);
     Packet_Validation ootb_response(const SCTP_Packet& pkt);
-    void read_ooo_buffer(Association& assoc, std::vector<std::vector<uint8_t>>& delivered);
+    bool read_ooo_buffer(Association& assoc, std::vector<Delivery>& delivered);
     void abort_association(const Association_Key& key, const SCTP_Common_Header& header, const sockaddr_in& src, std::vector<error_cause> causes);
     void do_next_shutdown_step(const Association_Key& key);
 

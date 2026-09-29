@@ -6,6 +6,7 @@
 // that is exactly how the CRC-32C polynomial error survived.
 
 #include "checksum.hpp"
+#include "builders.hpp"
 #include "serialize.hpp"
 #include <sctp/sctp.hpp>
 
@@ -430,11 +431,45 @@ static void test_unknown_chunk_is_preserved() {
     }
 }
 
+static void test_data_flags() {
+    std::printf("DATA U/B/E flags (RFC 9260 3.3.1):\n");
+
+    auto flag_byte = [](uint8_t flags) {
+        data_chunk_value data{1, 0, 0, 0, {'x'}};
+        data.flags = flags;
+        return serialize_sctp_packet(build_data(1, 2, 3, {data}))[13];
+    };
+    check(flag_byte(DATA_FLAG_B | DATA_FLAG_E) == 0x03, "unfragmented message: B/E = 11");
+    check(flag_byte(DATA_FLAG_B) == 0x02, "first fragment: B/E = 10");
+    check(flag_byte(0) == 0x00, "middle fragment: B/E = 00");
+    check(flag_byte(DATA_FLAG_E) == 0x01, "last fragment: B/E = 01");
+    check(flag_byte(DATA_FLAG_U | DATA_FLAG_B | DATA_FLAG_E) == 0x07, "unordered: U set");
+    check(flag_byte(data_chunk_value{}.flags) == 0x03, "a DATA chunk defaults to a whole message");
+
+    // A retransmission bundles chunks of different messages: each keeps its own flags.
+    data_chunk_value first{1, 0, 0, 0, {'a'}};
+    data_chunk_value middle{2, 0, 0, 0, {'b'}};
+    middle.flags = 0;
+    data_chunk_value whole{3, 0, 1, 0, {'c'}};
+    std::vector<uint8_t> w = serialize_sctp_packet(build_data(1, 2, 3, {first, middle, whole}));
+    check(w[13] == 0x03 && w[13 + 20] == 0x00 && w[13 + 40] == 0x03, "bundled chunks keep their own B/E bits");
+
+    // The I bit shares the byte but is not one of the flags a chunk carries.
+    std::vector<uint8_t> in{
+        0, 1, 0, 2, 0, 0, 0, 3, 0, 0, 0, 0,
+        0x00, 0x0E, 0x00, 0x11, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 0, 'x', 0, 0, 0,
+    };
+    SCTP_Packet back = deserialize_sctp_packet(in.data(), in.size());
+    check(std::get<data_chunk_value>(back.chunks[0].chunk_value).flags == (DATA_FLAG_U | DATA_FLAG_B),
+          "deserialized flags are U/B/E only (I bit masked off)");
+}
+
 int main() {
     test_crc32c_check_vector();
     test_common_header_is_big_endian();
     test_checksum_field_is_little_endian();
     test_roundtrip();
+    test_data_flags();
     test_sack_wire_layout();
     test_sack_deserialization_replaces_existing_value();
     test_sack_count_mismatch_is_rejected();

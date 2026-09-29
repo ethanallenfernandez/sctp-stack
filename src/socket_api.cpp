@@ -190,6 +190,7 @@ Association SCTP_Socket::init_new_association(const Association_Key& key) {
     // Upper bounds until the INIT ACK narrows them (5.1.1).
     result.out_streams = LOCAL_OUT_STREAMS;
     result.in_streams = LOCAL_MAX_IN_STREAMS;
+    result.next_ssn.assign(result.out_streams, 0);
     result.rto = sctp_parameters::RTO_INITIAL;
     result.error_threshold = sctp_parameters::ASSOCIATION_MAX_RETRANS;
     result.pmdcs = DEFAULT_PMDCS;
@@ -215,6 +216,7 @@ Association SCTP_Socket::init_new_association(const State_Cookie& cookie, const 
     // RFC 9260 5.1.1: each direction gets the smaller of what the two ends offered.
     result.out_streams = std::min(cookie.local_out_streams, cookie.peer_in_streams);
     result.in_streams = std::min(cookie.local_in_streams, cookie.peer_out_streams);
+    result.next_ssn.assign(result.out_streams, 0);
 
     result.rto = sctp_parameters::RTO_INITIAL;
     result.error_threshold = sctp_parameters::ASSOCIATION_MAX_RETRANS;
@@ -275,29 +277,36 @@ void SCTP_Socket::sctp_send_data(const sockaddr_in& association_id, const std::v
 }
 
 void SCTP_Socket::sctp_send_data(const Association_Key& association_id, const std::vector<uint8_t>& data) {
-    std::unique_lock<std::mutex> assoc_lock(associations_mutex);
-    auto it = associations.find(association_id);
-    if (it == associations.end() || it->second.state != ESTABLISHED) {
-        return;
+    uint16_t stream = 0;
+    {
+        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+        auto it = associations.find(association_id);
+        if (data.empty() || it == associations.end() || it->second.state != ESTABLISHED || stream >= it->second.next_ssn.size()) {
+            return;
+        }
+
+        Association& assoc = it->second;
+        size_t fragment_size = (assoc.pmdcs - DATA_CHUNK_HEADER_SIZE) & ~size_t{3};
+        uint16_t ssn = assoc.next_ssn[stream]++;
+        // Enqueued under the lock so another sender's TSNs cannot fall between these.
+        for (size_t offset = 0; offset < data.size(); offset += fragment_size) {
+            size_t end = std::min(offset + fragment_size, data.size());
+            sends.enqueue(Deliverable{association_id, build_data(
+                ntohs(local_address.sin_port),
+                ntohs(association_id.address.sin_port),
+                assoc.peer_ver_tag,
+                {data_chunk_value{
+                    .tsn = assoc.next_tsn++,
+                    .stream_identifier = stream,
+                    .stream_seq_num = ssn,
+                    .payload_protocal = 0,
+                    .user_data = std::vector<uint8_t>(data.data() + offset, data.data() + end),
+                    .flags = static_cast<uint8_t>((offset == 0 ? DATA_FLAG_B : 0) | (end == data.size() ? DATA_FLAG_E : 0))
+                }}
+            )}, Send_Priority::NEW_DATA);
+        }
     }
-
-    SCTP_Packet data_packet = build_data(
-        ntohs(local_address.sin_port),
-        ntohs(association_id.address.sin_port),
-        it->second.peer_ver_tag,
-        {data_chunk_value{
-            .tsn = it->second.next_tsn++,
-            .stream_identifier = 0,
-            .stream_seq_num = 0,
-            .payload_protocal = 0,
-            .user_data = data
-        }}
-    );
-    assoc_lock.unlock();
-
-    Deliverable data_deliv{association_id, std::move(data_packet)};
-
-    enqueue_packet(std::move(data_deliv), Send_Priority::NEW_DATA);
+    wake_event_loop();
 }
 
 void SCTP_Socket::sctp_abort(const sockaddr_in& association_id, const std::vector<uint8_t>& reason) {
@@ -343,34 +352,36 @@ void SCTP_Socket::sctp_abort(const Association_Key& association_id, const std::v
 
 
 
-size_t SCTP_Socket::sctp_recv_data(std::vector<uint8_t>& buffer, Association_Key* out_association_id) {
-    auto message = receives.pop_any();
-    if (!message) {
+size_t SCTP_Socket::sctp_recv_data(std::vector<uint8_t>& buffer, Association_Key* out_association_id, bool* out_partial) {
+    auto read = receives.read_any(buffer.data(), buffer.size());
+    if (!read) {
         return 0;
     }
     if (out_association_id) {
-        *out_association_id = message->first;
+        *out_association_id = read->key;
     }
-    size_t to_copy = std::min(buffer.size(), message->second.size());
-    std::memcpy(buffer.data(), message->second.data(), to_copy);
-    maybe_send_window_update(message->first);
-    return to_copy;
+    if (out_partial) {
+        *out_partial = read->partial;
+    }
+    maybe_send_window_update(read->key);
+    return read->bytes;
 }
 
-size_t SCTP_Socket::sctp_recv_data_from(const sockaddr_in& association_id, std::vector<uint8_t>& buffer) {
+size_t SCTP_Socket::sctp_recv_data_from(const sockaddr_in& association_id, std::vector<uint8_t>& buffer, bool* out_partial) {
     Association_Key key{association_id};
-    return sctp_recv_data_from(key, buffer);
+    return sctp_recv_data_from(key, buffer, out_partial);
 }
 
-size_t SCTP_Socket::sctp_recv_data_from(const Association_Key& association_id, std::vector<uint8_t>& buffer) {
-    auto message = receives.pop_from(association_id);
-    if (!message) {
+size_t SCTP_Socket::sctp_recv_data_from(const Association_Key& association_id, std::vector<uint8_t>& buffer, bool* out_partial) {
+    auto read = receives.read_from(association_id, buffer.data(), buffer.size());
+    if (!read) {
         return 0;
     }
-    size_t to_copy = std::min(buffer.size(), message->size());
-    std::memcpy(buffer.data(), message->data(), to_copy);
+    if (out_partial) {
+        *out_partial = read->partial;
+    }
     maybe_send_window_update(association_id);
-    return to_copy;
+    return read->bytes;
 }
 
 void SCTP_Socket::sctp_shutdown(const sockaddr_in& association_id) {

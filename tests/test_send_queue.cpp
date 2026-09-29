@@ -37,6 +37,8 @@ struct SCTP_Socket_Test_Access {
         association.pmdcs = 1200;
         association.cwnd = 4380;
         association.peer_rwnd = 65535;
+        association.out_streams = 1;
+        association.next_ssn.assign(1, 0);
 
         Association_Key key{peer};
         {
@@ -81,6 +83,26 @@ struct SCTP_Socket_Test_Access {
             SCTP_Socket& stack) {
         return stack.sends.front_data_tsns(
             Send_Priority::RETRANSMISSION);
+    }
+
+    static std::vector<uint16_t> drain_new_data_ssns(SCTP_Socket& stack) {
+        std::vector<uint16_t> ssns;
+        while (auto pending = stack.sends.peek(std::chrono::steady_clock::now())) {
+            for (const auto& chunk : pending->deliverable.packet.chunks) {
+                ssns.push_back(std::get<data_chunk_value>(chunk.chunk_value).stream_seq_num);
+            }
+            stack.sends.commit(*pending);
+        }
+        return ssns;
+    }
+
+    static void set_next_ssn(SCTP_Socket& stack, const Association_Key& key, uint16_t ssn) {
+        std::lock_guard<std::mutex> lock(stack.associations_mutex);
+        stack.associations.at(key).next_ssn[0] = ssn;
+    }
+
+    static std::vector<uint16_t> next_ssns(SCTP_Socket& stack, const State_Cookie& cookie, const Association_Key& key) {
+        return stack.init_new_association(cookie, key).next_ssn;
     }
 
     static void remove_acked_retransmissions(
@@ -321,12 +343,45 @@ static void test_sack_trims_retransmission_queue() {
         "fully acknowledged retransmission packet was discarded");
 }
 
+static void test_stream_sequence_numbers() {
+    std::printf("Stream Sequence Numbers (RFC 9260 6.5, 6.6):\n");
+
+    SCTP_Socket stack;
+    sockaddr_in peer{};
+    peer.sin_family = AF_INET;
+    peer.sin_port = htons(19002);
+    sctp_parse_ipv4("127.0.0.1", peer.sin_addr);
+    Association_Key key = SCTP_Socket_Test_Access::add_established_association(stack, peer, 100);
+
+    for (int i = 0; i < 3; ++i) {
+        stack.sctp_send_data(key, std::vector<uint8_t>{'m'});
+    }
+    check(SCTP_Socket_Test_Access::drain_new_data_ssns(stack) == std::vector<uint16_t>{0, 1, 2},
+          "each ordered message takes the next SSN");
+
+    SCTP_Socket_Test_Access::set_next_ssn(stack, key, 65535);
+    stack.sctp_send_data(key, std::vector<uint8_t>{'m'});
+    stack.sctp_send_data(key, std::vector<uint8_t>{'m'});
+    check(SCTP_Socket_Test_Access::drain_new_data_ssns(stack) == std::vector<uint16_t>{65535, 0},
+          "SSN wraps from 65535 to 0");
+
+    State_Cookie cookie{};
+    cookie.local_out_streams = 1;
+    cookie.local_in_streams = 1;
+    cookie.peer_out_streams = 1;
+    cookie.peer_in_streams = 1;
+    check(SCTP_Socket_Test_Access::next_ssns(stack, cookie, key) == std::vector<uint16_t>{0},
+          "a new or restarted association starts every outbound stream at SSN 0");
+}
+
 int main() {
     test_failed_send_retains_reserved_tsn();
     std::printf("\n");
     test_send_priority_order();
     std::printf("\n");
     test_sack_trims_retransmission_queue();
+    std::printf("\n");
+    test_stream_sequence_numbers();
 
     std::printf(
         "\n%s (%d failure%s)\n",

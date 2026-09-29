@@ -1,7 +1,7 @@
 // Inbound chunk handling: packet validation and dispatch, the four-way
 // handshake (RFC 9260 5.1), SACK processing and fast retransmit (6.2, 7.2.4),
 // SACK generation with gap ack blocks (3.3.4), and DATA reception with the
-// out-of-order buffer.
+// out-of-order buffer and reassembly.
 
 #include <sctp/socket.hpp>
 #include <sctp/platform.hpp>
@@ -20,8 +20,9 @@
 #include <vector>
 
 namespace {
-    size_t reorder_bytes(const Association& assoc) {
-        size_t total = 0;
+    // User data held back from the ULP: for reordering, or for reassembly.
+    size_t held_bytes(const Association& assoc) {
+        size_t total = assoc.reassembly.bytes.size();
         for (const auto& [tsn, data] : assoc.tsn_ooo_buffer) {
             total += data.user_data.size();
             (void)tsn;
@@ -65,6 +66,33 @@ namespace {
         }
         used -= highest->second.user_data.size();
         assoc.tsn_ooo_buffer.erase(highest);
+        return true;
+    }
+
+    // Takes the next chunk in TSN order. False if it can neither begin a message
+    // nor continue the open one.
+    bool reassemble(Association& assoc, const data_chunk_value& data, bool valid_stream, std::vector<Delivery>& delivered) {
+        Reassembly& message = assoc.reassembly;
+        bool begins = (data.flags & DATA_FLAG_B) != 0;
+        bool ends = (data.flags & DATA_FLAG_E) != 0;
+        bool unordered = (data.flags & DATA_FLAG_U) != 0;
+        if (begins == message.open) {
+            return false;
+        }
+        if (begins) {
+            message = Reassembly{true, false, unordered, data.stream_identifier, data.stream_seq_num, {}};
+        } else if (data.stream_identifier != message.stream || unordered != message.unordered
+                || (!unordered && data.stream_seq_num != message.ssn)) {
+            return false;
+        }
+        if (valid_stream) {
+            message.bytes.insert(message.bytes.end(), data.user_data.begin(), data.user_data.end());
+            if (ends || message.partially_delivered) {
+                delivered.push_back(Delivery{std::move(message.bytes), ends});
+                message.bytes.clear();
+            }
+        }
+        message.open = !ends;
         return true;
     }
 
@@ -471,6 +499,7 @@ void SCTP_Socket::handle_init_ack(const SCTP_Common_Header& header, const SCTP_C
     assoc.peer_rwnd = init_ack.a_rwnd;
     assoc.out_streams = std::min(LOCAL_OUT_STREAMS, init_ack.in_streams);
     assoc.in_streams = std::min(LOCAL_MAX_IN_STREAMS, init_ack.out_streams);
+    assoc.next_ssn.assign(assoc.out_streams, 0);
     assoc.state = COOKIE_ECHOED;
     uint32_t peer_tag = assoc.peer_ver_tag;
     assoc_lock.unlock();
@@ -590,6 +619,7 @@ bool SCTP_Socket::handle_cookie_echo(
         tcb.last_peer_tsn = cookie.peer_initial_tsn - 1;
         tcb.peer_rwnd = cookie.peer_a_rwnd;
         tcb.tsn_ooo_buffer.clear();
+        tcb.reassembly = {};
         tcb.duplicate_tsns.clear();
         // A shutdown in progress is kept rather than silently cancelled.
         if (tcb.state == COOKIE_WAIT || tcb.state == COOKIE_ECHOED) {
@@ -1318,7 +1348,8 @@ void SCTP_Socket::handle_data_packet(
     bool send_immediately = acknowledge_immediately;
     bool start_delayed_timer = false;
     std::vector<error_cause> invalid_streams;
-    std::vector<std::vector<uint8_t>> delivered;
+    std::vector<Delivery> delivered;
+    bool violation = false;
     uint32_t peer_tag = 0;
     {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
@@ -1332,7 +1363,7 @@ void SCTP_Socket::handle_data_packet(
         bool hole_existed = !assoc.tsn_ooo_buffer.empty();
         bool saw_duplicate = false;
         bool dropped = false;
-        size_t used = receives.buffered_bytes(assoc_key) + reorder_bytes(assoc);
+        size_t used = receives.buffered_bytes(assoc_key) + held_bytes(assoc);
 
         for (const auto& chunk : packet.chunks) {
             if (chunk.chunk_header.type != DATA) {
@@ -1361,10 +1392,10 @@ void SCTP_Socket::handle_data_packet(
             }
             if (tsn == assoc.last_peer_tsn + 1) {
                 assoc.last_peer_tsn = tsn;
-                if (valid_stream) {
-                    delivered.push_back(data.user_data);
+                if (!reassemble(assoc, data, valid_stream, delivered) || !read_ooo_buffer(assoc, delivered)) {
+                    violation = true;
+                    break;
                 }
-                read_ooo_buffer(assoc, delivered);
             } else {
                 auto inserted = assoc.tsn_ooo_buffer.emplace(tsn, data);
                 if (!valid_stream) {
@@ -1375,6 +1406,14 @@ void SCTP_Socket::handle_data_packet(
 
         if (!have_data) {
             return;
+        }
+        // Once the window cannot take another full-size chunk, the rest of the
+        // message could only arrive after the ULP reads, so it gets what there is.
+        Reassembly& message = assoc.reassembly;
+        if (message.open && !message.bytes.empty() && used + assoc.pmdcs > RWND) {
+            delivered.push_back(Delivery{std::move(message.bytes), false});
+            message.bytes.clear();
+            message.partially_delivered = true;
         }
         // 9.2: in SHUTDOWN-SENT every DATA packet is answered with a SHUTDOWN,
         // and with a SACK as well whenever the SHUTDOWN alone would not say it all.
@@ -1394,8 +1433,13 @@ void SCTP_Socket::handle_data_packet(
         }
     }
 
-    for (auto& message : delivered) {
-        receives.push(assoc_key, std::move(message));
+    if (violation) {
+        std::cout << "Aborting association: DATA chunk out of place in its message" << std::endl;
+        abort_association(assoc_key, packet.header, src, {error_cause{CAUSE_PROTOCOL_VIOLATION, {}}});
+        return;
+    }
+    for (auto& delivery : delivered) {
+        receives.push(assoc_key, std::move(delivery.bytes), delivery.complete);
     }
     if (!invalid_streams.empty()) {
         send_error(packet.header, src, peer_tag, std::move(invalid_streams));
@@ -1415,9 +1459,9 @@ void SCTP_Socket::handle_data_packet(
 }
 
 // Receive buffer space not yet taken by messages waiting for the ULP or by DATA
-// held for reordering, in bytes of user data.
+// held for reordering or reassembly, in bytes of user data.
 uint32_t SCTP_Socket::receive_window(const Association_Key& key, const Association& assoc) {
-    size_t used = receives.buffered_bytes(key) + reorder_bytes(assoc);
+    size_t used = receives.buffered_bytes(key) + held_bytes(assoc);
     return used >= RWND ? 0 : static_cast<uint32_t>(RWND - used);
 }
 
@@ -1436,13 +1480,14 @@ void SCTP_Socket::maybe_send_window_update(const Association_Key& key) {
     send_sack(key);
 }
 
-void SCTP_Socket::read_ooo_buffer(Association& assoc, std::vector<std::vector<uint8_t>>& delivered) {
+bool SCTP_Socket::read_ooo_buffer(Association& assoc, std::vector<Delivery>& delivered) {
     uint32_t tsn = assoc.last_peer_tsn + 1;
     for (auto it = assoc.tsn_ooo_buffer.find(tsn); it != assoc.tsn_ooo_buffer.end(); it = assoc.tsn_ooo_buffer.find(++tsn)) {
-        if (it->second.stream_identifier < assoc.in_streams) {
-            delivered.push_back(std::move(it->second.user_data));
+        if (!reassemble(assoc, it->second, it->second.stream_identifier < assoc.in_streams, delivered)) {
+            return false;
         }
         assoc.tsn_ooo_buffer.erase(it);
     }
     assoc.last_peer_tsn = tsn - 1;
+    return true;
 }
