@@ -39,8 +39,8 @@ SCTP_Chunk init_chunk(Chunk_Type type, uint16_t os, uint16_t mis, std::vector<ui
     return {{type, 0, 0}, init_chunk_value{PEER_TAG, 65535, os, mis, 1000, std::move(params)}};
 }
 
-SCTP_Chunk data(uint32_t tsn, uint16_t stream) {
-    return {{DATA, DATA_FLAG_B | DATA_FLAG_E, 0}, data_chunk_value{tsn, stream, 0, 0, {'x'}}};
+SCTP_Chunk data(uint32_t tsn, uint16_t stream, uint16_t ssn = 0) {
+    return {{DATA, DATA_FLAG_B | DATA_FLAG_E, 0}, data_chunk_value{tsn, stream, ssn, 0, {'x'}}};
 }
 
 std::vector<uint8_t> param(uint16_t type, std::vector<uint8_t> value) {
@@ -73,6 +73,7 @@ struct SCTP_Socket_Test_Access {
         assoc.this_ver_tag = OUR_TAG;
         assoc.peer_ver_tag = state == COOKIE_WAIT ? 0 : PEER_TAG;
         assoc.last_peer_tsn = 0;
+        assoc.in_streams = 4;
         return stack.associations.insert_or_assign(peer_key(), assoc).first->second;
     }
 
@@ -239,10 +240,17 @@ void test_stream_negotiation() {
 
     Harness h;
     h.add(COOKIE_WAIT);
-    h.receive(OUR_TAG, {init_chunk(INIT_ACK, 5, 5, param(PARAM_STATE_COOKIE, std::vector<uint8_t>(96, 0)))});
+    h.receive(OUR_TAG, {init_chunk(INIT_ACK, 20, 3, param(PARAM_STATE_COOKIE, std::vector<uint8_t>(96, 0)))});
     Association* assoc = h.find();
-    check(assoc && assoc->state == COOKIE_ECHOED && assoc->in_streams == 1 && assoc->out_streams == 1,
-          "initiator: INIT ACK offering 5/5 negotiates down to our 1/1");
+    check(assoc && assoc->state == COOKIE_ECHOED && assoc->in_streams == 20 && assoc->out_streams == 3,
+          "initiator: INIT ACK with OS 20, MIS 3 gives 20 in and 3 out");
+    check(assoc && assoc->next_ssn.size() == 3, "an SSN counter per outbound stream");
+
+    Harness wide;
+    wide.add(COOKIE_WAIT);
+    wide.receive(OUR_TAG, {init_chunk(INIT_ACK, 100, 100, param(PARAM_STATE_COOKIE, std::vector<uint8_t>(96, 0)))});
+    assoc = wide.find();
+    check(assoc && assoc->out_streams == 10, "initiator: out is capped at our OS of 10");
 
     Harness zero_ack;
     zero_ack.add(COOKIE_WAIT);
@@ -264,7 +272,7 @@ void test_invalid_stream() {
 
     Harness h;
     h.add(ESTABLISHED);
-    h.receive(OUR_TAG, {data(1, 0), data(2, 5), data(3, 0)});
+    h.receive(OUR_TAG, {data(1, 0, 0), data(2, 5), data(3, 0, 1)});
     Association* assoc = h.find();
     check(h.delivered() == 2, "valid-stream DATA on either side is delivered");
     check(assoc && assoc->last_peer_tsn == 3, "the invalid chunk's TSN is still acknowledged");
@@ -281,9 +289,9 @@ void test_invalid_stream() {
 
     Harness ooo;
     ooo.add(ESTABLISHED);
-    ooo.receive(OUR_TAG, {data(3, 0), data(2, 7)});
+    ooo.receive(OUR_TAG, {data(3, 0, 1), data(2, 7)});
     check(first_chunk(ooo.drain_sends(), OP_ERROR) != nullptr, "reported when it arrives out of order");
-    ooo.receive(OUR_TAG, {data(1, 0)});
+    ooo.receive(OUR_TAG, {data(1, 0, 0)});
     assoc = ooo.find();
     check(assoc && ooo.delivered() == 2 && assoc->last_peer_tsn == 3,
           "gap filled: TSNs 1 and 3 delivered, 2 skipped");

@@ -367,6 +367,19 @@ void test_new_data_does_not_restart_running_t3() {
     peer.close();
 }
 
+// The two messages may arrive bundled or apart, depending on how quickly the
+// event loop picks up the first.
+std::vector<uint32_t> receive_data_tsns(RawPeer& peer, size_t count) {
+    std::vector<uint32_t> tsns;
+    SCTP_Packet packet;
+    while (tsns.size() < count && peer.receive_until(DATA, packet, Clock::now() + std::chrono::seconds(1))) {
+        for (const auto& chunk : packet.chunks) {
+            tsns.push_back(std::get<data_chunk_value>(chunk.chunk_value).tsn);
+        }
+    }
+    return tsns;
+}
+
 void test_sack_restarts_t3_for_remaining_data() {
     std::printf("Acknowledging the earliest TSN restarts T3-rtx:\n");
     SCTP_Socket stack;
@@ -380,23 +393,16 @@ void test_sack_restarts_t3_for_remaining_data() {
 
     stack.sctp_send_data(key, {'o', 'n', 'e'});
     stack.sctp_send_data(key, {'t', 'w', 'o'});
-    SCTP_Packet first;
-    SCTP_Packet second;
-    bool got_both =
-        peer.receive_until(
-            DATA, first, Clock::now() + std::chrono::seconds(1))
-        && peer.receive_until(
-            DATA, second, Clock::now() + std::chrono::seconds(1));
+    std::vector<uint32_t> tsns = receive_data_tsns(peer, 2);
+    bool got_both = tsns.size() == 2;
     check(got_both, "received two initial DATA chunks");
     if (!got_both) {
         peer.close();
         return;
     }
 
-    uint32_t first_tsn =
-        std::get<data_chunk_value>(first.chunks[0].chunk_value).tsn;
-    uint32_t second_tsn =
-        std::get<data_chunk_value>(second.chunks[0].chunk_value).tsn;
+    uint32_t first_tsn = tsns[0];
+    uint32_t second_tsn = tsns[1];
     std::this_thread::sleep_for(std::chrono::milliseconds(600));
     peer.acknowledge(first_tsn);
     auto acknowledged_at = Clock::now();
@@ -435,23 +441,16 @@ void test_gap_ack_reneging_restarts_t3() {
 
     stack.sctp_send_data(key, {'o', 'n', 'e'});
     stack.sctp_send_data(key, {'t', 'w', 'o'});
-    SCTP_Packet first;
-    SCTP_Packet second;
-    bool got_both =
-        peer.receive_until(
-            DATA, first, Clock::now() + std::chrono::seconds(1))
-        && peer.receive_until(
-            DATA, second, Clock::now() + std::chrono::seconds(1));
+    std::vector<uint32_t> tsns = receive_data_tsns(peer, 2);
+    bool got_both = tsns.size() == 2;
     check(got_both, "received two initial DATA chunks");
     if (!got_both) {
         peer.close();
         return;
     }
 
-    uint32_t first_tsn =
-        std::get<data_chunk_value>(first.chunks[0].chunk_value).tsn;
-    uint32_t second_tsn =
-        std::get<data_chunk_value>(second.chunks[0].chunk_value).tsn;
+    uint32_t first_tsn = tsns[0];
+    uint32_t second_tsn = tsns[1];
     uint32_t cumulative = first_tsn - 1;
     peer.send_sack(cumulative, {{1, 2}});
     std::this_thread::sleep_for(std::chrono::milliseconds(100));

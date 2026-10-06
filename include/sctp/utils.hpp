@@ -24,6 +24,12 @@ inline bool tsn_gte(uint32_t a, uint32_t b) {
     return a == b || tsn_gt(a, b);
 }
 
+inline bool ssn_gt(uint16_t a, uint16_t b) {
+    constexpr uint16_t HALF_SSN_SPACE = uint16_t{1} << 15;
+    uint16_t distance = static_cast<uint16_t>(a - b);
+    return distance != 0 && distance < HALF_SSN_SPACE;
+}
+
 // Whether a SACK reports this TSN as received: below the cumulative ack point,
 // or inside a Gap Ack Block (RFC 9260 3.3.4). Block offsets are 16-bit relative
 // to that point, so anything beyond UINT16_MAX cannot be covered.798++97

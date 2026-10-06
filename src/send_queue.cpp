@@ -220,6 +220,13 @@ bool Send_Queue::has_retransmission_for(const Association_Key& location) {
     });
 }
 
+bool Send_Queue::has_new_data_for(const Association_Key& location) {
+    std::lock_guard<std::mutex> lock(mutex);
+    return std::any_of(new_data.begin(), new_data.end(), [&](const Queued& queued) {
+        return queued.deliverable.location == location;
+    });
+}
+
 std::vector<uint32_t> Send_Queue::front_data_tsns(Send_Priority priority) {
     std::lock_guard<std::mutex> lock(mutex);
     std::vector<uint32_t> result;

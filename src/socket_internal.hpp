@@ -50,8 +50,8 @@ static_assert(MAX_COOKIE_LIFE < COOKIE_SECRET_ROTATION);
 // New INITs sent in answer to Stale Cookie errors before giving up.
 constexpr uint8_t MAX_STALE_COOKIE_RETRIES = 2;
 // What we advertise as OS and MIS in INIT and INIT ACK.
-constexpr uint16_t LOCAL_OUT_STREAMS = 1;
-constexpr uint16_t LOCAL_MAX_IN_STREAMS = 1;
+constexpr uint16_t LOCAL_OUT_STREAMS = 10;
+constexpr uint16_t LOCAL_MAX_IN_STREAMS = 65535;
 
 inline uint32_t initial_cwnd(uint32_t pmdcs) {
     return std::min(4U * pmdcs, std::max(2U * pmdcs, 4404U));

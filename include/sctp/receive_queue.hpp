@@ -23,12 +23,6 @@
 #include <unordered_map>
 #include <vector>
 
-// Bytes of one message handed to the ULP; `complete` is false while more of it is to follow.
-struct Delivery {
-    std::vector<uint8_t> bytes;
-    bool complete{true};
-};
-
 class Receive_Queue {
     public:
         struct Read {
@@ -36,9 +30,10 @@ class Receive_Queue {
             size_t bytes;
             // More of this message remains, queued or yet to arrive.
             bool partial;
+            uint16_t stream;
         };
 
-        void push(const Association_Key& key, std::vector<uint8_t> bytes, bool complete = true);
+        void push(const Association_Key& key, std::vector<uint8_t> bytes, bool complete = true, uint16_t stream = 0);
         std::optional<Read> read_any(uint8_t* out, size_t capacity);
         std::optional<Read> read_from(const Association_Key& key, uint8_t* out, size_t capacity);
         void clear();
@@ -52,6 +47,7 @@ class Receive_Queue {
             std::vector<uint8_t> bytes;
             size_t offset;
             bool complete;
+            uint16_t stream;
         };
 
         struct Pending {

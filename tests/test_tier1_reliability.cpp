@@ -354,7 +354,7 @@ struct RawPeer {
                 .chunk_value = data_chunk_value{
                     .tsn = tsn,
                     .stream_identifier = 0,
-                    .stream_seq_num = 0,
+                    .stream_seq_num = static_cast<uint16_t>(tsn - PEER_TSN),
                     .payload_protocal = 0,
                     .user_data = {static_cast<uint8_t>(tsn)}}});
         }
@@ -522,15 +522,13 @@ void test_fast_retransmit(uint32_t first_tsn, const std::string& label) {
     for (uint8_t value = 0; value < 5; ++value) {
         stack.sctp_send_data(key, {'d', value});
     }
-    std::vector<SCTP_Packet> sent;
-    for (size_t i = 0; i < 5; ++i) {
-        SCTP_Packet packet;
-        if (peer.receive_until(DATA, packet,
-                               Clock::now() + std::chrono::seconds(1))) {
-            sent.push_back(std::move(packet));
-        }
+    // Messages queued together may be bundled, so count chunks, not packets.
+    size_t chunks = 0;
+    SCTP_Packet packet;
+    while (chunks < 5 && peer.receive_until(DATA, packet, Clock::now() + std::chrono::seconds(1))) {
+        chunks += packet.chunks.size();
     }
-    check(sent.size() == 5, "received five original DATA chunks");
+    check(chunks == 5, "received five original DATA chunks");
 
     peer.send_sack(first_tsn - 1, {{2, 2}});
     peer.send_sack(first_tsn - 1, {{2, 3}});

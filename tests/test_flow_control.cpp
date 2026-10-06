@@ -98,9 +98,11 @@ struct SCTP_Socket_Test_Access {
 
     // One DATA chunk from the peer, by default with the I bit so it is
     // acknowledged at once.
-    static void deliver_data(SCTP_Socket& stack, uint16_t peer_port, uint32_t tsn, size_t size, bool immediate = true) {
-        SCTP_Packet packet = build_data(peer_port, LOCAL_PORT, OUR_TAG,
-            {data_chunk_value{tsn, 0, 0, 0, std::vector<uint8_t>(size, 'p')}});
+    static void deliver_data(SCTP_Socket& stack, uint16_t peer_port, uint32_t tsn, size_t size, bool immediate = true,
+                             uint8_t flags = DATA_FLAG_B | DATA_FLAG_E) {
+        data_chunk_value data{tsn, 0, static_cast<uint16_t>(tsn - PEER_TSN), 0, std::vector<uint8_t>(size, 'p')};
+        data.flags = flags;
+        SCTP_Packet packet = build_data(peer_port, LOCAL_PORT, OUR_TAG, {data});
         packet.chunks[0].chunk_header.flag |= immediate ? DATA_IMMEDIATE_SACK_FLAG : 0;
         std::vector<uint8_t> wire = serialize_sctp_packet(packet);
         stack.handle_recv_packet(wire.data(), wire.size(), peer_address(peer_port));
@@ -170,9 +172,10 @@ void check(bool cond, const std::string& what) {
 
 using Access = SCTP_Socket_Test_Access;
 
-// 400 bytes of user data is a 416-byte DATA chunk.
-const std::vector<uint8_t> MESSAGE(400, 'x');
-constexpr uint32_t CHUNK = 416;
+// 1000 bytes of user data is a 1016-byte DATA chunk, too large for two to be
+// bundled into one packet.
+const std::vector<uint8_t> MESSAGE(1000, 'x');
+constexpr uint32_t CHUNK = 1016;
 
 uint32_t tsn_of(const SCTP_Packet& packet) {
     return std::get<data_chunk_value>(packet.chunks[0].chunk_value).tsn;
@@ -193,7 +196,7 @@ void test_cwnd_limits_new_data() {
 
     SCTP_Socket stack;
     Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 1200, 65535);
+    Access::establish(stack, key, 2400, 65535);
     for (int i = 0; i < 4; ++i) {
         stack.sctp_send_data(key, MESSAGE);
     }
@@ -204,7 +207,8 @@ void test_cwnd_limits_new_data() {
     }
     check(sent == 3, "three packets sent: the third breaches cwnd by less than PMDCS");
     check(bytes_in_flight(Access::tcb(stack, key)) == 3 * CHUNK, "flightsize counts every chunk sent");
-    check(Access::queued(stack) == 1, "the fourth waits in the queue");
+    check(Access::tcb(stack, key).outbound.size() == 1 && Access::queued(stack) == 0,
+          "the fourth waits in the outbound queue, with no TSN yet");
     check(!Access::send_pending(stack), "a refused packet does not keep the event loop spinning");
 }
 
@@ -213,12 +217,12 @@ void test_rwnd_limits_new_data() {
 
     SCTP_Socket stack;
     Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 4380, 500);
+    Access::establish(stack, key, 4380, 1500);
     stack.sctp_send_data(key, MESSAGE);
     stack.sctp_send_data(key, MESSAGE);
 
     check(Access::transmit(stack).has_value(), "the first chunk fits the window");
-    check(Access::tcb(stack, key).peer_rwnd == 500 - CHUNK, "rwnd is reduced by the chunk sent");
+    check(Access::tcb(stack, key).peer_rwnd == 1500 - CHUNK, "rwnd is reduced by the chunk sent");
     check(!Access::transmit(stack).has_value(), "the second does not fit, though cwnd is open");
     check(!Access::timer_armed(stack, key, Expiration_Timer_Type::ZERO_WINDOW_PROBE),
           "no probe while DATA is in flight");
@@ -258,7 +262,60 @@ void test_tsn_order_is_kept_within_an_association() {
     stack.sctp_send_data(key, {'y'});
 
     check(!Access::transmit(stack).has_value(), "nothing is sent");
-    check(Access::queued(stack) == 2, "both messages stay queued in order");
+    check(Access::tcb(stack, key).outbound.size() == 2, "both messages stay queued in order");
+}
+
+void test_bundling_spends_rwnd() {
+    std::printf("Rule A: bundled chunks share the peer's window:\n");
+
+    SCTP_Socket stack;
+    Association_Key key{peer_address(40000)};
+    Access::establish(stack, key, 4380, 900);
+    for (int i = 0; i < 3; ++i) {
+        stack.sctp_send_data(key, std::vector<uint8_t>(400, 'x'));
+    }
+    auto packet = Access::transmit(stack);
+    check(packet && packet->chunks.size() == 2, "two 416-byte chunks fit a 900-byte window in one packet");
+    check(Access::tcb(stack, key).outbound.size() == 1, "the third waits");
+}
+
+void test_sender_sws_avoidance() {
+    std::printf("6.1 A: sender silly window syndrome avoidance:\n");
+
+    auto in_flight = [](SCTP_Socket& stack, const Association_Key& key) {
+        Access::tcb(stack, key).outstanding_data.emplace(
+            INITIAL_TSN - 1, Outstanding_Data{data_chunk_value{INITIAL_TSN - 1, 0, 0, 0, {'x'}}, {}, {}, false, false, 0, false, false});
+    };
+    const std::vector<uint8_t> large(3000, 'l');
+
+    SCTP_Socket wide;
+    Association_Key key{peer_address(40000)};
+    Access::establish(wide, key, 65535, 1000);
+    Access::tcb(wide, key).peer_max_rwnd = 65535;
+    in_flight(wide, key);
+    wide.sctp_send_data(key, large);
+    check(!Access::transmit(wide).has_value(), "no fragment is cut to a window under half the largest offered");
+    check(Access::tcb(wide, key).next_tsn == INITIAL_TSN, "and no TSN is spent");
+
+    SCTP_Socket narrow;
+    Access::establish(narrow, key, 65535, 1000);
+    Access::tcb(narrow, key).peer_max_rwnd = 1500;
+    in_flight(narrow, key);
+    narrow.sctp_send_data(key, large);
+    auto packet = Access::transmit(narrow);
+    check(packet && packet->chunks.size() == 1
+              && std::get<data_chunk_value>(packet->chunks[0].chunk_value).user_data.size() == 984,
+          "a fragment is cut to fit a window of at least half the largest offered");
+    check(packet && std::get<data_chunk_value>(packet->chunks[0].chunk_value).flags == DATA_FLAG_B,
+          "as the first of its message");
+    check(!Access::transmit(narrow).has_value(), "after which the window is spent");
+
+    SCTP_Socket whole;
+    Access::establish(whole, key, 65535, 300);
+    Access::tcb(whole, key).peer_max_rwnd = 400;
+    in_flight(whole, key);
+    whole.sctp_send_data(key, std::vector<uint8_t>(500, 'w'));
+    check(!Access::transmit(whole).has_value(), "a message that fits one packet is never cut to the window");
 }
 
 void test_zero_window_probe() {
@@ -343,14 +400,14 @@ void test_slow_start_increase_is_capped() {
 
     SCTP_Socket stack;
     Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 1200, 65535);
+    Access::establish(stack, key, 2400, 65535);
     for (int i = 0; i < 3; ++i) {
         stack.sctp_send_data(key, MESSAGE);
     }
     send_all(stack);
 
     Access::deliver_sack(stack, 40000, INITIAL_TSN + 2, 65535);
-    check(Access::tcb(stack, key).cwnd == 1200 + DEFAULT_PMDCS, "3 chunks acked, but cwnd grows by one PMDCS");
+    check(Access::tcb(stack, key).cwnd == 2400 + DEFAULT_PMDCS, "3 chunks acked, but cwnd grows by one PMDCS");
 }
 
 void test_slow_start_needs_a_full_window() {
@@ -377,7 +434,7 @@ void test_slow_start_pauses_in_fast_recovery() {
     }
     send_all(stack);
     Access::tcb(stack, key).in_fast_recovery = true;
-    Access::tcb(stack, key).fast_recovery_exit_tsn = INITIAL_TSN + 2;
+    Access::tcb(stack, key).fast_recovery_exit_tsn = INITIAL_TSN + 1;
 
     Access::deliver_sack(stack, 40000, INITIAL_TSN, 65535);
     check(Access::tcb(stack, key).cwnd == 1200, "cwnd is unchanged");
@@ -388,7 +445,7 @@ void test_congestion_avoidance() {
 
     SCTP_Socket stack;
     Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 1200, 65535);
+    Access::establish(stack, key, 2400, 65535);
     Association& assoc = Access::tcb(stack, key);
     assoc.ssthresh = 1000;
     for (int i = 0; i < 6; ++i) {
@@ -397,16 +454,16 @@ void test_congestion_avoidance() {
 
     check(send_all(stack) == 3, "three chunks fill the window");
     Access::deliver_sack(stack, 40000, INITIAL_TSN, 65535);
-    check(assoc.cwnd == 1200 && assoc.partial_bytes_acked == CHUNK, "first SACK: bytes counted, cwnd unchanged");
+    check(assoc.cwnd == 2400 && assoc.partial_bytes_acked == CHUNK, "first SACK: bytes counted, cwnd unchanged");
 
     check(send_all(stack) == 1, "one more chunk refills it");
     Access::deliver_sack(stack, 40000, INITIAL_TSN + 1, 65535);
-    check(assoc.cwnd == 1200 && assoc.partial_bytes_acked == 2 * CHUNK, "second SACK: still counting");
+    check(assoc.cwnd == 2400 && assoc.partial_bytes_acked == 2 * CHUNK, "second SACK: still counting");
 
     check(send_all(stack) == 1, "and again");
     Access::deliver_sack(stack, 40000, INITIAL_TSN + 2, 65535);
-    check(assoc.cwnd == 1200 + DEFAULT_PMDCS, "a full cwnd acknowledged adds one PMDCS");
-    check(assoc.partial_bytes_acked == 3 * CHUNK - 1200, "and cwnd is taken off partial_bytes_acked");
+    check(assoc.cwnd == 2400 + DEFAULT_PMDCS, "a full cwnd acknowledged adds one PMDCS");
+    check(assoc.partial_bytes_acked == 3 * CHUNK - 2400, "and cwnd is taken off partial_bytes_acked");
 }
 
 void test_congestion_avoidance_needs_a_full_window() {
@@ -414,17 +471,17 @@ void test_congestion_avoidance_needs_a_full_window() {
 
     SCTP_Socket stack;
     Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 1200, 65535);
+    Access::establish(stack, key, 2400, 65535);
     Association& assoc = Access::tcb(stack, key);
     assoc.ssthresh = 1000;
-    assoc.partial_bytes_acked = 1000;
+    assoc.partial_bytes_acked = 2000;
     stack.sctp_send_data(key, MESSAGE);
     stack.sctp_send_data(key, MESSAGE);
     send_all(stack);
 
     Access::deliver_sack(stack, 40000, INITIAL_TSN, 65535);
-    check(assoc.cwnd == 1200, "cwnd is unchanged");
-    check(assoc.partial_bytes_acked == 1200, "partial_bytes_acked is capped at cwnd");
+    check(assoc.cwnd == 2400, "cwnd is unchanged");
+    check(assoc.partial_bytes_acked == 2400, "partial_bytes_acked is capped at cwnd");
 
     Access::deliver_sack(stack, 40000, INITIAL_TSN + 1, 65535);
     check(assoc.partial_bytes_acked == 0, "it resets once everything sent is acknowledged");
@@ -503,7 +560,7 @@ void test_t3_marks_everything_outstanding() {
     Association_Key key{peer_address(40000)};
     Access::establish(stack, key, 4404, 65535);
     for (int i = 0; i < 3; ++i) {
-        stack.sctp_send_data(key, MESSAGE);
+        stack.sctp_send_data(key, std::vector<uint8_t>(400, 'x'));
     }
     send_all(stack);
 
@@ -530,14 +587,14 @@ void test_marked_chunks_wait_for_cwnd() {
 
     SCTP_Socket stack;
     Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 1200, 65535);
+    Access::establish(stack, key, 2400, 65535);
     for (int i = 0; i < 4; ++i) {
         stack.sctp_send_data(key, MESSAGE);
     }
     check(send_all(stack) == 3, "three chunks in flight");
 
     Association& assoc = Access::tcb(stack, key);
-    assoc.cwnd = 800;
+    assoc.cwnd = 1500;
     assoc.outstanding_data.at(INITIAL_TSN + 2).pending_retransmission = true;
     check(!Access::transmit(stack).has_value(), "a marked chunk waits while flightsize is at cwnd");
 
@@ -630,7 +687,7 @@ void test_full_buffer_prefers_the_lower_tsn() {
     Association_Key key{peer_address(40000)};
     Access::establish(stack, key, 4404, 65535);
     Access::deliver_data(stack, 40000, PEER_TSN, 60000);
-    Access::deliver_data(stack, 40000, PEER_TSN + 2, RWND - 60000);
+    Access::deliver_data(stack, 40000, PEER_TSN + 2, RWND - 60000, true, DATA_FLAG_B);
     auto sack = last_sack(Access::drain(stack));
     check(sack && sack->a_rwnd == 0 && sack->gap_ack_blocks.size() == 1, "buffer full, with TSN +2 held out of order");
 
@@ -641,6 +698,25 @@ void test_full_buffer_prefers_the_lower_tsn() {
     sack = last_sack(Access::drain(stack));
     check(sack && sack->cumulative_tsn_ack == PEER_TSN + 1 && sack->gap_ack_blocks.empty(),
           "the SACK no longer reports it");
+}
+
+void test_full_buffer_takes_the_tsn_blocking_complete_messages() {
+    std::printf("6.2: with the window at 0, the missing TSN is taken when what it blocks is already complete:\n");
+
+    SCTP_Socket stack;
+    Association_Key key{peer_address(40000)};
+    Access::establish(stack, key, 4404, 65535);
+    Access::deliver_data(stack, 40000, PEER_TSN, 60000);
+    Access::deliver_data(stack, 40000, PEER_TSN + 2, RWND - 60000);
+    auto sack = last_sack(Access::drain(stack));
+    check(sack && sack->a_rwnd == 0 && sack->gap_ack_blocks.size() == 1, "buffer full, with SSN 2 complete but out of order");
+
+    Access::deliver_data(stack, 40000, PEER_TSN + 1, 10);
+    Association& assoc = Access::tcb(stack, key);
+    check(assoc.last_peer_tsn == PEER_TSN + 2 && assoc.tsn_ooo_buffer.empty(),
+          "the missing TSN is accepted, and the complete message is not dropped for it");
+    check(read_message(stack) == 60000 && read_message(stack) == 10 && read_message(stack) == RWND - 60000,
+          "all three are delivered, in SSN order");
 }
 
 void test_unanswered_retransmissions_end_the_association() {
@@ -745,7 +821,7 @@ void test_immediate_sack_bit() {
 
     SCTP_Socket stack;
     Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 1200, 65535);
+    Access::establish(stack, key, 2400, 65535);
     for (int i = 0; i < 3; ++i) {
         stack.sctp_send_data(key, MESSAGE);
     }
@@ -775,7 +851,7 @@ void test_duplicate_tsns_count_in_congestion_avoidance() {
 
     SCTP_Socket stack;
     Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 1200, 65535);
+    Access::establish(stack, key, 2400, 65535);
     Association& assoc = Access::tcb(stack, key);
     assoc.ssthresh = 1000;
     stack.sctp_send_data(key, MESSAGE);
@@ -800,6 +876,8 @@ int main() {
     test_rwnd_limits_new_data();
     test_associations_are_gated_independently();
     test_tsn_order_is_kept_within_an_association();
+    test_bundling_spends_rwnd();
+    test_sender_sws_avoidance();
     test_zero_window_probe();
     test_max_burst();
     test_initial_cwnd();
@@ -818,6 +896,7 @@ int main() {
     test_window_update();
     test_full_buffer_drops_new_data();
     test_full_buffer_prefers_the_lower_tsn();
+    test_full_buffer_takes_the_tsn_blocking_complete_messages();
     test_unanswered_retransmissions_end_the_association();
     test_probe_expiries_with_sacks_do_not_end_the_association();
     test_sack_is_bundled_with_data();

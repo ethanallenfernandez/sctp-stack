@@ -105,12 +105,12 @@ SCTP_Packet make_header(uint32_t ver_tag) {
     return p;
 }
 
-SCTP_Packet make_data(uint32_t ver_tag, uint32_t tsn, const std::string& payload) {
+SCTP_Packet make_data(uint32_t ver_tag, uint32_t tsn, uint16_t ssn, const std::string& payload) {
     SCTP_Packet p = make_header(ver_tag);
     p.chunks.push_back(SCTP_Chunk{
         .chunk_header = { .type = DATA, .flag = DATA_FLAG_B | DATA_FLAG_E, .length = 0 },
         .chunk_value = data_chunk_value{
-            .tsn = tsn, .stream_identifier = 0, .stream_seq_num = 0,
+            .tsn = tsn, .stream_identifier = 0, .stream_seq_num = ssn,
             .payload_protocal = 0,
             .user_data = std::vector<uint8_t>(payload.begin(), payload.end())
         }
@@ -192,13 +192,13 @@ static void test_out_of_order_delivery(uint32_t base_tsn, const char* label) {
     // --- scrambled DATA ------------------------------------------------
     // +1 and +2 early so they must be buffered, then base_tsn fills the gap,
     // then +3 and +4. Before the fix, +3 and +4 stranded forever.
-    peer.send(make_data(server_tag, base_tsn + 1, "two"));
-    peer.send(make_data(server_tag, base_tsn + 2, "three"));
+    peer.send(make_data(server_tag, base_tsn + 1, 1, "two"));
+    peer.send(make_data(server_tag, base_tsn + 2, 2, "three"));
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    peer.send(make_data(server_tag, base_tsn + 0, "one"));
+    peer.send(make_data(server_tag, base_tsn + 0, 0, "one"));
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    peer.send(make_data(server_tag, base_tsn + 3, "four"));
-    peer.send(make_data(server_tag, base_tsn + 4, "five"));
+    peer.send(make_data(server_tag, base_tsn + 3, 3, "four"));
+    peer.send(make_data(server_tag, base_tsn + 4, 4, "five"));
 
     Association_Key key{peer.self};
     const char* expect[] = {"one", "two", "three", "four", "five"};

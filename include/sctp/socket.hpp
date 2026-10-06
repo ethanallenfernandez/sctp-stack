@@ -52,16 +52,18 @@ public:
     void sctp_set_linger(int linger_ms);
     Association_Key sctp_associate(std::string_view ip_address, int port);
     int await_established_association(const Association_Key& association_id, int timeout_ms);
-    void sctp_send_data(const sockaddr_in& association_id, const std::vector<uint8_t>& data);
-    void sctp_send_data(const Association_Key& association_id, const std::vector<uint8_t>& data);
+    // Refused if the stream is not one the association negotiated. An unordered
+    // message takes no SSN and may be delivered ahead of others on its stream.
+    void sctp_send_data(const sockaddr_in& association_id, const std::vector<uint8_t>& data, uint16_t stream = 0, bool unordered = false);
+    void sctp_send_data(const Association_Key& association_id, const std::vector<uint8_t>& data, uint16_t stream = 0, bool unordered = false);
     void sctp_abort(const sockaddr_in& association_id, const std::vector<uint8_t>& reason = {});
     void sctp_abort(const Association_Key& association_id, const std::vector<uint8_t>& reason = {});
     // Reads at most one message. *out_partial is set when more of it remains: the
     // buffer was too small, or the message is being handed up before all of it
     // has arrived. The rest is returned by the following reads.
-    size_t sctp_recv_data(std::vector<uint8_t>& buffer, Association_Key* out_association_id = nullptr, bool* out_partial = nullptr);
-    size_t sctp_recv_data_from(const sockaddr_in& association_id, std::vector<uint8_t>& buffer, bool* out_partial = nullptr);
-    size_t sctp_recv_data_from(const Association_Key& association_id, std::vector<uint8_t>& buffer, bool* out_partial = nullptr);
+    size_t sctp_recv_data(std::vector<uint8_t>& buffer, Association_Key* out_association_id = nullptr, bool* out_partial = nullptr, uint16_t* out_stream = nullptr);
+    size_t sctp_recv_data_from(const sockaddr_in& association_id, std::vector<uint8_t>& buffer, bool* out_partial = nullptr, uint16_t* out_stream = nullptr);
+    size_t sctp_recv_data_from(const Association_Key& association_id, std::vector<uint8_t>& buffer, bool* out_partial = nullptr, uint16_t* out_stream = nullptr);
     void sctp_shutdown(const sockaddr_in& association_id);
     void sctp_shutdown(const Association_Key& association_id);
     std::optional<Notification> sctp_recv_notification(int timeout_ms = 0);
@@ -104,6 +106,7 @@ private:
     Send_Allowances send_allowances();
     void arm_zero_window_probes(const Send_Allowances& allowances);
     void refill_retransmissions(const Send_Allowances& allowances);
+    void refill_new_data(Send_Allowances& allowances);
     void prepare_data_packet(Deliverable& deliverable, bool new_data);
     void run_receiving();
     void enqueue_packet(Deliverable deliverable, Send_Priority priority = Send_Priority::CONTROL);

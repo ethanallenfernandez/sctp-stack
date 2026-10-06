@@ -9,6 +9,7 @@
 #include <map>
 #include <deque>
 #include <chrono>
+#include <unordered_map>
 #include <sctp/platform.hpp>
 #include <sctp/sctp.hpp>
 
@@ -31,6 +32,36 @@ struct Outstanding_Data {
     uint16_t missing_reports;
     bool fast_retransmitted;
     bool pending_retransmission;
+};
+
+// A chunk received above the Cumulative TSN Ack. `assembled` once its message
+// was completed ahead of the cumulative point and taken out of the chunks: the
+// entry stays only for the SACK, and is never dropped to make room.
+struct Held_Chunk {
+    data_chunk_value data;
+    bool assembled{false};
+};
+
+// Bytes of one message handed to the ULP; `complete` is false while more of it is to follow.
+struct Delivery {
+    std::vector<uint8_t> bytes;
+    bool complete{true};
+    uint16_t stream{0};
+};
+
+// Ordered messages that arrived complete ahead of the next SSN, keyed by SSN.
+struct Inbound_Stream {
+    uint16_t next_ssn{0};
+    std::map<uint16_t, std::vector<uint8_t>> early;
+};
+
+// Queued by the ULP, cut into DATA chunks only once a packet can carry them.
+struct Outbound_Message {
+    uint16_t stream;
+    uint16_t ssn;
+    bool unordered;
+    std::vector<uint8_t> bytes;
+    size_t offset{0};
 };
 
 // The message whose fragments are being consumed in TSN order.
@@ -59,6 +90,7 @@ struct Association {
     bool hb_outstanding;
     std::chrono::steady_clock::time_point hb_sent_at;
     uint32_t peer_rwnd;
+    uint32_t peer_max_rwnd;
     bool zero_window_probe_allowed;
     bool zero_window_probing;
     bool sack_since_t3;
@@ -94,14 +126,19 @@ struct Association {
     bool idle_decaying;
     bool in_fast_recovery;
     uint32_t fast_recovery_exit_tsn;
-    std::map<uint32_t, data_chunk_value> tsn_ooo_buffer;
+    std::map<uint32_t, Held_Chunk> tsn_ooo_buffer;
     std::vector<uint32_t> duplicate_tsns;
     uint8_t delayed_sack_packet_count;
     uint16_t ack_state;
     uint16_t in_streams;
     uint16_t out_streams;
     std::vector<uint16_t> next_ssn; // Indexed into by stream number
+    std::deque<Outbound_Message> outbound;
     Reassembly reassembly;
+    std::unordered_map<uint16_t, Inbound_Stream> inbound_streams;
+    // Messages completed while another is part way through partial delivery,
+    // which has the ULP's attention until its end arrives.
+    std::vector<Delivery> held_deliveries;
 };
 
 struct Association_Key {

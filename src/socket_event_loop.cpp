@@ -96,6 +96,60 @@ namespace {
             assoc.cwnd = std::max(assoc.cwnd / 2, floor);
         }
     }
+
+    // One packet of new DATA from the head of the outbound queue, bundling
+    // messages while they fit the PMDCS and the peer's window. A message is
+    // fragmented only if it cannot fit a packet of its own, and a fragment is cut
+    // short to fit the window only if it would still fill half the largest
+    // window the peer has offered.
+    std::vector<data_chunk_value> cut_new_data(Association& assoc, Send_Allowance& allowance) {
+        std::vector<data_chunk_value> chunks;
+        size_t full_fragment = (assoc.pmdcs - DATA_CHUNK_HEADER_SIZE) & ~size_t{3};
+        size_t packet_bytes = 0;
+        while (!assoc.outbound.empty()) {
+            Outbound_Message& message = assoc.outbound.front();
+            size_t remaining = message.bytes.size() - message.offset;
+            size_t take = std::min(remaining, full_fragment);
+            size_t space = assoc.pmdcs - packet_bytes;
+            bool probe = allowance.zero_window_probe && chunks.empty();
+            size_t window = probe ? space : std::min<size_t>(space, allowance.rwnd > packet_bytes ? allowance.rwnd - packet_bytes : 0);
+            auto wire_size = [](size_t payload) { return DATA_CHUNK_HEADER_SIZE + ((payload + 3) & ~size_t{3}); };
+
+            if (wire_size(take) > window) {
+                size_t cut = window > DATA_CHUNK_HEADER_SIZE ? (window - DATA_CHUNK_HEADER_SIZE) & ~size_t{3} : 0;
+                bool fragmenting = message.bytes.size() > full_fragment;
+                if (!fragmenting || cut == 0 || wire_size(cut) < assoc.peer_max_rwnd / 2) {
+                    if (chunks.empty()) {
+                        allowance.rwnd_blocked = true;
+                    }
+                    break;
+                }
+                take = cut;
+            }
+
+            uint8_t flags = (message.offset == 0 ? DATA_FLAG_B : 0)
+                | (message.offset + take == message.bytes.size() ? DATA_FLAG_E : 0)
+                | (message.unordered ? DATA_FLAG_U : 0);
+            auto begin = message.bytes.begin() + static_cast<long>(message.offset);
+            chunks.push_back(data_chunk_value{
+                .tsn = assoc.next_tsn++,
+                .stream_identifier = message.stream,
+                .stream_seq_num = message.ssn,
+                .payload_protocal = 0,
+                .user_data = std::vector<uint8_t>(begin, begin + static_cast<long>(take)),
+                .flags = flags,
+            });
+            packet_bytes += wire_size(take);
+            message.offset += take;
+            if (message.offset == message.bytes.size()) {
+                assoc.outbound.pop_front();
+            }
+            if (probe) {
+                break;
+            }
+        }
+        return chunks;
+    }
 }
 
 void SCTP_Socket::run_sending() {
@@ -118,6 +172,7 @@ void SCTP_Socket::run_sending() {
 std::optional<Send_Queue::Pending> SCTP_Socket::next_packet() {
     Send_Allowances allowances = send_allowances();
     refill_retransmissions(allowances);
+    refill_new_data(allowances);
     std::optional<Send_Queue::Pending> pending = sends.peek(std::chrono::steady_clock::now(), allowances);
     arm_zero_window_probes(allowances);
     if (pending && pending->priority != Send_Priority::CONTROL) {
@@ -241,6 +296,36 @@ void SCTP_Socket::refill_retransmissions(const Send_Allowances& allowances) {
         if (allowance.cwnd_open && !sends.has_retransmission_for(key)) {
             schedule_pending_retransmission(key);
         }
+    }
+}
+
+// TSNs are assigned here rather than when the ULP sends, so a packet is cut
+// against the window as it stands. At most one is built ahead per association,
+// which keeps each association's TSNs on the wire in order.
+void SCTP_Socket::refill_new_data(Send_Allowances& allowances) {
+    for (auto& [key, allowance] : allowances) {
+        if (!allowance.cwnd_open || allowance.burst_spent || sends.has_new_data_for(key)) {
+            continue;
+        }
+        Deliverable deliverable;
+        {
+            std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+            auto association = associations.find(key);
+            if (association == associations.end()) {
+                continue;
+            }
+            std::vector<data_chunk_value> chunks = cut_new_data(association->second, allowance);
+            if (chunks.empty()) {
+                continue;
+            }
+            deliverable = Deliverable{key, build_data(
+                ntohs(local_address.sin_port),
+                ntohs(key.address.sin_port),
+                association->second.peer_ver_tag,
+                std::move(chunks)
+            )};
+        }
+        sends.enqueue(std::move(deliverable), Send_Priority::NEW_DATA);
     }
 }
 

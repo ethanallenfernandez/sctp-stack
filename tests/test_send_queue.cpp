@@ -87,7 +87,19 @@ struct SCTP_Socket_Test_Access {
 
     static std::vector<uint16_t> drain_new_data_ssns(SCTP_Socket& stack) {
         std::vector<uint16_t> ssns;
-        while (auto pending = stack.sends.peek(std::chrono::steady_clock::now())) {
+        for (;;) {
+            Send_Allowances open;
+            {
+                std::lock_guard<std::mutex> lock(stack.associations_mutex);
+                for (const auto& entry : stack.associations) {
+                    open.emplace(entry.first, Send_Allowance{0, true, false, UINT32_MAX, false});
+                }
+            }
+            stack.refill_new_data(open);
+            auto pending = stack.sends.peek(std::chrono::steady_clock::now());
+            if (!pending) {
+                break;
+            }
             for (const auto& chunk : pending->deliverable.packet.chunks) {
                 ssns.push_back(std::get<data_chunk_value>(chunk.chunk_value).stream_seq_num);
             }
@@ -179,8 +191,9 @@ static void test_failed_send_retains_reserved_tsn() {
     Association_Key key = SCTP_Socket_Test_Access::add_established_association(
         stack, peer, INITIAL_TSN);
     stack.sctp_send_data(key, {'r', 'e', 't', 'r', 'y'});
-    uint32_t reserved_tsn =
-        SCTP_Socket_Test_Access::pending_data_tsn(stack);
+    check(
+        SCTP_Socket_Test_Access::pending_packets(stack) == 0,
+        "a message takes no TSN until a packet is built for it");
 
     SCTP_Socket_Test_Access::invalidate_socket(stack);
     SCTP_Socket_Test_Access::attempt_send(stack);
@@ -188,7 +201,7 @@ static void test_failed_send_retains_reserved_tsn() {
         SCTP_Socket_Test_Access::pending_packets(stack) == 1,
         "failed send leaves DATA in the queue");
     check(
-        SCTP_Socket_Test_Access::pending_data_tsn(stack) == reserved_tsn,
+        SCTP_Socket_Test_Access::pending_data_tsn(stack) == INITIAL_TSN,
         "failed send preserves the reserved TSN");
 
     sctp_socket_t replacement = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);

@@ -64,6 +64,8 @@ Implemented:
 - Fragmentation and reassembly (§6.9): messages larger than the PMDCS are split
   on send and reassembled on receive, with partial delivery when a message
   outgrows the receive buffer. Receive calls report a partial flag (§11.1.7).
+- Streams (§6.5, §6.6): ordered delivery per stream, with a gap blocking only
+  its own stream, and unordered delivery. Messages are chunked at send time and
+  bundled (§6.10), with sender SWS avoidance (§6.1).
 
-Not yet implemented: multiple streams and unordered delivery (§6.5, §6.6),
-multi-homing (§6.4), PMTU discovery (§7.3), and IPv6.
+Not yet implemented: multi-homing (§6.4), PMTU discovery (§7.3), and IPv6.

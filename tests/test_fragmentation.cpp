@@ -56,13 +56,25 @@ struct SCTP_Socket_Test_Access {
         return key;
     }
 
+    // Every packet the stack would send with its windows wide open.
     static std::vector<SCTP_Packet> drain(SCTP_Socket& stack) {
         std::vector<SCTP_Packet> packets;
-        while (auto pending = stack.sends.peek(std::chrono::steady_clock::now())) {
+        for (;;) {
+            Send_Allowances open;
+            {
+                std::lock_guard<std::mutex> lock(stack.associations_mutex);
+                for (const auto& entry : stack.associations) {
+                    open.emplace(entry.first, Send_Allowance{0, true, false, UINT32_MAX, false});
+                }
+            }
+            stack.refill_new_data(open);
+            auto pending = stack.sends.peek(std::chrono::steady_clock::now());
+            if (!pending) {
+                return packets;
+            }
             packets.push_back(pending->deliverable.packet);
             stack.sends.commit(*pending);
         }
-        return packets;
     }
 
     // An association that has received everything up to PEER_TSN - 1.
@@ -76,6 +88,7 @@ struct SCTP_Socket_Test_Access {
         association.this_ver_tag = OUR_TAG;
         association.peer_ver_tag = 0x10203040;
         association.last_peer_tsn = PEER_TSN - 1;
+        association.in_streams = 4;
         association.pmdcs = PMDCS;
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
         stack.associations.insert_or_assign(key, association);

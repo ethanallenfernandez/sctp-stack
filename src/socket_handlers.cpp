@@ -15,19 +15,42 @@
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <iterator>
 #include <mutex>
 #include <stdexcept>
 #include <vector>
 
 namespace {
-    // User data held back from the ULP: for reordering, or for reassembly.
+    // User data held back from the ULP: for reordering, reassembly, or ordered
+    // delivery.
     size_t held_bytes(const Association& assoc) {
         size_t total = assoc.reassembly.bytes.size();
-        for (const auto& [tsn, data] : assoc.tsn_ooo_buffer) {
-            total += data.user_data.size();
+        for (const auto& [tsn, held] : assoc.tsn_ooo_buffer) {
+            total += held.data.user_data.size();
             (void)tsn;
         }
+        for (const auto& [id, stream] : assoc.inbound_streams) {
+            for (const auto& [ssn, bytes] : stream.early) {
+                total += bytes.size();
+                (void)ssn;
+            }
+            (void)id;
+        }
+        for (const auto& delivery : assoc.held_deliveries) {
+            total += delivery.bytes.size();
+        }
         return total;
+    }
+
+    // Whether anything held is complete and waiting only on the TSN at the
+    // Cumulative TSN Ack point. Nothing could be dropped to make room for it.
+    bool blocked_on_cumulative_tsn(const Association& assoc) {
+        bool assembled = std::any_of(assoc.tsn_ooo_buffer.begin(), assoc.tsn_ooo_buffer.end(), [](const auto& entry) {
+            return entry.second.assembled;
+        });
+        return assembled || std::any_of(assoc.inbound_streams.begin(), assoc.inbound_streams.end(), [](const auto& entry) {
+            return !entry.second.early.empty();
+        });
     }
 
     // With the receive buffer full, a new chunk above everything received is
@@ -57,21 +80,56 @@ namespace {
     bool make_room(Association& assoc, uint32_t tsn, size_t& used) {
         auto highest = assoc.tsn_ooo_buffer.end();
         for (auto it = assoc.tsn_ooo_buffer.begin(); it != assoc.tsn_ooo_buffer.end(); ++it) {
-            if (highest == assoc.tsn_ooo_buffer.end() || tsn_gt(it->first, highest->first)) {
+            if (!it->second.assembled && (highest == assoc.tsn_ooo_buffer.end() || tsn_gt(it->first, highest->first))) {
                 highest = it;
             }
         }
         if (highest == assoc.tsn_ooo_buffer.end() || tsn_gt(tsn, highest->first)) {
             return false;
         }
-        used -= highest->second.user_data.size();
+        used -= highest->second.data.user_data.size();
         assoc.tsn_ooo_buffer.erase(highest);
         return true;
     }
 
+    bool partial_delivery_open(const Association& assoc) {
+        return assoc.reassembly.open && assoc.reassembly.partially_delivered;
+    }
+
+    void hand_up(Association& assoc, Delivery delivery, std::vector<Delivery>& delivered) {
+        (partial_delivery_open(assoc) ? assoc.held_deliveries : delivered).push_back(std::move(delivery));
+    }
+
+    void advance_stream(Association& assoc, uint16_t stream_id, std::vector<Delivery>& delivered) {
+        Inbound_Stream& stream = assoc.inbound_streams[stream_id];
+        ++stream.next_ssn;
+        for (auto next = stream.early.find(stream.next_ssn); next != stream.early.end(); next = stream.early.find(++stream.next_ssn)) {
+            hand_up(assoc, Delivery{std::move(next->second), true, stream_id}, delivered);
+            stream.early.erase(next);
+        }
+    }
+
+    // False if the SSN was already delivered or is already waiting: the peer
+    // reused it.
+    bool order_message(Association& assoc, uint16_t stream_id, uint16_t ssn, bool unordered, std::vector<uint8_t> bytes, std::vector<Delivery>& delivered) {
+        if (unordered) {
+            hand_up(assoc, Delivery{std::move(bytes), true, stream_id}, delivered);
+            return true;
+        }
+        Inbound_Stream& stream = assoc.inbound_streams[stream_id];
+        if (ssn != stream.next_ssn) {
+            return ssn_gt(ssn, stream.next_ssn) && stream.early.emplace(ssn, std::move(bytes)).second;
+        }
+        hand_up(assoc, Delivery{std::move(bytes), true, stream_id}, delivered);
+        advance_stream(assoc, stream_id, delivered);
+        return true;
+    }
+
     // Takes the next chunk in TSN order. False if it can neither begin a message
-    // nor continue the open one.
-    bool reassemble(Association& assoc, const data_chunk_value& data, bool valid_stream, std::vector<Delivery>& delivered) {
+    // nor continue the open one. Without keep_bytes only the framing is checked:
+    // the stream is invalid, or the message was already assembled ahead of the
+    // Cumulative TSN Ack.
+    bool reassemble(Association& assoc, const data_chunk_value& data, bool keep_bytes, std::vector<Delivery>& delivered) {
         Reassembly& message = assoc.reassembly;
         bool begins = (data.flags & DATA_FLAG_B) != 0;
         bool ends = (data.flags & DATA_FLAG_E) != 0;
@@ -85,15 +143,77 @@ namespace {
                 || (!unordered && data.stream_seq_num != message.ssn)) {
             return false;
         }
-        if (valid_stream) {
-            message.bytes.insert(message.bytes.end(), data.user_data.begin(), data.user_data.end());
-            if (ends || message.partially_delivered) {
-                delivered.push_back(Delivery{std::move(message.bytes), ends});
-                message.bytes.clear();
+        message.open = !ends;
+        if (!keep_bytes) {
+            return true;
+        }
+        message.bytes.insert(message.bytes.end(), data.user_data.begin(), data.user_data.end());
+        if (message.partially_delivered) {
+            delivered.push_back(Delivery{std::move(message.bytes), ends, message.stream});
+            message.bytes.clear();
+            if (ends) {
+                std::move(assoc.held_deliveries.begin(), assoc.held_deliveries.end(), std::back_inserter(delivered));
+                assoc.held_deliveries.clear();
+            }
+            return true;
+        }
+        if (!ends) {
+            return true;
+        }
+        std::vector<uint8_t> bytes = std::move(message.bytes);
+        message.bytes.clear();
+        return order_message(assoc, message.stream, message.ssn, message.unordered, std::move(bytes), delivered);
+    }
+
+    // A message lying wholly above the Cumulative TSN Ack is taken out as soon
+    // as its last fragment arrives, so a gap holds back only its own stream.
+    bool assemble_early(Association& assoc, uint32_t tsn, std::vector<Delivery>& delivered) {
+        auto usable = [&](uint32_t at) -> const data_chunk_value* {
+            auto it = assoc.tsn_ooo_buffer.find(at);
+            if (it == assoc.tsn_ooo_buffer.end() || it->second.assembled || it->second.data.user_data.empty()) {
+                return nullptr;
+            }
+            return &it->second.data;
+        };
+        const data_chunk_value* arrived = usable(tsn);
+        if (arrived == nullptr) {
+            return true;
+        }
+        uint16_t stream = arrived->stream_identifier;
+        uint16_t ssn = arrived->stream_seq_num;
+        bool unordered = (arrived->flags & DATA_FLAG_U) != 0;
+        // A fragment of the same message that does not open or close another.
+        auto continues = [&](const data_chunk_value* chunk, uint8_t foreign_edge) {
+            return chunk != nullptr && (chunk->flags & foreign_edge) == 0 && chunk->stream_identifier == stream
+                && ((chunk->flags & DATA_FLAG_U) != 0) == unordered && (unordered || chunk->stream_seq_num == ssn);
+        };
+
+        uint32_t first = tsn;
+        while ((usable(first)->flags & DATA_FLAG_B) == 0) {
+            if (!continues(usable(first - 1), DATA_FLAG_E)) {
+                return true;
+            }
+            --first;
+        }
+        uint32_t last = tsn;
+        while ((usable(last)->flags & DATA_FLAG_E) == 0) {
+            if (!continues(usable(last + 1), DATA_FLAG_B)) {
+                return true;
+            }
+            ++last;
+        }
+
+        std::vector<uint8_t> bytes;
+        for (uint32_t at = first;; ++at) {
+            Held_Chunk& held = assoc.tsn_ooo_buffer.at(at);
+            bytes.insert(bytes.end(), held.data.user_data.begin(), held.data.user_data.end());
+            held.data.user_data = {};
+            held.assembled = true;
+            if (at == last) {
+                break;
             }
         }
-        message.open = !ends;
-        return true;
+        return order_message(assoc, stream, ssn, unordered, std::move(bytes), delivered);
     }
 
     error_cause unrecognized_chunk_cause(const SCTP_Chunk& chunk) {
@@ -497,6 +617,7 @@ void SCTP_Socket::handle_init_ack(const SCTP_Common_Header& header, const SCTP_C
     assoc.last_peer_tsn = init_ack.initial_tsn - 1;
     assoc.peer_ver_tag = init_ack.initiate_tag;
     assoc.peer_rwnd = init_ack.a_rwnd;
+    assoc.peer_max_rwnd = init_ack.a_rwnd;
     assoc.out_streams = std::min(LOCAL_OUT_STREAMS, init_ack.in_streams);
     assoc.in_streams = std::min(LOCAL_MAX_IN_STREAMS, init_ack.out_streams);
     assoc.next_ssn.assign(assoc.out_streams, 0);
@@ -618,8 +739,11 @@ bool SCTP_Socket::handle_cookie_echo(
         tcb.peer_ver_tag = cookie.peer_ver_tag;
         tcb.last_peer_tsn = cookie.peer_initial_tsn - 1;
         tcb.peer_rwnd = cookie.peer_a_rwnd;
+        tcb.peer_max_rwnd = cookie.peer_a_rwnd;
         tcb.tsn_ooo_buffer.clear();
         tcb.reassembly = {};
+        tcb.inbound_streams.clear();
+        tcb.held_deliveries.clear();
         tcb.duplicate_tsns.clear();
         // A shutdown in progress is kept rather than silently cancelled.
         if (tcb.state == COOKIE_WAIT || tcb.state == COOKIE_ECHOED) {
@@ -764,7 +888,8 @@ void SCTP_Socket::abort_association(
 }
 
 // Cumulative against next_tsn rather than outstanding_data being empty: DATA
-// still in the send queue has a TSN but no outstanding entry yet.
+// still in the send queue has a TSN but no outstanding entry yet, and messages
+// still in the outbound queue have no TSN at all.
 void SCTP_Socket::do_next_shutdown_step(const Association_Key& key) {
     SCTP_Packet packet;
     bool guard = false;
@@ -775,7 +900,7 @@ void SCTP_Socket::do_next_shutdown_step(const Association_Key& key) {
             return;
         }
         Association& assoc = it->second;
-        if (assoc.cumulative_tsn_ack != assoc.next_tsn - 1) {
+        if (assoc.cumulative_tsn_ack != assoc.next_tsn - 1 || !assoc.outbound.empty()) {
             return;
         }
 
@@ -1227,6 +1352,7 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
 
         size_t flight_size = bytes_in_flight(assoc);
         assoc.peer_rwnd = flight_size >= sack.a_rwnd ? 0 : sack.a_rwnd - static_cast<uint32_t>(flight_size);
+        assoc.peer_max_rwnd = std::max(assoc.peer_max_rwnd, sack.a_rwnd);
         assoc.sack_since_t3 = true;
         if (sack.a_rwnd > 0) {
             assoc.zero_window_probing = false;
@@ -1381,7 +1507,8 @@ void SCTP_Socket::handle_data_packet(
                 saw_duplicate = true;
                 continue;
             }
-            if (used >= RWND && !make_room(assoc, tsn, used)) {
+            if (used >= RWND && !make_room(assoc, tsn, used)
+                    && !(tsn == assoc.last_peer_tsn + 1 && blocked_on_cumulative_tsn(assoc))) {
                 dropped = true;
                 continue;
             }
@@ -1397,9 +1524,12 @@ void SCTP_Socket::handle_data_packet(
                     break;
                 }
             } else {
-                auto inserted = assoc.tsn_ooo_buffer.emplace(tsn, data);
+                auto inserted = assoc.tsn_ooo_buffer.emplace(tsn, Held_Chunk{data});
                 if (!valid_stream) {
-                    inserted.first->second.user_data.clear();
+                    inserted.first->second.data.user_data.clear();
+                } else if (!assemble_early(assoc, tsn, delivered)) {
+                    violation = true;
+                    break;
                 }
             }
         }
@@ -1409,11 +1539,17 @@ void SCTP_Socket::handle_data_packet(
         }
         // Once the window cannot take another full-size chunk, the rest of the
         // message could only arrive after the ULP reads, so it gets what there is.
+        // Only the message next in its stream can go up early: the ULP sees it
+        // through to its end before anything else.
         Reassembly& message = assoc.reassembly;
-        if (message.open && !message.bytes.empty() && used + assoc.pmdcs > RWND) {
-            delivered.push_back(Delivery{std::move(message.bytes), false});
+        if (message.open && !message.bytes.empty() && used + assoc.pmdcs > RWND
+                && (message.unordered || message.ssn == assoc.inbound_streams[message.stream].next_ssn)) {
+            delivered.push_back(Delivery{std::move(message.bytes), false, message.stream});
             message.bytes.clear();
             message.partially_delivered = true;
+            if (!message.unordered) {
+                advance_stream(assoc, message.stream, delivered);
+            }
         }
         // 9.2: in SHUTDOWN-SENT every DATA packet is answered with a SHUTDOWN,
         // and with a SACK as well whenever the SHUTDOWN alone would not say it all.
@@ -1434,12 +1570,12 @@ void SCTP_Socket::handle_data_packet(
     }
 
     if (violation) {
-        std::cout << "Aborting association: DATA chunk out of place in its message" << std::endl;
+        std::cout << "Aborting association: DATA chunk out of place in its message or stream" << std::endl;
         abort_association(assoc_key, packet.header, src, {error_cause{CAUSE_PROTOCOL_VIOLATION, {}}});
         return;
     }
     for (auto& delivery : delivered) {
-        receives.push(assoc_key, std::move(delivery.bytes), delivery.complete);
+        receives.push(assoc_key, std::move(delivery.bytes), delivery.complete, delivery.stream);
     }
     if (!invalid_streams.empty()) {
         send_error(packet.header, src, peer_tag, std::move(invalid_streams));
@@ -1483,7 +1619,8 @@ void SCTP_Socket::maybe_send_window_update(const Association_Key& key) {
 bool SCTP_Socket::read_ooo_buffer(Association& assoc, std::vector<Delivery>& delivered) {
     uint32_t tsn = assoc.last_peer_tsn + 1;
     for (auto it = assoc.tsn_ooo_buffer.find(tsn); it != assoc.tsn_ooo_buffer.end(); it = assoc.tsn_ooo_buffer.find(++tsn)) {
-        if (!reassemble(assoc, it->second, it->second.stream_identifier < assoc.in_streams, delivered)) {
+        const Held_Chunk& held = it->second;
+        if (!reassemble(assoc, held.data, !held.assembled && !held.data.user_data.empty(), delivered)) {
             return false;
         }
         assoc.tsn_ooo_buffer.erase(it);

@@ -65,6 +65,7 @@ class Send_Queue {
 
         void purge(const Association_Key& location);
         bool has_retransmission_for(const Association_Key& location);
+        bool has_new_data_for(const Association_Key& location);
 
         // Drops acked DATA from pending retransmissions, and empty packets.
         void remove_acked_retransmissions(const Association_Key& location, const sack_chunk_value& sack);
