@@ -68,6 +68,8 @@ enum Param_Type : uint16_t {
     PARAM_STATE_COOKIE = 7,
     PARAM_UNRECOGNIZED = 8,
     PARAM_COOKIE_PRESERVATIVE = 9,
+    PARAM_HOST_NAME_ADDRESS = 11,
+    PARAM_SUPPORTED_ADDRESS_TYPES = 12,
 };
 
 enum Error_Cause_Code : uint16_t {

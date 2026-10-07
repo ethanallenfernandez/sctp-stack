@@ -222,6 +222,24 @@ namespace {
         return order_message(assoc, stream, ssn, unordered, std::move(bytes), delivered);
     }
 
+    // Leading reports win: keeps as many as fit in room, each costing per_report on top of its size.
+    void trim_reports(std::vector<std::vector<uint8_t>>& reports, size_t room, size_t per_report) {
+        auto fits = reports.begin();
+        for (size_t used = 0; fits != reports.end(); ++fits) {
+            used += per_report + fits->size();
+            if (used > room) {
+                break;
+            }
+        }
+        reports.erase(fits, reports.end());
+    }
+
+    error_cause unresolvable_address_cause(const std::vector<uint8_t>& host_name) {
+        std::vector<uint8_t> info;
+        append_parameter(info, PARAM_HOST_NAME_ADDRESS, host_name.data(), host_name.size());
+        return error_cause{CAUSE_UNRESOLVABLE_ADDRESS, std::move(info)};
+    }
+
     error_cause unrecognized_chunk_cause(const SCTP_Chunk& chunk) {
         const auto& body = std::get<unknown_chunk_value>(chunk.chunk_value).body;
         uint16_t length = static_cast<uint16_t>(SCTP_CHUNK_HEADER_SIZE + body.size());
@@ -525,8 +543,21 @@ void SCTP_Socket::handle_init(const SCTP_Common_Header& header, const SCTP_Chunk
         send_abort(header, src, init.initiate_tag, false, {error_cause{CAUSE_INVALID_MANDATORY_PARAM, {}}});
         return;
     }
+    Parameter_Scan params = scan_parameters(init.optional_parameters, {
+        PARAM_IPV4_ADDRESS,
+        PARAM_IPV6_ADDRESS,
+        PARAM_COOKIE_PRESERVATIVE,
+        PARAM_HOST_NAME_ADDRESS,
+        PARAM_SUPPORTED_ADDRESS_TYPES,
+    });
+    std::vector<uint8_t> host_name;
+    if (find_parameter(params.recognized, PARAM_HOST_NAME_ADDRESS, host_name)) {
+        std::cout << "Aborting INIT carrying a Host Name Address" << std::endl;
+        send_abort(header, src, init.initiate_tag, false, {unresolvable_address_cause(host_name)});
+        return;
+    }
     std::vector<uint8_t> preservative;
-    uint32_t lifespan_increment_ms = find_parameter(init.optional_parameters, PARAM_COOKIE_PRESERVATIVE, preservative)
+    uint32_t lifespan_increment_ms = find_parameter(params.recognized, PARAM_COOKIE_PRESERVATIVE, preservative)
         && preservative.size() == 4 ? read_be32(preservative.data()) : 0;
 
     uint32_t local_tag = generate_nonzero_tag();
@@ -574,13 +605,17 @@ void SCTP_Socket::handle_init(const SCTP_Common_Header& header, const SCTP_Chunk
         lifespan_increment_ms
     );
 
+    size_t init_ack_size = SCTP_CHUNK_HEADER_SIZE + 16 + SCTP_CHUNK_HEADER_SIZE + ((cookie.size() + 3) & ~size_t{3});
+    trim_reports(params.reported, DEFAULT_PMDCS - std::min<size_t>(DEFAULT_PMDCS, init_ack_size), SCTP_CHUNK_HEADER_SIZE);
+
     enqueue_packet(Deliverable{src, build_init_ack(
         header.des_port,
         header.src_port,
         init.initiate_tag,
         local_tag,
         local_tsn,
-        cookie
+        cookie,
+        params.reported
     )});
 }
 
@@ -605,8 +640,15 @@ void SCTP_Socket::handle_init_ack(const SCTP_Common_Header& header, const SCTP_C
         return;
     }
 
+    Parameter_Scan params = scan_parameters(init_ack.optional_parameters, {
+        PARAM_STATE_COOKIE,
+        PARAM_IPV4_ADDRESS,
+        PARAM_IPV6_ADDRESS,
+        PARAM_UNRECOGNIZED,
+        PARAM_HOST_NAME_ADDRESS,
+    });
     std::vector<uint8_t> cookie;
-    if (!find_parameter(init_ack.optional_parameters, PARAM_STATE_COOKIE, cookie)) {
+    if (!find_parameter(params.recognized, PARAM_STATE_COOKIE, cookie)) {
         std::cout << "Dropped INIT_ACK with no State Cookie parameter" << std::endl;
         return;
     }
@@ -615,6 +657,15 @@ void SCTP_Socket::handle_init_ack(const SCTP_Common_Header& header, const SCTP_C
         std::cout << "Aborting INIT_ACK advertising zero streams" << std::endl;
         remove_association(assoc_key);
         send_abort(header, src, init_ack.initiate_tag, false, {error_cause{CAUSE_INVALID_MANDATORY_PARAM, {}}});
+        notify_assoc_change(assoc_key, Assoc_Change_State::CANT_STR_ASSOC);
+        return;
+    }
+    std::vector<uint8_t> host_name;
+    if (find_parameter(params.recognized, PARAM_HOST_NAME_ADDRESS, host_name)) {
+        assoc_lock.unlock();
+        std::cout << "Aborting INIT_ACK carrying a Host Name Address" << std::endl;
+        remove_association(assoc_key);
+        send_abort(header, src, init_ack.initiate_tag, false, {unresolvable_address_cause(host_name)});
         notify_assoc_change(assoc_key, Assoc_Change_State::CANT_STR_ASSOC);
         return;
     }
@@ -629,12 +680,24 @@ void SCTP_Socket::handle_init_ack(const SCTP_Common_Header& header, const SCTP_C
     assoc.next_ssn.assign(assoc.out_streams, 0);
     assoc.state = COOKIE_ECHOED;
     uint32_t peer_tag = assoc.peer_ver_tag;
+    // COOKIE ECHO, then the ERROR chunk and cause headers.
+    size_t room = assoc.pmdcs - std::min<size_t>(assoc.pmdcs,
+        3 * SCTP_CHUNK_HEADER_SIZE + ((cookie.size() + 3) & ~size_t{3}));
     assoc_lock.unlock();
     cancel_expiration(Expiration_Key{assoc_key, Expiration_Timer_Type::T1_INIT});
     sends.remove_retransmissions_of_type(assoc_key, INIT);
 
+    trim_reports(params.reported, room, 0);
+    std::vector<error_cause> errors;
+    if (!params.reported.empty()) {
+        std::vector<uint8_t> info;
+        for (const auto& parameter : params.reported) {
+            info.insert(info.end(), parameter.begin(), parameter.end());
+        }
+        errors.push_back(error_cause{CAUSE_UNRECOGNIZED_PARAMS, std::move(info)});
+    }
     enqueue_packet(Deliverable{src, build_cookie_echo(
-        header.des_port, header.src_port, peer_tag, std::move(cookie))});
+        header.des_port, header.src_port, peer_tag, std::move(cookie), std::move(errors))});
 }
 
 void SCTP_Socket::send_cookie_ack(const SCTP_Common_Header& header, const sockaddr_in& src, uint32_t peer_tag) {

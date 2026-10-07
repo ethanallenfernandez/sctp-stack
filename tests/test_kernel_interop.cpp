@@ -1,6 +1,8 @@
 // Kernel interop: this stack against the Linux kernel's SCTP over UDP
 // encapsulation, in both roles, through handshake, DATA, streams,
-// fragmentation, heartbeats and every way an association ends.
+// fragmentation, heartbeats and every way an association ends. In the private
+// namespace a packet socket on lo also checks the handshake's unrecognized
+// parameter reports straight off the wire.
 //
 // The only test whose peer we did not write, so the only one that can catch a
 // bug our encoder and our other tests agree on.
@@ -40,6 +42,8 @@ int main() {
 #include <netinet/in.h>
 #include <net/if.h>
 #include <linux/sctp.h>
+#include <linux/if_packet.h>
+#include <net/ethernet.h>
 #include <sched.h>
 #include <unistd.h>
 
@@ -165,6 +169,120 @@ std::map<std::string, long> sctp_snmp() {
     std::string name;
     long value;
     while (f >> name >> value) out[name] = value;
+    return out;
+}
+
+/*-------------------------------- wire tap ---------------------------------*/
+
+bool tap_allowed = false;
+
+// SCTP packets on lo between the two ports, raw from the common header on.
+// Needs CAP_NET_RAW, which only the private namespace grants.
+struct Wire_Tap {
+    struct Packet {
+        bool from_kernel;
+        std::vector<uint8_t> sctp;
+    };
+
+    int fd = -1;
+
+    Wire_Tap() {
+        if (!tap_allowed) return;
+        fd = ::socket(AF_PACKET, SOCK_DGRAM | SOCK_NONBLOCK, htons(ETH_P_IP));
+        if (fd < 0) return;
+        int buf = 8 << 20;
+        ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf, sizeof buf);
+        sockaddr_ll ll{};
+        ll.sll_family = AF_PACKET;
+        ll.sll_protocol = htons(ETH_P_IP);
+        ll.sll_ifindex = static_cast<int>(::if_nametoindex("lo"));
+        if (::bind(fd, reinterpret_cast<sockaddr*>(&ll), sizeof ll) != 0) {
+            ::close(fd);
+            fd = -1;
+        }
+    }
+    ~Wire_Tap() { if (fd >= 0) ::close(fd); }
+    Wire_Tap(const Wire_Tap&) = delete;
+    Wire_Tap& operator=(const Wire_Tap&) = delete;
+
+    std::vector<Packet> drain() {
+        std::vector<Packet> out;
+        uint8_t frame[65536];
+        for (;;) {
+            sockaddr_ll from{};
+            socklen_t len = sizeof from;
+            ssize_t n = ::recvfrom(fd, frame, sizeof frame, 0, reinterpret_cast<sockaddr*>(&from), &len);
+            if (n <= 0) break;
+            // lo delivers every frame twice: once outgoing, once incoming.
+            if (from.sll_pkttype == PACKET_OUTGOING || n < 20 || frame[9] != IPPROTO_UDP) continue;
+            size_t ihl = (frame[0] & 0x0F) * 4u;
+            if (static_cast<size_t>(n) < ihl + 8 + 12) continue;
+            uint16_t sport = static_cast<uint16_t>(frame[ihl] << 8 | frame[ihl + 1]);
+            uint16_t dport = static_cast<uint16_t>(frame[ihl + 2] << 8 | frame[ihl + 3]);
+            bool kernel_to_us = sport == KERNEL_PORT && dport == OUR_PORT;
+            if (!kernel_to_us && !(sport == OUR_PORT && dport == KERNEL_PORT)) continue;
+            out.push_back({kernel_to_us, std::vector<uint8_t>(frame + ihl + 8, frame + n)});
+        }
+        return out;
+    }
+};
+
+uint16_t be16(const uint8_t* p) { return static_cast<uint16_t>(p[0] << 8 | p[1]); }
+
+struct Wire_Chunk {
+    uint8_t type;
+    std::vector<uint8_t> value;
+};
+
+std::vector<Wire_Chunk> wire_chunks(const std::vector<uint8_t>& sctp) {
+    std::vector<Wire_Chunk> out;
+    for (size_t off = 12; off + 4 <= sctp.size();) {
+        uint16_t len = be16(&sctp[off + 2]);
+        if (len < 4 || off + len > sctp.size()) break;
+        out.push_back({sctp[off], std::vector<uint8_t>(sctp.begin() + off + 4, sctp.begin() + off + len)});
+        off += (len + 3u) & ~3u;
+    }
+    return out;
+}
+
+// Each TLV unpadded, from an INIT or INIT ACK value.
+std::vector<std::vector<uint8_t>> wire_parameters(const std::vector<uint8_t>& init_value) {
+    std::vector<std::vector<uint8_t>> out;
+    for (size_t off = 16; off + 4 <= init_value.size();) {
+        uint16_t len = be16(&init_value[off + 2]);
+        if (len < 4 || off + len > init_value.size()) break;
+        out.emplace_back(init_value.begin() + off, init_value.begin() + off + len);
+        off += (len + 3u) & ~3u;
+    }
+    return out;
+}
+
+std::vector<std::vector<uint8_t>> reportable(const std::vector<std::vector<uint8_t>>& params) {
+    std::vector<std::vector<uint8_t>> out;
+    for (const auto& p : params) {
+        if (be16(p.data()) & 0x4000) out.push_back(p);
+    }
+    return out;
+}
+
+std::vector<uint8_t> padded(std::vector<uint8_t> tlv) {
+    tlv.resize((tlv.size() + 3) & ~size_t{3}, 0);
+    return tlv;
+}
+
+const Wire_Tap::Packet* first_packet(const std::vector<Wire_Tap::Packet>& packets, bool from_kernel, uint8_t type) {
+    for (const auto& p : packets) {
+        if (p.from_kernel != from_kernel) continue;
+        auto chunks = wire_chunks(p.sctp);
+        if (!chunks.empty() && chunks[0].type == type) return &p;
+    }
+    return nullptr;
+}
+
+std::string hex(const std::vector<uint8_t>& bytes) {
+    std::string out;
+    char b[4];
+    for (uint8_t v : bytes) { std::snprintf(b, sizeof b, "%02x", v); out += b; }
     return out;
 }
 
@@ -367,8 +485,42 @@ int associate_to_kernel(SCTP_Socket& stack, int listener, Association_Key& key) 
     return fd;
 }
 
-void phase_handshake(SCTP_Socket& stack, int fd) {
+void wire_we_initiate(Wire_Tap& tap) {
+    if (tap.fd < 0) {
+        std::printf("      wire checks skipped: no packet socket\n");
+        return;
+    }
+    auto packets = tap.drain();
+    const Wire_Tap::Packet* init_ack = first_packet(packets, true, 2);
+    const Wire_Tap::Packet* echo = first_packet(packets, false, 10);
+    check(init_ack && echo, "wire: kernel INIT ACK and our COOKIE ECHO captured");
+    if (!init_ack || !echo) return;
+
+    auto params = wire_parameters(wire_chunks(init_ack->sctp)[0].value);
+    std::string types;
+    for (const auto& p : params) types += " " + hex({p[0], p[1]});
+    std::printf("      kernel INIT ACK parameters:%s\n", types.c_str());
+
+    auto expected = reportable(params);
+    auto chunks = wire_chunks(echo->sctp);
+    if (expected.empty()) {
+        check(chunks.size() == 1, "wire: nothing reportable in the kernel's INIT ACK, COOKIE ECHO goes alone");
+        return;
+    }
+    std::vector<uint8_t> want = {0x00, 0x08, 0, 0};
+    for (const auto& p : expected) {
+        auto tlv = padded(p);
+        want.insert(want.end(), tlv.begin(), tlv.end());
+    }
+    want[2] = static_cast<uint8_t>(want.size() >> 8);
+    want[3] = static_cast<uint8_t>(want.size());
+    check(chunks.size() == 2 && chunks[1].type == 9 && chunks[1].value == padded(want),
+          "wire: one ERROR after COOKIE ECHO, cause 8 holding every reportable INIT ACK parameter");
+}
+
+void phase_handshake(SCTP_Socket& stack, int fd, Wire_Tap& tap) {
     section("Handshake, we initiate");
+    wire_we_initiate(tap);
     sctp_status st;
     bool have = kernel_status(fd, st);
     check(have && st.sstat_state == SCTP_ESTABLISHED, "kernel reports ESTABLISHED");
@@ -554,8 +706,36 @@ void phase_teardowns(SCTP_Socket& stack, int listener) {
     }
 }
 
+void wire_kernel_initiates(Wire_Tap& tap) {
+    if (tap.fd < 0) {
+        std::printf("      wire checks skipped: no packet socket\n");
+        return;
+    }
+    auto packets = tap.drain();
+    const Wire_Tap::Packet* init = first_packet(packets, true, 1);
+    const Wire_Tap::Packet* init_ack = first_packet(packets, false, 2);
+    check(init && init_ack, "wire: kernel INIT and our INIT ACK captured");
+    if (!init || !init_ack) return;
+
+    auto params = wire_parameters(wire_chunks(init->sctp)[0].value);
+    std::string types;
+    for (const auto& p : params) types += " " + hex({p[0], p[1]});
+    std::printf("      kernel INIT parameters:%s\n", types.c_str());
+    auto expected = reportable(params);
+    check(!expected.empty(), "wire: kernel INIT carries a parameter whose type asks for a report");
+
+    std::vector<std::vector<uint8_t>> reported;
+    for (const auto& p : wire_parameters(wire_chunks(init_ack->sctp)[0].value)) {
+        if (be16(p.data()) == 8) reported.emplace_back(p.begin() + 4, p.end());
+    }
+    for (auto& p : expected) p = padded(p);
+    check(reported == expected,
+          "wire: our INIT ACK echoes each reportable INIT parameter in its own Unrecognized Parameter, in order");
+}
+
 void phase_kernel_initiates(SCTP_Socket& stack) {
     section("Kernel initiates");
+    Wire_Tap tap;
     int fd = kernel_socket();
     sockaddr_in self = loopback(KERNEL_PORT);
     if (::bind(fd, reinterpret_cast<sockaddr*>(&self), sizeof self) != 0) {
@@ -571,6 +751,7 @@ void phase_kernel_initiates(SCTP_Socket& stack) {
     expect_change(stack, Assoc_Change_State::COMM_UP, "COMM_UP");
     key = Association_Key{loopback(KERNEL_PORT)};
     if (r != 0) { ::close(fd); return; }
+    wire_kernel_initiates(tap);
 
     sctp_status st;
     kernel_status(fd, st);
@@ -620,6 +801,7 @@ int main() {
         return 0;
     }
     std::printf("Kernel interop (%s)\n", isolated ? "private network namespace" : "host network namespace");
+    tap_allowed = isolated;
     auto snmp_before = sctp_snmp();
 
     int listener = kernel_socket();
@@ -638,9 +820,13 @@ int main() {
     }
 
     Association_Key key;
-    int fd = associate_to_kernel(stack, listener, key);
+    int fd;
+    {
+        Wire_Tap tap;
+        fd = associate_to_kernel(stack, listener, key);
+        if (fd >= 0) phase_handshake(stack, fd, tap);
+    }
     if (fd >= 0) {
-        phase_handshake(stack, fd);
         phase_small_data(stack, key, fd);
         phase_streams(stack, key, fd);
         phase_fragmentation(stack, key, fd);

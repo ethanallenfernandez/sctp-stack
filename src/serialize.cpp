@@ -1,4 +1,5 @@
 #include "serialize.hpp"
+#include <algorithm>
 #include <cstring>
 #include <cstddef>
 #include <stdexcept>
@@ -85,6 +86,34 @@ bool find_parameter(const std::vector<uint8_t>& params, uint16_t type, std::vect
         offset += (static_cast<size_t>(length) + 3) & ~size_t{3};
     }
     return false;
+}
+
+Parameter_Scan scan_parameters(const std::vector<uint8_t>& params, std::initializer_list<uint16_t> recognized) {
+    Parameter_Scan scan;
+    size_t offset = 0;
+    while (offset + SCTP_CHUNK_HEADER_SIZE <= params.size()) {
+        uint16_t type = read16(&params[offset]);
+        uint16_t length = read16(&params[offset + 2]);
+        if (length < SCTP_CHUNK_HEADER_SIZE || offset + length > params.size()) {
+            break;
+        }
+        size_t padded = (static_cast<size_t>(length) + 3) & ~size_t{3};
+        auto first = params.begin() + static_cast<std::ptrdiff_t>(offset);
+        if (std::find(recognized.begin(), recognized.end(), type) != recognized.end()) {
+            scan.recognized.insert(scan.recognized.end(), first, first + static_cast<std::ptrdiff_t>(std::min(padded, params.size() - offset)));
+        } else {
+            if (type & 0x4000) {
+                std::vector<uint8_t> tlv(first, first + length);
+                tlv.resize(padded, 0);
+                scan.reported.push_back(std::move(tlv));
+            }
+            if ((type & 0x8000) == 0) {
+                break;
+            }
+        }
+        offset += padded;
+    }
+    return scan;
 }
 
 std::vector<uint8_t> serialize_state_cookie(const State_Cookie& cookie) {

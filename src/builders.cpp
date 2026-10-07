@@ -58,12 +58,16 @@ SCTP_Packet build_init_ack(
     uint32_t peer_tag,
     uint32_t initiate_tag,
     uint32_t initial_tsn,
-    const std::vector<uint8_t>& cookie
+    const std::vector<uint8_t>& cookie,
+    const std::vector<std::vector<uint8_t>>& unrecognized
 ) {
     SCTP_Packet packet = packet_with_header(src_port, des_port, peer_tag);
 
     std::vector<uint8_t> parameters;
     append_parameter(parameters, PARAM_STATE_COOKIE, cookie.data(), cookie.size());
+    for (const auto& parameter : unrecognized) {
+        append_parameter(parameters, PARAM_UNRECOGNIZED, parameter.data(), parameter.size());
+    }
 
     append_chunk(packet, INIT_ACK, init_chunk_value{
         .initiate_tag = initiate_tag,
@@ -80,10 +84,14 @@ SCTP_Packet build_cookie_echo(
     uint16_t src_port,
     uint16_t des_port,
     uint32_t peer_tag,
-    std::vector<uint8_t> cookie
+    std::vector<uint8_t> cookie,
+    std::vector<error_cause> errors
 ) {
     SCTP_Packet packet = packet_with_header(src_port, des_port, peer_tag);
     append_chunk(packet, COOKIE_ECHO, cookie_echo_chunk_value{.cookie_data = std::move(cookie)});
+    if (!errors.empty()) {
+        append_chunk(packet, OP_ERROR, error_chunk_value{std::move(errors)});
+    }
     return packet;
 }
 

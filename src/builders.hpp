@@ -18,13 +18,15 @@ SCTP_Packet build_init_ack(
     uint32_t peer_tag,
     uint32_t initiate_tag,
     uint32_t initial_tsn,
-    const std::vector<uint8_t>& cookie);
+    const std::vector<uint8_t>& cookie,
+    const std::vector<std::vector<uint8_t>>& unrecognized = {});
 
 SCTP_Packet build_cookie_echo(
     uint16_t src_port,
     uint16_t des_port,
     uint32_t peer_tag,
-    std::vector<uint8_t> cookie);
+    std::vector<uint8_t> cookie,
+    std::vector<error_cause> errors = {});
 
 SCTP_Packet build_cookie_ack(uint16_t src_port, uint16_t des_port, uint32_t peer_tag);
 

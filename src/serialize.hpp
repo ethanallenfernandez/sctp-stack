@@ -2,6 +2,7 @@
 #define SCTP_SERIALIZE_HPP
 
 #include <vector>
+#include <initializer_list>
 #include <stdint.h>
 #include <sctp/sctp.hpp>
 
@@ -19,6 +20,13 @@ std::vector<uint8_t> serialize_state_cookie(const State_Cookie& cookie);
 
 void append_parameter(std::vector<uint8_t>& out, uint16_t type, const uint8_t* value, size_t len);
 bool find_parameter(const std::vector<uint8_t>& params, uint16_t type, std::vector<uint8_t>& value_out);
+
+struct Parameter_Scan {
+    std::vector<uint8_t> recognized;              // only these are processed
+    std::vector<std::vector<uint8_t>> reported;   // whole TLVs, padded
+};
+// A malformed Parameter Length ends the walk like a stop does.
+Parameter_Scan scan_parameters(const std::vector<uint8_t>& params, std::initializer_list<uint16_t> recognized);
 
 uint32_t sctp_read_wire_checksum(const uint8_t* data);
 void sctp_clear_wire_checksum(uint8_t* data);
