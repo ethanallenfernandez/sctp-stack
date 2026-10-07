@@ -1,26 +1,30 @@
-// Kernel interop, stage 0: INIT to the Linux kernel's SCTP stack, validate its
-// INIT_ACK.
+// Kernel interop: this stack against the Linux kernel's SCTP over UDP
+// encapsulation, in both roles, through handshake, DATA, streams,
+// fragmentation, heartbeats and every way an association ends.
 //
-// The only test here that can catch a bug our encoder and our tests agree on -
-// which is how the CRC-32C polynomial error survived. The kernel lays out these
-// bytes; we validate them.
+// The only test whose peer we did not write, so the only one that can catch a
+// bug our encoder and our other tests agree on.
 //
-// Stops after INIT_ACK: echoing the State Cookie is not implemented yet. Per
-// RFC 9260 5.1.3 the responder holds no state until COOKIE_ECHO, so abandoning
-// the handshake leaks nothing kernel-side.
-//
-// Requires root setup first; skips cleanly (exit 0) when absent:
+// Runs in a private user + network namespace, so it needs no root and its
+// net.sctp sysctls and port 9899 never touch the host or the other tests. The
+// sctp module is autoloaded by creating a socket. Without user namespaces it
+// falls back to a host already set up with:
 //     sudo modprobe sctp
 //     sudo sysctl -w net.sctp.udp_port=9899
 //     sudo sysctl -w net.sctp.encap_port=9900
+// and skips (exit 0) otherwise. SCTP_INTEROP_NETNS=current uses the namespace
+// it was started in, so a capture can run alongside it:
+//     unshare -rn sh -c 'ip link set lo up; echo 9899 > /proc/sys/net/sctp/udp_port;
+//         echo 9900 > /proc/sys/net/sctp/encap_port; tcpdump -i lo -w x.pcap & ...'
+//
+// The stack derives SCTP ports from UDP ports, so the kernel's SCTP port must
+// equal net.sctp.udp_port, ours equals our UDP port, and a kernel client must
+// bind before connecting.
 
 #include <sctp/platform.hpp>
-#include <sctp/sctp.hpp>
-#include "serialize.hpp"
-#include "checksum.hpp"
+#include <sctp/socket.hpp>
 
 #include <cstdio>
-#include <cstring>
 #include <string>
 #include <vector>
 
@@ -31,18 +35,40 @@ int main() {
 }
 #else
 
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <netinet/in.h>
+#include <net/if.h>
+#include <linux/sctp.h>
+#include <sched.h>
+#include <unistd.h>
+
+#include <atomic>
 #include <cerrno>
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <map>
+#include <mutex>
+#include <thread>
+
+using Clock = std::chrono::steady_clock;
+
+struct SCTP_Socket_Test_Access {
+    static size_t association_count(SCTP_Socket& stack) {
+        std::lock_guard<std::mutex> lock(stack.associations_mutex);
+        return stack.associations.size();
+    }
+};
 
 namespace {
 
-// Kernel listens for UDP-encapsulated SCTP here; must equal net.sctp.udp_port.
-constexpr uint16_t KERNEL_UDP_PORT = 9899;
-// Our UDP socket. Cannot be KERNEL_UDP_PORT: the kernel owns that one once
-// net.sctp.udp_port is set. Should equal net.sctp.encap_port.
-constexpr uint16_t OUR_UDP_PORT = 9900;
-// SCTP port the kernel listener binds. sctp_associate() currently ties the SCTP
-// destination port to the UDP destination port, so keep them equal.
-constexpr uint16_t KERNEL_SCTP_PORT = 9899;
+using Access = SCTP_Socket_Test_Access;
+
+constexpr uint16_t KERNEL_PORT = 9899;
+constexpr uint16_t OUR_PORT = 9900;
+constexpr int TIMEOUT_MS = 5000;
 
 int failures = 0;
 
@@ -51,300 +77,595 @@ void check(bool cond, const std::string& what) {
     if (!cond) failures++;
 }
 
-void hexdump(const uint8_t* p, size_t n) {
-    for (size_t i = 0; i < n; i += 16) {
-        std::printf("      %04zx  ", i);
-        for (size_t j = 0; j < 16; j++) {
-            if (i + j < n) std::printf("%02x ", p[i + j]); else std::printf("   ");
-        }
-        std::printf("\n");
-    }
+void section(const char* name) {
+    std::printf("\n%s\n", name);
 }
 
-uint16_t rd16be(const uint8_t* p) {
-    return static_cast<uint16_t>(p[0] << 8 | p[1]);
+/*------------------------------ environment --------------------------------*/
+
+bool write_file(const char* path, const std::string& text) {
+    std::ofstream f(path);
+    f << text;
+    return f.good();
 }
 
-/*------------------------- availability detection --------------------------*/
-
-bool read_sysctl_long(const char* path, long& out) {
-    FILE* f = std::fopen(path, "r");
-    if (!f) return false;
-    bool ok = (std::fscanf(f, "%ld", &out) == 1);
-    std::fclose(f);
-    return ok;
+bool read_long(const char* path, long& out) {
+    std::ifstream f(path);
+    return static_cast<bool>(f >> out);
 }
 
-// Returns false with a human-readable reason when the environment is not set up.
-bool interop_available(std::string& why) {
-    long udp_port = 0;
-    if (!read_sysctl_long("/proc/sys/net/sctp/udp_port", udp_port)) {
-        why = "kernel SCTP module not loaded (no /proc/sys/net/sctp/udp_port)";
+bool sctp_available() {
+    int fd = ::socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP);
+    if (fd < 0) return false;
+    ::close(fd);
+    return true;
+}
+
+// Must run before any thread exists: unshare(CLONE_NEWUSER) refuses a
+// multithreaded process.
+bool enter_private_netns(std::string& why) {
+    uid_t uid = ::getuid();
+    gid_t gid = ::getgid();
+    if (::unshare(CLONE_NEWUSER | CLONE_NEWNET) != 0) {
+        why = std::string("unshare: ") + std::strerror(errno);
         return false;
     }
-    if (udp_port == 0) {
-        why = "net.sctp.udp_port is 0 (UDP encapsulation disabled)";
+    write_file("/proc/self/setgroups", "deny");
+    if (!write_file("/proc/self/uid_map", "0 " + std::to_string(uid) + " 1")
+        || !write_file("/proc/self/gid_map", "0 " + std::to_string(gid) + " 1")) {
+        why = "could not write uid/gid map";
         return false;
     }
-    if (udp_port != KERNEL_UDP_PORT) {
-        char buf[128];
-        std::snprintf(buf, sizeof buf,
-                      "net.sctp.udp_port is %ld, this test expects %u",
-                      udp_port, KERNEL_UDP_PORT);
-        why = buf;
+
+    int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    ifreq ifr{};
+    std::strncpy(ifr.ifr_name, "lo", IFNAMSIZ - 1);
+    bool up = fd >= 0 && ::ioctl(fd, SIOCGIFFLAGS, &ifr) == 0
+        && (ifr.ifr_flags |= IFF_UP, ::ioctl(fd, SIOCSIFFLAGS, &ifr) == 0);
+    if (fd >= 0) ::close(fd);
+    if (!up) {
+        why = std::string("bring up lo: ") + std::strerror(errno);
+        return false;
+    }
+
+    if (!write_file("/proc/sys/net/sctp/udp_port", std::to_string(KERNEL_PORT))
+        || !write_file("/proc/sys/net/sctp/encap_port", std::to_string(OUR_PORT))) {
+        why = "could not set net.sctp.udp_port / encap_port in the namespace";
         return false;
     }
     return true;
 }
 
-void print_skip(const std::string& why) {
-    std::printf("Kernel interop (stage 0): SKIPPED\n");
-    std::printf("  reason: %s\n", why.c_str());
-    std::printf("  enable with:\n");
-    std::printf("      sudo modprobe sctp\n");
-    std::printf("      sudo sysctl -w net.sctp.udp_port=%u\n", KERNEL_UDP_PORT);
-    std::printf("      sudo sysctl -w net.sctp.encap_port=%u\n", OUR_UDP_PORT);
+bool host_configured(std::string& why) {
+    long udp_port = 0;
+    if (!read_long("/proc/sys/net/sctp/udp_port", udp_port) || udp_port != KERNEL_PORT) {
+        why = "net.sctp.udp_port is not " + std::to_string(KERNEL_PORT);
+        return false;
+    }
+    return true;
 }
 
-/*------------------------------ TLV walking --------------------------------*/
-
-// Walks the variable-length parameter list of an INIT/INIT_ACK chunk
-// (RFC 9260 3.2.1: 2-byte type, 2-byte length inclusive of the header, value,
-// padded to a 4-byte boundary).
-bool find_parameter(const std::vector<uint8_t>& params, uint16_t want,
-                    std::vector<uint8_t>& value_out, std::string& err) {
-    size_t off = 0;
-    while (off + 4 <= params.size()) {
-        uint16_t type = rd16be(&params[off]);
-        uint16_t len  = rd16be(&params[off + 2]);
-        if (len < 4) { err = "parameter length below 4"; return false; }
-        if (off + len > params.size()) { err = "parameter length overruns chunk"; return false; }
-        if (type == want) {
-            value_out.assign(params.begin() + off + 4, params.begin() + off + len);
-            return true;
+// Extensions the stack does not implement would put chunks on the wire it
+// cannot parse.
+bool extensions_off(std::string& why) {
+    for (const char* name : {"auth_enable", "addip_enable", "intl_enable", "reconf_enable"}) {
+        long v = 0;
+        std::string path = std::string("/proc/sys/net/sctp/") + name;
+        if (read_long(path.c_str(), v) && v != 0) {
+            why = std::string("net.sctp.") + name + " is on";
+            return false;
         }
-        off += (static_cast<size_t>(len) + 3) & ~size_t{3};
     }
-    err = "parameter not present";
+    return true;
+}
+
+std::map<std::string, long> sctp_snmp() {
+    std::map<std::string, long> out;
+    std::ifstream f("/proc/net/sctp/snmp");
+    std::string name;
+    long value;
+    while (f >> name >> value) out[name] = value;
+    return out;
+}
+
+/*------------------------------ kernel side --------------------------------*/
+
+void set_timeouts(int fd, int ms) {
+    timeval tv{ms / 1000, (ms % 1000) * 1000};
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+}
+
+sockaddr_in loopback(uint16_t port) {
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(port);
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    return a;
+}
+
+int kernel_socket() {
+    int fd = ::socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP);
+    if (fd < 0) return fd;
+    int one = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    int buf = 1 << 20;
+    ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buf, sizeof buf);
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf, sizeof buf);
+    sctp_initmsg init{};
+    init.sinit_num_ostreams = 10;
+    init.sinit_max_instreams = 10;
+    ::setsockopt(fd, IPPROTO_SCTP, SCTP_INITMSG, &init, sizeof init);
+    ::setsockopt(fd, IPPROTO_SCTP, SCTP_NODELAY, &one, sizeof one);
+    ::setsockopt(fd, IPPROTO_SCTP, SCTP_RECVRCVINFO, &one, sizeof one);
+    set_timeouts(fd, TIMEOUT_MS);
+    return fd;
+}
+
+bool kernel_send(int fd, const std::vector<uint8_t>& data, uint16_t sid = 0, bool unordered = false) {
+    iovec iov{const_cast<uint8_t*>(data.data()), data.size()};
+    alignas(cmsghdr) char control[CMSG_SPACE(sizeof(sctp_sndinfo))]{};
+    msghdr msg{};
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control;
+    msg.msg_controllen = sizeof control;
+    cmsghdr* c = CMSG_FIRSTHDR(&msg);
+    c->cmsg_level = IPPROTO_SCTP;
+    c->cmsg_type = SCTP_SNDINFO;
+    c->cmsg_len = CMSG_LEN(sizeof(sctp_sndinfo));
+    sctp_sndinfo info{};
+    info.snd_sid = sid;
+    info.snd_flags = unordered ? SCTP_UNORDERED : 0;
+    std::memcpy(CMSG_DATA(c), &info, sizeof info);
+    return ::sendmsg(fd, &msg, 0) == static_cast<ssize_t>(data.size());
+}
+
+struct Kernel_Message {
+    std::vector<uint8_t> bytes;
+    sctp_rcvinfo info{};
+    bool have_info{false};
+};
+
+// 1 on a whole message, 0 on EOF, -1 with errno set otherwise.
+int kernel_recv(int fd, Kernel_Message& out) {
+    out = Kernel_Message{};
+    std::vector<uint8_t> chunk(1 << 16);
+    for (;;) {
+        iovec iov{chunk.data(), chunk.size()};
+        alignas(cmsghdr) char control[CMSG_SPACE(sizeof(sctp_rcvinfo))]{};
+        msghdr msg{};
+        msg.msg_iov = &iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = control;
+        msg.msg_controllen = sizeof control;
+        ssize_t n = ::recvmsg(fd, &msg, 0);
+        if (n <= 0) return n == 0 ? 0 : -1;
+        if (msg.msg_flags & MSG_NOTIFICATION) continue;
+        for (cmsghdr* c = CMSG_FIRSTHDR(&msg); c; c = CMSG_NXTHDR(&msg, c)) {
+            if (c->cmsg_level == IPPROTO_SCTP && c->cmsg_type == SCTP_RCVINFO && !out.have_info) {
+                std::memcpy(&out.info, CMSG_DATA(c), sizeof out.info);
+                out.have_info = true;
+            }
+        }
+        out.bytes.insert(out.bytes.end(), chunk.begin(), chunk.begin() + n);
+        if (msg.msg_flags & MSG_EOR) return 1;
+    }
+}
+
+bool kernel_status(int fd, sctp_status& status) {
+    status = sctp_status{};
+    socklen_t len = sizeof status;
+    return ::getsockopt(fd, IPPROTO_SCTP, SCTP_STATUS, &status, &len) == 0;
+}
+
+bool set_maxseg(int fd, uint32_t bytes) {
+    sctp_assoc_value v{};
+    v.assoc_value = bytes;
+    return ::setsockopt(fd, IPPROTO_SCTP, SCTP_MAXSEG, &v, sizeof v) == 0;
+}
+
+void abortive_close(int fd) {
+    linger l{1, 0};
+    ::setsockopt(fd, SOL_SOCKET, SO_LINGER, &l, sizeof l);
+    ::close(fd);
+}
+
+/*-------------------------------- our side ---------------------------------*/
+
+std::vector<uint8_t> pattern(size_t n, uint8_t seed) {
+    std::vector<uint8_t> v(n);
+    for (size_t i = 0; i < n; i++) v[i] = static_cast<uint8_t>(seed + i * 7 + (i >> 8));
+    return v;
+}
+
+std::vector<uint8_t> text(const char* s) {
+    return std::vector<uint8_t>(s, s + std::strlen(s));
+}
+
+// Reassembles one message across partial reads.
+bool our_recv(SCTP_Socket& stack, const Association_Key& key, std::vector<uint8_t>& out,
+              uint16_t* stream = nullptr, int timeout_ms = TIMEOUT_MS) {
+    out.clear();
+    std::vector<uint8_t> buffer(1 << 18);
+    auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (Clock::now() < deadline) {
+        bool partial = false;
+        uint16_t sid = 0;
+        size_t n = stack.sctp_recv_data_from(key, buffer, &partial, &sid);
+        if (n == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+        if (out.empty() && stream) *stream = sid;
+        out.insert(out.end(), buffer.begin(), buffer.begin() + n);
+        if (!partial) return true;
+    }
     return false;
 }
 
-/*--------------------------- kernel SCTP listener --------------------------*/
-
-// A listening one-to-one SCTP socket is all stage 0 needs: the kernel answers
-// INIT with INIT_ACK from the listen socket, and accept() only returns once the
-// handshake completes — which we never do.
-struct KernelListener {
-    sctp_socket_t fd = INVALID_SOCKET;
-
-    bool start(std::string& err) {
-        fd = ::socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP);
-        if (fd == INVALID_SOCKET) {
-            err = std::string("socket(IPPROTO_SCTP): ") + std::strerror(errno);
-            return false;
+std::optional<Assoc_Change_State> next_assoc_change(SCTP_Socket& stack, Association_Key* src = nullptr,
+                                                   int timeout_ms = TIMEOUT_MS) {
+    auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (Clock::now() < deadline) {
+        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now());
+        auto n = stack.sctp_recv_notification(static_cast<int>(std::max<int64_t>(remaining.count(), 1)));
+        if (!n) continue;
+        if (n->type == Notification_Type::SCTP_REMOTE_ERROR) {
+            const auto& causes = std::get<Remote_Error>(n->payload).causes;
+            for (const auto& c : causes) std::printf("      remote ERROR cause %u\n", c.code);
+            continue;
         }
-        int one = 1;
-        ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+        if (n->type != Notification_Type::SCTP_ASSOC_CHANGE) continue;
+        if (src) *src = n->src;
+        return std::get<Assoc_Change>(n->payload).state;
+    }
+    return std::nullopt;
+}
 
-        sockaddr_in a{};
-        a.sin_family = AF_INET;
-        a.sin_port = htons(KERNEL_SCTP_PORT);
-        sctp_parse_ipv4("127.0.0.1", a.sin_addr);
-        if (::bind(fd, (sockaddr*)&a, sizeof a) != 0) {
-            err = std::string("bind SCTP :") + std::to_string(KERNEL_SCTP_PORT)
-                + ": " + std::strerror(errno);
-            return false;
+const char* state_name(std::optional<Assoc_Change_State> s) {
+    if (!s) return "none";
+    switch (*s) {
+        case Assoc_Change_State::COMM_UP: return "COMM_UP";
+        case Assoc_Change_State::COMM_LOST: return "COMM_LOST";
+        case Assoc_Change_State::RESTART: return "RESTART";
+        case Assoc_Change_State::SHUTDOWN_COMP: return "SHUTDOWN_COMP";
+        case Assoc_Change_State::CANT_STR_ASSOC: return "CANT_STR_ASSOC";
+    }
+    return "?";
+}
+
+void expect_change(SCTP_Socket& stack, Assoc_Change_State want, const std::string& what) {
+    auto got = next_assoc_change(stack);
+    check(got == want, what + " (got " + state_name(got) + ")");
+}
+
+bool await_empty(SCTP_Socket& stack, int timeout_ms = TIMEOUT_MS) {
+    auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (Access::association_count(stack) != 0 && Clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return Access::association_count(stack) == 0;
+}
+
+/*--------------------------------- phases ----------------------------------*/
+
+// We initiate; returns the kernel's accepted socket, or -1.
+int associate_to_kernel(SCTP_Socket& stack, int listener, Association_Key& key) {
+    key = stack.sctp_associate("127.0.0.1", KERNEL_PORT);
+    bool up = stack.await_established_association(key, TIMEOUT_MS) == 0;
+    int fd = up ? ::accept(listener, nullptr, nullptr) : -1;
+    if (fd >= 0) set_timeouts(fd, TIMEOUT_MS);
+    auto change = next_assoc_change(stack);
+    if (!up || fd < 0 || change != Assoc_Change_State::COMM_UP) {
+        std::printf("  [FAIL] associate: established=%d accept=%d notification=%s\n",
+                    up, fd, state_name(change));
+        failures++;
+        if (fd >= 0) ::close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+void phase_handshake(SCTP_Socket& stack, int fd) {
+    section("Handshake, we initiate");
+    sctp_status st;
+    bool have = kernel_status(fd, st);
+    check(have && st.sstat_state == SCTP_ESTABLISHED, "kernel reports ESTABLISHED");
+    check(st.sstat_instrms == 10 && st.sstat_outstrms == 10,
+          "streams negotiated to 10/10 (kernel sees in=" + std::to_string(st.sstat_instrms)
+          + " out=" + std::to_string(st.sstat_outstrms) + ")");
+    check(st.sstat_primary.spinfo_state == SCTP_ACTIVE, "kernel's path to us is ACTIVE");
+    (void)stack;
+}
+
+void phase_small_data(SCTP_Socket& stack, const Association_Key& key, int fd) {
+    section("Small DATA");
+    auto out = text("hello kernel");
+    stack.sctp_send_data(key, out);
+    Kernel_Message m;
+    check(kernel_recv(fd, m) == 1 && m.bytes == out, "kernel receives our message intact");
+    check(m.have_info && m.info.rcv_sid == 0 && m.info.rcv_ssn == 0 && !(m.info.rcv_flags & SCTP_UNORDERED),
+          "kernel sees stream 0, SSN 0, ordered");
+
+    auto in = text("hello stack");
+    check(kernel_send(fd, in), "kernel sends");
+    std::vector<uint8_t> got;
+    uint16_t sid = 99;
+    check(our_recv(stack, key, got, &sid) && got == in, "we receive the kernel's message intact");
+    check(sid == 0, "on stream 0");
+}
+
+void phase_streams(SCTP_Socket& stack, const Association_Key& key, int fd) {
+    section("Streams and unordered delivery");
+    std::map<uint16_t, uint16_t> kernel_next_ssn{{0, 1}};
+    bool ok = true;
+    for (uint16_t round = 0; round < 3; round++) {
+        for (uint16_t sid = 0; sid < 10; sid++) {
+            auto msg = pattern(40 + sid, static_cast<uint8_t>(round * 10 + sid));
+            stack.sctp_send_data(key, msg, sid);
+            Kernel_Message m;
+            uint16_t expect_ssn = kernel_next_ssn[sid]++;
+            if (kernel_recv(fd, m) != 1 || m.bytes != msg || m.info.rcv_sid != sid || m.info.rcv_ssn != expect_ssn) {
+                std::printf("      sid %u round %u: kernel saw sid=%u ssn=%u (want ssn %u) len=%zu\n",
+                            sid, round, m.info.rcv_sid, m.info.rcv_ssn, expect_ssn, m.bytes.size());
+                ok = false;
+            }
         }
-        if (::listen(fd, 1) != 0) {
-            err = std::string("listen: ") + std::strerror(errno);
-            return false;
+    }
+    check(ok, "30 messages over streams 0-9: kernel sees each stream's SSNs count up from 0");
+
+    auto un = text("unordered");
+    stack.sctp_send_data(key, un, 3, true);
+    Kernel_Message m;
+    check(kernel_recv(fd, m) == 1 && m.bytes == un && m.info.rcv_sid == 3 && (m.info.rcv_flags & SCTP_UNORDERED),
+          "kernel sees our unordered message as unordered on stream 3");
+
+    ok = true;
+    for (uint16_t sid = 0; sid < 10; sid++) {
+        auto msg = pattern(30 + sid, static_cast<uint8_t>(100 + sid));
+        bool unordered = sid % 3 == 0;
+        if (!kernel_send(fd, msg, sid, unordered)) { ok = false; continue; }
+        std::vector<uint8_t> got;
+        uint16_t got_sid = 99;
+        if (!our_recv(stack, key, got, &got_sid) || got != msg || got_sid != sid) {
+            std::printf("      kernel->us sid %u: got sid %u len %zu\n", sid, got_sid, got.size());
+            ok = false;
         }
-        return true;
+    }
+    check(ok, "kernel's messages on streams 0-9, some unordered, arrive on the right stream");
+}
+
+void phase_fragmentation(SCTP_Socket& stack, const Association_Key& key, int fd) {
+    section("Fragmentation and flow control");
+
+    auto big = pattern(200 * 1024, 1);
+    stack.sctp_send_data(key, big);
+    Kernel_Message m;
+    check(kernel_recv(fd, m) == 1 && m.bytes == big, "kernel reassembles our 200 kB message");
+
+    // Kernel sends from a thread: a stall must show up as a timeout, not a hang.
+    auto kernel_to_us = [&](const std::vector<uint8_t>& msg, int read_delay_ms, const std::string& what) {
+        auto before = sctp_snmp();
+        auto started = Clock::now();
+        std::atomic<bool> sent{false};
+        std::thread sender([&] { sent = kernel_send(fd, msg); });
+        std::this_thread::sleep_for(std::chrono::milliseconds(read_delay_ms));
+        std::vector<uint8_t> got;
+        bool received = our_recv(stack, key, got, nullptr, 15000);
+        sender.join();
+        auto after = sctp_snmp();
+        std::printf("      %lld ms; kernel T3 expiries %ld, retransmitted chunks %ld\n",
+                    static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started).count()),
+                    after["SctpT3RtxExpireds"] - before["SctpT3RtxExpireds"],
+                    after["SctpRetransChunks"] - before["SctpRetransChunks"]);
+        check(sent && received && got == msg,
+              what + (received ? "" : " (timed out, got " + std::to_string(got.size()) + " bytes)"));
+    };
+
+    check(set_maxseg(fd, 1000), "kernel SCTP_MAXSEG set to 1000");
+    kernel_to_us(pattern(200 * 1024, 2), 0, "we reassemble the kernel's 200 kB message in 1000-byte fragments");
+    kernel_to_us(pattern(300 * 1024, 3), 1500,
+                 "300 kB with our reader stalled 1.5 s: window closes, kernel probes, transfer completes");
+
+    sctp_status st;
+    kernel_status(fd, st);
+    std::printf("      kernel's view of our rwnd afterwards: %u\n", st.sstat_rwnd);
+
+    check(set_maxseg(fd, 0), "kernel SCTP_MAXSEG back to the path MTU");
+    kernel_status(fd, st);
+    std::printf("      kernel fragment point now: %u bytes (our RWND is %d)\n", st.sstat_fragmentation_point, RWND);
+    kernel_to_us(pattern(200 * 1024, 4), 0, "we receive 200 kB in chunks near our whole window");
+}
+
+void phase_heartbeat(SCTP_Socket& stack, const Association_Key& key, int fd) {
+    section("Heartbeats from the kernel");
+    sctp_rtoinfo rto{};
+    rto.srto_initial = 200;
+    rto.srto_min = 100;
+    rto.srto_max = 400;
+    check(::setsockopt(fd, IPPROTO_SCTP, SCTP_RTOINFO, &rto, sizeof rto) == 0, "kernel RTO bounded to 100-400 ms");
+    sctp_paddrparams p{};
+    p.spp_flags = SPP_HB_ENABLE;
+    p.spp_hbinterval = 100;
+    p.spp_pathmaxrxt = 1;
+    check(::setsockopt(fd, IPPROTO_SCTP, SCTP_PEER_ADDR_PARAMS, &p, sizeof p) == 0,
+          "kernel heartbeat interval 100 ms, Path.Max.Retrans 1");
+
+    long before = sctp_snmp()["SctpInCtrlChunks"];
+    std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+    long acks = sctp_snmp()["SctpInCtrlChunks"] - before;
+
+    sctp_status st;
+    check(kernel_status(fd, st) && st.sstat_state == SCTP_ESTABLISHED
+          && st.sstat_primary.spinfo_state == SCTP_ACTIVE,
+          "after 3 s idle the kernel still has us ESTABLISHED and ACTIVE");
+    check(acks >= 3, "kernel received " + std::to_string(acks) + " control chunks while idle (our HEARTBEAT ACKs)");
+    check(Access::association_count(stack) == 1 && !stack.sctp_recv_notification(0), "no change on our side");
+
+    auto in = text("after heartbeats");
+    kernel_send(fd, in);
+    std::vector<uint8_t> got;
+    check(our_recv(stack, key, got) && got == in, "association still carries DATA");
+}
+
+void phase_teardowns(SCTP_Socket& stack, int listener) {
+    Association_Key key;
+    int fd;
+
+    section("We shut down");
+    if ((fd = associate_to_kernel(stack, listener, key)) >= 0) {
+        stack.sctp_send_data(key, text("last words"));
+        stack.sctp_shutdown(key);
+        Kernel_Message m;
+        check(kernel_recv(fd, m) == 1 && m.bytes == text("last words"), "kernel gets the DATA queued before SHUTDOWN");
+        check(kernel_recv(fd, m) == 0, "then reads EOF");
+        expect_change(stack, Assoc_Change_State::SHUTDOWN_COMP, "SHUTDOWN_COMP");
+        check(await_empty(stack), "TCB removed");
+        ::close(fd);
     }
 
-    void stop() {
-        if (fd != INVALID_SOCKET) { sctp_close_socket(fd); fd = INVALID_SOCKET; }
+    section("Kernel shuts down");
+    if ((fd = associate_to_kernel(stack, listener, key)) >= 0) {
+        kernel_send(fd, text("bye"));
+        ::close(fd);
+        std::vector<uint8_t> got;
+        check(our_recv(stack, key, got) && got == text("bye"), "we get the DATA sent before close()");
+        expect_change(stack, Assoc_Change_State::SHUTDOWN_COMP, "SHUTDOWN_COMP");
+        check(await_empty(stack), "TCB removed");
     }
-};
+
+    section("We abort");
+    if ((fd = associate_to_kernel(stack, listener, key)) >= 0) {
+        stack.sctp_abort(key, text("test abort"));
+        Kernel_Message m;
+        int r = kernel_recv(fd, m);
+        int err = errno;
+        check(r == -1 && err == ECONNRESET,
+              std::string("kernel recv fails with ECONNRESET (") + (r == -1 ? std::strerror(err) : "returned " + std::to_string(r)) + ")");
+        ::close(fd);
+    }
+
+    section("Kernel aborts");
+    if ((fd = associate_to_kernel(stack, listener, key)) >= 0) {
+        abortive_close(fd);
+        expect_change(stack, Assoc_Change_State::COMM_LOST, "COMM_LOST");
+        check(await_empty(stack), "TCB removed");
+    }
+}
+
+void phase_kernel_initiates(SCTP_Socket& stack) {
+    section("Kernel initiates");
+    int fd = kernel_socket();
+    sockaddr_in self = loopback(KERNEL_PORT);
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&self), sizeof self) != 0) {
+        std::printf("  [FAIL] bind kernel client to %u: %s\n", KERNEL_PORT, std::strerror(errno));
+        failures++;
+        ::close(fd);
+        return;
+    }
+    sockaddr_in peer = loopback(OUR_PORT);
+    int r = ::connect(fd, reinterpret_cast<sockaddr*>(&peer), sizeof peer);
+    check(r == 0, std::string("kernel connect() completes (") + (r == 0 ? "ok" : std::strerror(errno)) + ")");
+    Association_Key key;
+    expect_change(stack, Assoc_Change_State::COMM_UP, "COMM_UP");
+    key = Association_Key{loopback(KERNEL_PORT)};
+    if (r != 0) { ::close(fd); return; }
+
+    sctp_status st;
+    kernel_status(fd, st);
+    check(st.sstat_instrms == 10 && st.sstat_outstrms == 10,
+          "streams negotiated to 10/10 (kernel sees in=" + std::to_string(st.sstat_instrms)
+          + " out=" + std::to_string(st.sstat_outstrms) + ")");
+
+    auto in = pattern(50 * 1024, 5);
+    check(kernel_send(fd, in, 4), "kernel sends 50 kB on stream 4");
+    std::vector<uint8_t> got;
+    uint16_t sid = 99;
+    check(our_recv(stack, key, got, &sid) && got == in && sid == 4, "we receive it on stream 4");
+
+    auto out = pattern(50 * 1024, 6);
+    stack.sctp_send_data(key, out, 7);
+    Kernel_Message m;
+    check(kernel_recv(fd, m) == 1 && m.bytes == out && m.info.rcv_sid == 7, "kernel receives ours on stream 7");
+
+    ::close(fd);
+    expect_change(stack, Assoc_Change_State::SHUTDOWN_COMP, "kernel close(): SHUTDOWN_COMP");
+    check(await_empty(stack), "TCB removed");
+}
 
 } // namespace
 
 /*----------------------------------- test ----------------------------------*/
 
 int main() {
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
+    if (!sctp_available()) {
+        std::printf("Kernel interop: SKIPPED\n  reason: kernel SCTP unavailable (%s)\n", std::strerror(errno));
+        return 0;
+    }
     std::string why;
-    if (!interop_available(why)) {
-        print_skip(why);
-        return 0;                     // not a failure: keeps `make test` green
+    const char* netns = std::getenv("SCTP_INTEROP_NETNS");
+    bool isolated = !(netns && std::string(netns) == "current") && enter_private_netns(why);
+    if (!isolated && !host_configured(why)) {
+        std::printf("Kernel interop: SKIPPED\n  reason: %s\n", why.c_str());
+        std::printf("  needs unprivileged user namespaces, or a host set up with:\n");
+        std::printf("      sudo modprobe sctp\n");
+        std::printf("      sudo sysctl -w net.sctp.udp_port=%u\n", KERNEL_PORT);
+        std::printf("      sudo sysctl -w net.sctp.encap_port=%u\n", OUR_PORT);
+        return 0;
     }
-
-    std::printf("Kernel interop (stage 0): INIT -> kernel, validate INIT_ACK\n");
-
-    KernelListener kernel;
-    std::string err;
-    if (!kernel.start(err)) {
-        // Setup looked right but the listener would not come up. Report rather
-        // than skip, so a real regression is not silently swallowed.
-        std::printf("  [FAIL] start kernel SCTP listener: %s\n", err.c_str());
-        return 1;
+    if (!extensions_off(why)) {
+        std::printf("Kernel interop: SKIPPED\n  reason: %s\n", why.c_str());
+        return 0;
     }
-    std::printf("  kernel SCTP listening on 127.0.0.1:%u\n", KERNEL_SCTP_PORT);
+    std::printf("Kernel interop (%s)\n", isolated ? "private network namespace" : "host network namespace");
+    auto snmp_before = sctp_snmp();
 
-    // Our plain UDP socket: this is the encapsulation the kernel expects.
-    sctp_socket_t udp = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (udp == INVALID_SOCKET) {
-        std::printf("  [FAIL] create UDP socket: %s\n", std::strerror(errno));
-        kernel.stop();
-        return 1;
-    }
-    sockaddr_in self{};
-    self.sin_family = AF_INET;
-    self.sin_port = htons(OUR_UDP_PORT);
-    sctp_parse_ipv4("127.0.0.1", self.sin_addr);
-    if (::bind(udp, (sockaddr*)&self, sizeof self) != 0) {
-        std::printf("  [FAIL] bind UDP :%u: %s\n", OUR_UDP_PORT, std::strerror(errno));
-        std::printf("         (if EADDRINUSE, net.sctp.udp_port may be set to %u)\n",
-                    OUR_UDP_PORT);
-        sctp_close_socket(udp);
-        kernel.stop();
-        return 1;
-    }
-    timeval tv{}; tv.tv_sec = 2;
-    ::setsockopt(udp, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-
-    sockaddr_in dst{};
-    dst.sin_family = AF_INET;
-    dst.sin_port = htons(KERNEL_UDP_PORT);
-    sctp_parse_ipv4("127.0.0.1", dst.sin_addr);
-
-    // --- build and send INIT ------------------------------------------------
-    // Fixed rather than random so a packet capture is reproducible. Any
-    // non-zero value is valid (RFC 9260 3.1).
-    const uint32_t our_tag = 0xABCD1234u;
-    const uint32_t our_tsn = 0x11112222u;
-
-    SCTP_Packet init;
-    init.header.src_port = OUR_UDP_PORT;
-    init.header.des_port = KERNEL_SCTP_PORT;
-    init.header.verification_tag = 0;      // RFC 9260 8.5: zero for INIT
-    init.header.checksum = 0;
-    init.chunks.push_back(SCTP_Chunk{
-        .chunk_header = { .type = INIT, .flag = 0, .length = 0 },
-        .chunk_value = init_chunk_value{
-            .initiate_tag = our_tag,
-            .a_rwnd = RWND,
-            .out_streams = 1,
-            .in_streams = 1,
-            .initial_tsn = our_tsn,
-            .optional_parameters = {}
-        }
-    });
-    std::vector<uint8_t> wire = serialize_sctp_packet(init);
-
-    // --- send, with retries in case the first datagram races the listener ----
-    std::vector<uint8_t> reply;
-    for (int attempt = 0; attempt < 3 && reply.empty(); attempt++) {
-        ::sendto(udp, (const char*)wire.data(), wire.size(), 0,
-                 (const sockaddr*)&dst, sizeof dst);
-
-        uint8_t buf[2048];
-        sockaddr_in from{};
-        socklen_t flen = sizeof from;
-        int n = ::recvfrom(udp, (char*)buf, sizeof buf, 0, (sockaddr*)&from, &flen);
-        if (n > 0) reply.assign(buf, buf + n);
-    }
-
-    if (reply.empty()) {
-        std::printf("  [FAIL] no reply from kernel after 3 INITs\n");
-        std::printf("         a silent drop usually means a bad CRC-32C, since the\n");
-        std::printf("         kernel discards those without responding. also check\n");
-        std::printf("         net.sctp.encap_port == %u\n", OUR_UDP_PORT);
-        failures++;
-        sctp_close_socket(udp);
-        kernel.stop();
-        std::printf("\nTESTS FAILED (%d failure%s)\n", failures, failures == 1 ? "" : "s");
+    int listener = kernel_socket();
+    sockaddr_in kaddr = loopback(KERNEL_PORT);
+    if (listener < 0 || ::bind(listener, reinterpret_cast<sockaddr*>(&kaddr), sizeof kaddr) != 0
+        || ::listen(listener, 4) != 0) {
+        std::printf("  [FAIL] kernel listener on %u: %s\n", KERNEL_PORT, std::strerror(errno));
         return 1;
     }
 
-    std::printf("  got %zu bytes back from the kernel\n", reply.size());
-
-    // --- validate ----------------------------------------------------------
-    // The kernel computed this checksum. Validating it with our own CRC-32C is
-    // the independent cross-check the loopback tests structurally cannot do.
-    bool big_enough = reply.size() >= SCTP_COMMON_HEADER_SIZE;
-    check(big_enough, "reply is at least a common header");
-    if (!big_enough) { hexdump(reply.data(), reply.size()); goto done; }
-
-    {
-        uint32_t got_sum = sctp_read_wire_checksum(reply.data());
-        std::vector<uint8_t> zeroed = reply;
-        sctp_clear_wire_checksum(zeroed.data());
-        uint32_t calc = calculate_sctp_checksum(zeroed.data(), zeroed.size());
-        bool sum_ok = (got_sum == calc);
-        std::printf("  [%s] kernel's CRC-32C validates under our implementation"
-                    " (0x%08X)\n", sum_ok ? "PASS" : "FAIL", got_sum);
-        if (!sum_ok) {
-            std::printf("         ours: 0x%08X  theirs: 0x%08X\n", calc, got_sum);
-            failures++;
-            hexdump(reply.data(), reply.size());
-        }
-
-        SCTP_Packet ack;
-        bool parsed = true;
-        try {
-            ack = deserialize_sctp_packet(reply.data(), reply.size());
-        } catch (const std::exception& e) {
-            parsed = false;
-            std::printf("  [FAIL] parse kernel reply: %s\n", e.what());
-            failures++;
-            hexdump(reply.data(), reply.size());
-        }
-        if (!parsed) goto done;
-
-        check(!ack.chunks.empty(), "reply contains at least one chunk");
-        if (ack.chunks.empty()) { hexdump(reply.data(), reply.size()); goto done; }
-
-        Chunk_Type t = ack.chunks[0].chunk_header.type;
-        if (t == ABORT) {
-            std::printf("  [FAIL] kernel replied ABORT — it parsed our INIT but"
-                        " rejected it\n");
-            failures++;
-            hexdump(reply.data(), reply.size());
-            goto done;
-        }
-        check(t == INIT_ACK, "first chunk is INIT_ACK");
-        if (t != INIT_ACK) { hexdump(reply.data(), reply.size()); goto done; }
-
-        // Byte order: the kernel echoes our Initiate Tag as the Verification
-        // Tag. A byte-swap bug anywhere in the header shows up right here.
-        check(ack.header.verification_tag == our_tag,
-              "INIT_ACK verification tag echoes our initiate tag");
-        check(ack.header.src_port == KERNEL_SCTP_PORT, "src_port is the kernel's SCTP port");
-        check(ack.header.des_port == OUR_UDP_PORT, "des_port is our SCTP port");
-
-        const auto& iv = std::get<init_chunk_value>(ack.chunks[0].chunk_value);
-        check(iv.initiate_tag != 0, "kernel's initiate tag is non-zero");
-        check(iv.out_streams > 0 && iv.in_streams > 0, "stream counts are non-zero");
-        check(!iv.optional_parameters.empty(), "INIT_ACK carries optional parameters");
-
-        // The State Cookie is mandatory in INIT_ACK. Locating it also proves out
-        // the TLV walk that stage 2 needs in order to echo it.
-        std::vector<uint8_t> cookie;
-        std::string perr;
-        bool have_cookie = find_parameter(iv.optional_parameters,
-                                          PARAM_STATE_COOKIE, cookie, perr);
-        if (have_cookie) {
-            std::printf("  [PASS] State Cookie parameter present (%zu bytes)\n",
-                        cookie.size());
-        } else {
-            std::printf("  [FAIL] State Cookie parameter: %s\n", perr.c_str());
-            failures++;
-        }
+    SCTP_Socket stack;
+    stack.sctp_subscribe(Notification_Type::SCTP_REMOTE_ERROR, true);
+    if (!stack.sctp_bind("127.0.0.1", OUR_PORT) || !stack.sctp_run()) {
+        std::printf("  [FAIL] start our stack on %u\n", OUR_PORT);
+        return 1;
     }
 
-done:
-    sctp_close_socket(udp);
-    kernel.stop();
+    Association_Key key;
+    int fd = associate_to_kernel(stack, listener, key);
+    if (fd >= 0) {
+        phase_handshake(stack, fd);
+        phase_small_data(stack, key, fd);
+        phase_streams(stack, key, fd);
+        phase_fragmentation(stack, key, fd);
+        phase_heartbeat(stack, key, fd);
+        ::close(fd);
+        expect_change(stack, Assoc_Change_State::SHUTDOWN_COMP, "kernel close() after the data phases: SHUTDOWN_COMP");
+        await_empty(stack);
+    }
+    phase_teardowns(stack, listener);
+    ::close(listener);
+    phase_kernel_initiates(stack);
+
+    stack.sctp_close(1000);
+
+    section("Kernel counters");
+    auto snmp_after = sctp_snmp();
+    for (const char* name : {"SctpChecksumErrors", "SctpOutOfBlues", "SctpAborteds", "SctpShutdowns",
+                             "SctpInCtrlChunks", "SctpInOrderChunks", "SctpInUnorderChunks", "SctpOutCtrlChunks",
+                             "SctpRetransChunks", "SctpT3RtxExpireds", "SctpFastRetransmits"}) {
+        std::printf("      %-22s %ld\n", name, snmp_after[name] - snmp_before[name]);
+    }
+    if (isolated) {
+        check(snmp_after["SctpChecksumErrors"] == snmp_before["SctpChecksumErrors"], "kernel saw no checksum errors");
+        check(snmp_after["SctpOutOfBlues"] == snmp_before["SctpOutOfBlues"], "kernel saw no out-of-the-blue packets");
+    }
 
     std::printf("\n%s (%d failure%s)\n",
                 failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",

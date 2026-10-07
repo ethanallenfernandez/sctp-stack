@@ -94,8 +94,10 @@ struct Association {
     bool zero_window_probe_allowed;
     bool zero_window_probing;
     bool sack_since_t3;
-    // The a_rwnd we last advertised.
+    // The a_rwnd we last advertised, and the user data received since, which
+    // the peer still counts against it.
     uint32_t our_rwnd;
+    uint32_t received_since_sack;
     uint32_t next_tsn;
     uint32_t last_peer_tsn;
     uint16_t init_retransmits;

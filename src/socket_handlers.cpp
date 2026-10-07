@@ -42,6 +42,12 @@ namespace {
         return total;
     }
 
+    // What the peer believes is left of our window: what we last advertised,
+    // less what it has sent us since.
+    uint32_t peer_view_of_window(const Association& assoc) {
+        return assoc.our_rwnd > assoc.received_since_sack ? assoc.our_rwnd - assoc.received_since_sack : 0;
+    }
+
     // Whether anything held is complete and waiting only on the TSN at the
     // Cumulative TSN Ack point. Nothing could be dropped to make room for it.
     bool blocked_on_cumulative_tsn(const Association& assoc) {
@@ -1424,10 +1430,12 @@ SCTP_Packet SCTP_Socket::make_sack(const Association_Key& key, Association& asso
     // Receiver SWS avoidance: an opening too small to be worth a packet is held
     // back until it grows. A shrinking window is always advertised as it is.
     uint32_t window = receive_window(key, assoc);
-    if (window > assoc.our_rwnd && window - assoc.our_rwnd < std::min<uint32_t>(RWND / 2, assoc.pmdcs)) {
-        window = assoc.our_rwnd;
+    uint32_t believed = peer_view_of_window(assoc);
+    if (window > believed && window - believed < std::min<uint32_t>(RWND / 2, assoc.pmdcs)) {
+        window = believed;
     }
     assoc.our_rwnd = window;
+    assoc.received_since_sack = 0;
 
     SCTP_Packet sack_packet = build_sack(
         ntohs(local_address.sin_port),
@@ -1499,6 +1507,7 @@ void SCTP_Socket::handle_data_packet(
             send_immediately = send_immediately
                 || (chunk.chunk_header.flag & DATA_IMMEDIATE_SACK_FLAG) != 0;
             const auto& data = std::get<data_chunk_value>(chunk.chunk_value);
+            assoc.received_since_sack += static_cast<uint32_t>(data.user_data.size());
             uint32_t tsn = data.tsn;
             // RFC 9260 6.5: an invalid stream is still acked, but reported and never delivered.
             bool valid_stream = data.stream_identifier < assoc.in_streams;
@@ -1609,7 +1618,7 @@ void SCTP_Socket::maybe_send_window_update(const Association_Key& key) {
             return;
         }
         uint32_t window = receive_window(key, association->second);
-        if (window < association->second.our_rwnd + RWND / 4) {
+        if (window < peer_view_of_window(association->second) + RWND / 4) {
             return;
         }
     }

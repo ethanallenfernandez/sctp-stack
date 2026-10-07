@@ -639,8 +639,8 @@ void test_advertised_window_tracks_the_buffer() {
 
     Access::deliver_data(stack, 40000, PEER_TSN + 1, 100);
     sack = last_sack(Access::drain(stack));
-    check(sack && sack->a_rwnd == RWND - 1000,
-          "receiver SWS: the 900-byte opening is held back rather than advertised");
+    check(sack && sack->a_rwnd == RWND - 1100,
+          "receiver SWS: the 1000-byte opening is held back at the window the peer already assumes");
 }
 
 void test_window_update() {
@@ -659,6 +659,21 @@ void test_window_update() {
     sack = last_sack(Access::drain(stack));
     check(sack && sack->a_rwnd == RWND - 40000, "reading 20000 bytes sends a SACK with the new window");
     check(sack && sack->cumulative_tsn_ack == PEER_TSN + 2, "acknowledging nothing new");
+}
+
+void test_window_update_before_delayed_sack() {
+    std::printf("6.2: a window update when the ULP frees data the peer has not yet seen acked:\n");
+
+    SCTP_Socket stack;
+    Association_Key key{peer_address(40000)};
+    Access::establish(stack, key, 4404, 65535);
+    Access::deliver_data(stack, 40000, PEER_TSN, 60000, false);
+    check(last_sack(Access::drain(stack)) == std::nullopt, "one packet waits on the delayed SACK");
+
+    read_message(stack);
+    auto sack = last_sack(Access::drain(stack));
+    check(sack && sack->a_rwnd == RWND && sack->cumulative_tsn_ack == PEER_TSN,
+          "reading it opens the window the peer believes is nearly closed, so it is updated at once");
 }
 
 void test_full_buffer_drops_new_data() {
@@ -894,6 +909,7 @@ int main() {
     test_fast_retransmit_on_entering_fast_recovery();
     test_advertised_window_tracks_the_buffer();
     test_window_update();
+    test_window_update_before_delayed_sack();
     test_full_buffer_drops_new_data();
     test_full_buffer_prefers_the_lower_tsn();
     test_full_buffer_takes_the_tsn_blocking_complete_messages();
