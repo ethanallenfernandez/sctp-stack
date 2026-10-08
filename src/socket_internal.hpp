@@ -57,6 +57,32 @@ inline uint32_t initial_cwnd(uint32_t pmdcs) {
     return std::min(4U * pmdcs, std::max(2U * pmdcs, 4404U));
 }
 
+inline bool same_transport_address(const sockaddr_in& a, const sockaddr_in& b) {
+    return Association_Key{a} == Association_Key{b};
+}
+
+inline const Peer_Path* find_path(const Association& assoc, const sockaddr_in& address) {
+    auto path = std::find_if(assoc.peer_address_list.begin(), assoc.peer_address_list.end(), [&](const Peer_Path& candidate) {
+        return same_transport_address(candidate.address, address);
+    });
+    return path == assoc.peer_address_list.end() ? nullptr : &*path;
+}
+
+// A reply goes back where its packet came from, unless that address is UNCONFIRMED.
+inline sockaddr_in reply_destination(const Association& assoc, const sockaddr_in& src) {
+    const Peer_Path* path = find_path(assoc, src);
+    return path != nullptr && path->confirmed ? src : assoc.primary_path;
+}
+
+// The INIT's source, which the INIT ACK carrying the cookie was sent to.
+inline sockaddr_in cookie_source(const State_Cookie& cookie) {
+    sockaddr_in source{};
+    source.sin_family = AF_INET;
+    source.sin_addr.s_addr = htonl(cookie.peer_ipv4);
+    source.sin_port = htons(cookie.peer_udp_port);
+    return source;
+}
+
 inline bool has_unacknowledged_data(const Association& assoc) {
     return std::any_of(
         assoc.outstanding_data.begin(),

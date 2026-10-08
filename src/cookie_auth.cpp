@@ -1,5 +1,6 @@
 #include <sctp/cookie_auth.hpp>
 
+#include <algorithm>
 #include <cstring>
 
 #include "hmac.hpp"
@@ -53,7 +54,8 @@ std::vector<uint8_t> Cookie_Auth::generate(
     uint32_t local_tsn,
     uint32_t local_tie_tag,
     uint32_t peer_tie_tag,
-    uint32_t lifespan_increment_ms
+    uint32_t lifespan_increment_ms,
+    const std::vector<uint32_t>& peer_addresses
 ) {
     rotate_if_due();
     auto lifespan = std::min<std::chrono::microseconds>(
@@ -88,17 +90,13 @@ std::vector<uint8_t> Cookie_Auth::generate(
 
     cookie.local_tie_tag = local_tie_tag;
     cookie.peer_tie_tag = peer_tie_tag;
+    cookie.peer_addresses = peer_addresses;
 
     // The MAC is a plain suffix covering the body only, so it can be written
     // straight into the tail of the serialized buffer.
     std::vector<uint8_t> out = serialize_state_cookie(cookie);
-    hmac_sha256(
-        current, 
-        COOKIE_SECRET_SIZE, 
-        out.data(), 
-        STATE_COOKIE_BODY_SIZE, 
-        out.data() + STATE_COOKIE_BODY_SIZE
-    );
+    size_t body_size = out.size() - STATE_COOKIE_MAC_SIZE;
+    hmac_sha256(current, COOKIE_SECRET_SIZE, out.data(), body_size, out.data() + body_size);
     return out;
 }
 
@@ -121,21 +119,19 @@ Cookie_Result Cookie_Auth::verify(
     }
 
     uint8_t expected[SHA256_DIGEST_SIZE];
-    hmac_sha256(
-        secret, 
-        COOKIE_SECRET_SIZE, 
-        cookie.data(), 
-        STATE_COOKIE_BODY_SIZE, 
-        expected
-    );
-    if (!constant_time_equal(expected, cookie.data() + STATE_COOKIE_BODY_SIZE, STATE_COOKIE_MAC_SIZE)) {
+    size_t body_size = cookie.size() - STATE_COOKIE_MAC_SIZE;
+    hmac_sha256(secret, COOKIE_SECRET_SIZE, cookie.data(), body_size, expected);
+    if (!constant_time_equal(expected, cookie.data() + body_size, STATE_COOKIE_MAC_SIZE)) {
         return Cookie_Result::BAD_MAC;
     }
 
+    uint32_t from = ntohl(src.sin_addr.s_addr);
+    bool listed = from == out.peer_ipv4
+        || std::find(out.peer_addresses.begin(), out.peer_addresses.end(), from) != out.peer_addresses.end();
     if (out.sctp_src_port != header.src_port
         || out.sctp_dst_port != header.des_port
         || out.local_ver_tag != header.verification_tag
-        || out.peer_ipv4 != ntohl(src.sin_addr.s_addr)
+        || !listed
         || out.peer_udp_port != ntohs(src.sin_port)
     ) {
         return Cookie_Result::WRONG_ENDPOINT;

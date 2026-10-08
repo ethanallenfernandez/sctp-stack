@@ -55,6 +55,7 @@ struct SCTP_Socket_Test_Access {
         assoc.cwnd = cwnd;
         assoc.peer_rwnd = peer_rwnd;
         assoc.data_sent_at = Clock::now();
+        assoc.primary_path = key.address;
         stack.associations.insert_or_assign(key, assoc);
     }
 
@@ -128,7 +129,7 @@ struct SCTP_Socket_Test_Access {
 
     static void fire(SCTP_Socket& stack, const Association_Key& key, Expiration_Timer_Type type) {
         stack.handle_expiration(Expiration_Fallback{
-            Expiration_Key{key, type}, Clock::now(), 0, Deliverable{key, SCTP_Packet{}}});
+            Expiration_Key{key, type}, Clock::now(), 0, Deliverable{key, {}, SCTP_Packet{}}});
     }
 
     static bool timer_armed(SCTP_Socket& stack, const Association_Key& key, Expiration_Timer_Type type) {

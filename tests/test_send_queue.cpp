@@ -43,6 +43,7 @@ struct SCTP_Socket_Test_Access {
         Association_Key key{peer};
         {
             std::lock_guard<std::mutex> lock(stack.associations_mutex);
+            association.primary_path = key.address;
             stack.associations.insert_or_assign(key, association);
         }
         stack.local_address.sin_family = AF_INET;
@@ -113,8 +114,8 @@ struct SCTP_Socket_Test_Access {
         stack.associations.at(key).next_ssn[0] = ssn;
     }
 
-    static std::vector<uint16_t> next_ssns(SCTP_Socket& stack, const State_Cookie& cookie, const Association_Key& key) {
-        return stack.init_new_association(cookie, key).next_ssn;
+    static std::vector<uint16_t> next_ssns(SCTP_Socket& stack, const State_Cookie& cookie) {
+        return stack.init_new_association(cookie).next_ssn;
     }
 
     static void remove_acked_retransmissions(
@@ -275,7 +276,7 @@ static void test_send_priority_order() {
     retransmission.chunks.push_back(
         make_data_chunk(199, {'r', 'e', 't', 'r', 'y'}));
     SCTP_Socket_Test_Access::enqueue(
-        stack, Deliverable{key, std::move(retransmission)},
+        stack, Deliverable{key, key.address, std::move(retransmission)},
         Send_Priority::RETRANSMISSION);
 
     SCTP_Packet control;
@@ -291,7 +292,7 @@ static void test_send_priority_order() {
         .chunk_value = empty_chunk_value{},
     });
     SCTP_Socket_Test_Access::enqueue(
-        stack, Deliverable{key, std::move(control)},
+        stack, Deliverable{key, key.address, std::move(control)},
         Send_Priority::CONTROL);
 
     SCTP_Socket_Test_Access::attempt_send(stack);
@@ -335,7 +336,7 @@ static void test_sack_trims_retransmission_queue() {
     retransmission.chunks.push_back(make_data_chunk(100, {'a'}));
     retransmission.chunks.push_back(make_data_chunk(101, {'b'}));
     SCTP_Socket_Test_Access::enqueue(
-        stack, Deliverable{key, std::move(retransmission)},
+        stack, Deliverable{key, key.address, std::move(retransmission)},
         Send_Priority::RETRANSMISSION);
 
     sack_chunk_value first_sack{};
@@ -383,7 +384,7 @@ static void test_stream_sequence_numbers() {
     cookie.local_in_streams = 1;
     cookie.peer_out_streams = 1;
     cookie.peer_in_streams = 1;
-    check(SCTP_Socket_Test_Access::next_ssns(stack, cookie, key) == std::vector<uint16_t>{0},
+    check(SCTP_Socket_Test_Access::next_ssns(stack, cookie) == std::vector<uint16_t>{0},
           "a new or restarted association starts every outbound stream at SSN 0");
 }
 

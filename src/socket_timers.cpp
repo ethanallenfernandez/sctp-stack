@@ -57,6 +57,7 @@ void SCTP_Socket::handle_expiration(const Expiration_Fallback& fallback) {
         uint16_t& retransmits = is_init ? association->second.init_retransmits : association->second.cookie_retransmits;
         if (retransmits >= sctp_parameters::MAX_INIT_RETRANSMITS) {
             associations.erase(association);
+            forget_peer_addresses(fallback.key.location);
             notify_assoc_change(fallback.key.location, Assoc_Change_State::CANT_STR_ASSOC);
             exhausted = true;
         } else {
@@ -135,7 +136,7 @@ void SCTP_Socket::restart_t3(const Association_Key& location) {
     schedule_expiration(
         Expiration_Key{location, Expiration_Timer_Type::T3_RTX},
         std::chrono::steady_clock::now() + rto,
-        Deliverable{location, SCTP_Packet{}}
+        Deliverable{location, {}, SCTP_Packet{}}
     );
 }
 
@@ -153,7 +154,7 @@ void SCTP_Socket::restart_t2(const Association_Key& location) {
     schedule_expiration(
         Expiration_Key{location, Expiration_Timer_Type::T2_SHUTDOWN},
         std::chrono::steady_clock::now() + rto,
-        Deliverable{location, SCTP_Packet{}}
+        Deliverable{location, {}, SCTP_Packet{}}
     );
 }
 
@@ -161,6 +162,7 @@ void SCTP_Socket::restart_t2(const Association_Key& location) {
 // Ack as it stands now.
 void SCTP_Socket::handle_t2_expiration(const Association_Key& location) {
     SCTP_Packet packet;
+    sockaddr_in destination;
     bool unreachable;
     {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
@@ -173,6 +175,7 @@ void SCTP_Socket::handle_t2_expiration(const Association_Key& location) {
         Association& assoc = association->second;
         assoc.rto = std::min(assoc.rto * 2, std::chrono::duration_cast<std::chrono::microseconds>(sctp_parameters::RTO_MAX));
         unreachable = ++assoc.error_count > assoc.error_threshold;
+        destination = assoc.primary_path;
         uint16_t src_port = ntohs(local_address.sin_port);
         uint16_t des_port = ntohs(location.address.sin_port);
         packet = assoc.state == SHUTDOWN_SENT
@@ -186,7 +189,7 @@ void SCTP_Socket::handle_t2_expiration(const Association_Key& location) {
         std::cout << "Association failed: shutdown unanswered" << std::endl;
         return;
     }
-    enqueue_packet(Deliverable{location, std::move(packet)});
+    enqueue_packet(Deliverable{location, destination, std::move(packet)});
     restart_t2(location);
 }
 
@@ -195,6 +198,7 @@ void SCTP_Socket::handle_t2_expiration(const Association_Key& location) {
 // push back.
 void SCTP_Socket::handle_t5_expiration(const Association_Key& location) {
     uint32_t peer_tag;
+    sockaddr_in destination;
     {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
         auto association = associations.find(location);
@@ -203,10 +207,11 @@ void SCTP_Socket::handle_t5_expiration(const Association_Key& location) {
             return;
         }
         peer_tag = association->second.peer_ver_tag;
+        destination = association->second.primary_path;
     }
 
     remove_association(location);
-    enqueue_packet(Deliverable{location, build_abort(
+    enqueue_packet(Deliverable{location, destination, build_abort(
         ntohs(local_address.sin_port), ntohs(location.address.sin_port), peer_tag, false, {})});
     notify_assoc_change(location, Assoc_Change_State::COMM_LOST);
     std::cout << "Association aborted: shutdown did not complete in time" << std::endl;
@@ -283,11 +288,11 @@ void SCTP_Socket::handle_heartbeat_expiration(const Association_Key& location) {
             generate_random(assoc.hb_nonce);
             assoc.hb_outstanding = true;
             assoc.hb_sent_at = std::chrono::steady_clock::now();
-            probe = Deliverable{location, build_heartbeat(
+            probe = Deliverable{location, assoc.primary_path, build_heartbeat(
                 ntohs(local_address.sin_port),
                 ntohs(location.address.sin_port),
                 assoc.peer_ver_tag,
-                heartbeat_info(assoc.hb_nonce, location.address)
+                heartbeat_info(assoc.hb_nonce, assoc.primary_path)
             )};
             send_probe = true;
         }
@@ -324,7 +329,7 @@ void SCTP_Socket::schedule_heartbeat(const Association_Key& location, std::chron
     schedule_expiration(
         Expiration_Key{location, Expiration_Timer_Type::HEARTBEAT},
         std::chrono::steady_clock::now() + sctp_parameters::HB_INTERVAL + rto + offset,
-        Deliverable{location, SCTP_Packet{}}
+        Deliverable{location, {}, SCTP_Packet{}}
     );
 }
 
@@ -406,7 +411,7 @@ void SCTP_Socket::schedule_pending_retransmission(
         if (bundle.empty()) {
             return;
         }
-        retransmission = Deliverable{key, build_data(
+        retransmission = Deliverable{key, assoc.primary_path, build_data(
             ntohs(local_address.sin_port),
             ntohs(key.address.sin_port),
             assoc.peer_ver_tag,

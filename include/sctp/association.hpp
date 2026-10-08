@@ -76,13 +76,20 @@ struct Reassembly {
     std::vector<uint8_t> bytes;
 };
 
+// A destination transport address of the peer. The UDP port is the
+// encapsulation port, which RFC 6951 keeps per destination.
+struct Peer_Path {
+    sockaddr_in address;
+    bool confirmed;
+};
+
 struct Association {
     uint32_t peer_ver_tag;
     uint32_t this_ver_tag;
     uint32_t local_tie_tag;
     uint32_t peer_tie_tag;
     Association_State state;
-    std::vector<sockaddr_in> peer_address_list;
+    std::vector<Peer_Path> peer_address_list;
     sockaddr_in primary_path;
     uint16_t error_count;
     uint16_t error_threshold;

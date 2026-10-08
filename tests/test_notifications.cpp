@@ -55,6 +55,7 @@ struct SCTP_Socket_Test_Access {
         assoc.state = state;
         assoc.this_ver_tag = OUR_TAG;
         assoc.peer_ver_tag = PEER_TAG;
+        assoc.primary_path = key.address;
         stack.associations.insert_or_assign(key, assoc);
     }
 

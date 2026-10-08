@@ -74,6 +74,7 @@ struct SCTP_Socket_Test_Access {
         assoc.peer_ver_tag = state == COOKIE_WAIT ? 0 : PEER_TAG;
         assoc.last_peer_tsn = 0;
         assoc.in_streams = 4;
+        assoc.primary_path = peer_key().address;
         return stack.associations.insert_or_assign(peer_key(), assoc).first->second;
     }
 
@@ -111,7 +112,7 @@ struct SCTP_Socket_Test_Access {
     void schedule_t1_cookie() {
         stack.schedule_expiration(Expiration_Key{peer_key(), Expiration_Timer_Type::T1_COOKIE},
                                   std::chrono::steady_clock::now() + std::chrono::seconds(10),
-                                  Deliverable{peer_key(), SCTP_Packet{}});
+                                  Deliverable{peer_key(), {}, SCTP_Packet{}});
     }
 
     bool t1_cookie_active() {
@@ -120,7 +121,7 @@ struct SCTP_Socket_Test_Access {
 
     static Association from_cookie(const State_Cookie& cookie) {
         SCTP_Socket stack;
-        return stack.init_new_association(cookie, peer_key());
+        return stack.init_new_association(cookie);
     }
 };
 

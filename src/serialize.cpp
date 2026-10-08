@@ -88,6 +88,23 @@ bool find_parameter(const std::vector<uint8_t>& params, uint16_t type, std::vect
     return false;
 }
 
+std::vector<uint32_t> find_ipv4_addresses(const std::vector<uint8_t>& params) {
+    std::vector<uint32_t> out;
+    size_t offset = 0;
+    while (offset + SCTP_CHUNK_HEADER_SIZE <= params.size()) {
+        uint16_t type = read16(&params[offset]);
+        uint16_t length = read16(&params[offset + 2]);
+        if (length < SCTP_CHUNK_HEADER_SIZE || offset + length > params.size()) {
+            break;
+        }
+        if (type == PARAM_IPV4_ADDRESS && length == 8) {
+            out.push_back(read32(&params[offset + 4]));
+        }
+        offset += (static_cast<size_t>(length) + 3) & ~size_t{3};
+    }
+    return out;
+}
+
 Parameter_Scan scan_parameters(const std::vector<uint8_t>& params, std::initializer_list<uint16_t> recognized) {
     Parameter_Scan scan;
     size_t offset = 0;
@@ -118,7 +135,7 @@ Parameter_Scan scan_parameters(const std::vector<uint8_t>& params, std::initiali
 
 std::vector<uint8_t> serialize_state_cookie(const State_Cookie& cookie) {
     std::vector<uint8_t> out;
-    out.reserve(STATE_COOKIE_SIZE);
+    out.reserve(STATE_COOKIE_SIZE + 4 * cookie.peer_addresses.size());
 
     out.push_back(cookie.version);
     out.push_back(cookie.secret_generation);
@@ -130,7 +147,7 @@ std::vector<uint8_t> serialize_state_cookie(const State_Cookie& cookie) {
     append16(out, cookie.sctp_dst_port);
     append32(out, cookie.peer_ipv4);
     append16(out, cookie.peer_udp_port);
-    append16(out, 0);                                                   // reserved
+    append16(out, static_cast<uint16_t>(cookie.peer_addresses.size()));
     append32(out, cookie.local_ver_tag);
     append32(out, cookie.peer_ver_tag);
     append32(out, cookie.local_initial_tsn);
@@ -148,17 +165,21 @@ std::vector<uint8_t> serialize_state_cookie(const State_Cookie& cookie) {
     if (out.size() != STATE_COOKIE_BODY_SIZE) {
         throw std::runtime_error("state cookie body size does not match STATE_COOKIE_BODY_SIZE");
     }
+    for (uint32_t address : cookie.peer_addresses) {
+        append32(out, address);
+    }
 
     out.insert(out.end(), cookie.mac, cookie.mac + STATE_COOKIE_MAC_SIZE);
     return out;
 }
 
 bool deserialize_state_cookie(const std::vector<uint8_t>& data, State_Cookie& out) {
-    if (data.size() != STATE_COOKIE_SIZE) {
+    if (data.size() < STATE_COOKIE_SIZE) {
         return false;
     }
     const uint8_t* p = data.data();
-    if (p[0] != STATE_COOKIE_VERSION) {
+    size_t address_count = read16(p + 26);
+    if (p[0] != STATE_COOKIE_VERSION || data.size() != STATE_COOKIE_SIZE + 4 * address_count) {
         return false;
     }
 
@@ -181,7 +202,11 @@ bool deserialize_state_cookie(const std::vector<uint8_t>& data, State_Cookie& ou
     out.peer_in_streams   = read16(p + 54);
     out.local_tie_tag     = read32(p + 56);
     out.peer_tie_tag      = read32(p + 60);
-    std::memcpy(out.mac, p + STATE_COOKIE_BODY_SIZE, STATE_COOKIE_MAC_SIZE);
+    out.peer_addresses.clear();
+    for (size_t i = 0; i < address_count; ++i) {
+        out.peer_addresses.push_back(read32(p + STATE_COOKIE_BODY_SIZE + 4 * i));
+    }
+    std::memcpy(out.mac, p + data.size() - STATE_COOKIE_MAC_SIZE, STATE_COOKIE_MAC_SIZE);
     return true;
 }
 

@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <chrono>
 #include <iostream>
+#include <iterator>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -169,7 +170,7 @@ Association_Key SCTP_Socket::sctp_associate(std::string_view ip_address, int por
 
     // sin_port is already network order, so the builder's host-order ports need
     // ntohs, not htons.
-    enqueue_packet(Deliverable{key, build_init(
+    enqueue_packet(Deliverable{key, assoc.primary_path, build_init(
         ntohs(local_address.sin_port),
         ntohs(key.address.sin_port),
         assoc.this_ver_tag,
@@ -181,6 +182,7 @@ Association_Key SCTP_Socket::sctp_associate(std::string_view ip_address, int por
 Association SCTP_Socket::init_new_association(const Association_Key& key) {
     Association result{};
 
+    result.peer_address_list = {Peer_Path{key.address, true}};
     result.primary_path = key.address;
     result.state = COOKIE_WAIT;
 
@@ -201,10 +203,12 @@ Association SCTP_Socket::init_new_association(const Association_Key& key) {
     return result;
 }
 
-Association SCTP_Socket::init_new_association(const State_Cookie& cookie, const Association_Key& key) {
+// The cookie's other addresses are left to add_peer_addresses, which indexes them.
+Association SCTP_Socket::init_new_association(const State_Cookie& cookie) {
     Association result{};
 
-    result.primary_path = key.address;
+    result.peer_address_list = {Peer_Path{cookie_source(cookie), true}};
+    result.primary_path = cookie_source(cookie);
     result.state = ESTABLISHED;
 
     result.this_ver_tag = cookie.local_ver_tag;
@@ -229,10 +233,37 @@ Association SCTP_Socket::init_new_association(const State_Cookie& cookie, const 
     return result;
 }
 
+Association_Key SCTP_Socket::association_key_for(const sockaddr_in& src) {
+    Association_Key direct{src};
+    if (associations.count(direct) != 0) {
+        return direct;
+    }
+    auto alias = peer_addresses.find(direct);
+    return alias == peer_addresses.end() ? direct : alias->second;
+}
+
+void SCTP_Socket::add_peer_addresses(const Association_Key& key, Association& assoc, const std::vector<sockaddr_in>& addresses) {
+    for (const sockaddr_in& address : addresses) {
+        if (find_path(assoc, address) == nullptr) {
+            assoc.peer_address_list.push_back(Peer_Path{address, false});
+        }
+        if (!same_transport_address(address, key.address)) {
+            peer_addresses.emplace(Association_Key{address}, key);
+        }
+    }
+}
+
+void SCTP_Socket::forget_peer_addresses(const Association_Key& key) {
+    for (auto it = peer_addresses.begin(); it != peer_addresses.end();) {
+        it = it->second == key ? peer_addresses.erase(it) : std::next(it);
+    }
+}
+
 void SCTP_Socket::remove_association(const Association_Key& key) {
     {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
         associations.erase(key);
+        forget_peer_addresses(key);
     }
     cancel_expirations(key);
     sends.purge(key);
@@ -299,6 +330,7 @@ void SCTP_Socket::sctp_abort(const sockaddr_in& association_id, const std::vecto
 void SCTP_Socket::sctp_abort(const Association_Key& association_id, const std::vector<uint8_t>& reason) {
     uint32_t peer_tag;
     size_t budget;
+    sockaddr_in destination;
     {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
         auto it = associations.find(association_id);
@@ -307,6 +339,7 @@ void SCTP_Socket::sctp_abort(const Association_Key& association_id, const std::v
         }
         peer_tag = it->second.peer_ver_tag;
         budget = it->second.pmdcs;
+        destination = it->second.primary_path;
     }
 
     // Purge first so it drops the queued DATA that MUST NOT accompany the ABORT
@@ -322,6 +355,7 @@ void SCTP_Socket::sctp_abort(const Association_Key& association_id, const std::v
 
     enqueue_packet(Deliverable{
         association_id,
+        destination,
         build_abort(
             ntohs(local_address.sin_port),
             ntohs(association_id.address.sin_port),
@@ -390,6 +424,7 @@ void SCTP_Socket::sctp_shutdown(const Association_Key& association_id) {
         case COOKIE_WAIT:
         case COOKIE_ECHOED:
             associations.erase(it);
+            forget_peer_addresses(association_id);
             assoc_lock.unlock();
             cancel_expirations(association_id);
             sends.purge(association_id);

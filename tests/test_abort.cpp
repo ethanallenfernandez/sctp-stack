@@ -49,6 +49,7 @@ struct SCTP_Socket_Test_Access {
         assoc.this_ver_tag = OUR_TAG;
         assoc.peer_ver_tag = state == COOKIE_WAIT ? 0 : PEER_TAG;
         assoc.state = state;
+        assoc.primary_path = key.address;
         stack.associations.insert_or_assign(key, assoc);
 
         stack.sctp_send_data(key, {'h', 'i'});
@@ -69,6 +70,7 @@ struct SCTP_Socket_Test_Access {
             assoc.peer_ver_tag = *state == COOKIE_WAIT ? 0 : PEER_TAG;
             assoc.state = *state;
             assoc.last_peer_tsn = 0;
+            assoc.primary_path = key.address;
             stack.associations.insert_or_assign(key, assoc);
         }
 
@@ -86,6 +88,7 @@ struct SCTP_Socket_Test_Access {
             Association assoc = stack.init_new_association(key);
             assoc.this_ver_tag = OUR_TAG;
             assoc.state = COOKIE_WAIT;
+            assoc.primary_path = key.address;
             stack.associations.insert_or_assign(key, assoc);
         }
 

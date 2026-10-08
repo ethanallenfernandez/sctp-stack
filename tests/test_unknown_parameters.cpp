@@ -60,6 +60,7 @@ struct SCTP_Socket_Test_Access {
             assoc.state = COOKIE_WAIT;
             assoc.this_ver_tag = OUR_TAG;
             assoc.peer_ver_tag = 0;
+            assoc.primary_path = key.address;
             stack.associations.insert_or_assign(key, assoc);
         }
 

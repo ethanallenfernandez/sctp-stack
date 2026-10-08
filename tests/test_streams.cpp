@@ -67,6 +67,7 @@ struct SCTP_Socket_Test_Access {
         association.pmdcs = PMDCS;
         association.peer_rwnd = 65535;
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
+        association.primary_path = key.address;
         stack.associations.insert_or_assign(key, association);
         return key;
     }

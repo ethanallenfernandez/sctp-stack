@@ -13,7 +13,7 @@ enum class Cookie_Result {
     MALFORMED,        // wrong size or version
     UNKNOWN_SECRET,   // signed by a key we no longer hold
     BAD_MAC,
-    WRONG_ENDPOINT,   // ports or address do not match the packet
+    WRONG_ENDPOINT,   // ports do not match the packet, or it came from an address the INIT did not give
     STALE,            // past its lifespan; caller sends an ERROR
 };
 
@@ -27,7 +27,8 @@ public:
         uint32_t local_tsn,
         uint32_t local_tie_tag,
         uint32_t peer_tie_tag,
-        uint32_t lifespan_increment_ms = 0
+        uint32_t lifespan_increment_ms = 0,
+        const std::vector<uint32_t>& peer_addresses = {}
     );
 
     // staleness_us is only set when the result is STALE.

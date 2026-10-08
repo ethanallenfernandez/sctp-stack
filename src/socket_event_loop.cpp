@@ -204,7 +204,7 @@ void SCTP_Socket::requeue_bundled_sack(const Send_Queue::Pending& pending) {
     SCTP_Packet sack;
     sack.header = pending.deliverable.packet.header;
     sack.chunks.push_back(chunks.front());
-    enqueue_packet(Deliverable{pending.deliverable.location, std::move(sack)});
+    enqueue_packet(Deliverable{pending.deliverable.location, pending.deliverable.destination, std::move(sack)});
 }
 
 // Max.Burst (6.1 D) is applied by counting the new-DATA packets each association
@@ -284,7 +284,7 @@ void SCTP_Socket::prepare_data_packet(Deliverable& deliverable, bool new_data) {
     if (serialize_sctp_packet(deliverable.packet).size() + sack_size <= SCTP_COMMON_HEADER_SIZE + pmdcs) {
         chunks.insert(chunks.begin(), std::move(sack.chunks.front()));
     } else {
-        enqueue_packet(Deliverable{deliverable.location, std::move(sack)});
+        enqueue_packet(Deliverable{deliverable.location, deliverable.destination, std::move(sack)});
     }
 }
 
@@ -318,7 +318,7 @@ void SCTP_Socket::refill_new_data(Send_Allowances& allowances) {
             if (chunks.empty()) {
                 continue;
             }
-            deliverable = Deliverable{key, build_data(
+            deliverable = Deliverable{key, association->second.primary_path, build_data(
                 ntohs(local_address.sin_port),
                 ntohs(key.address.sin_port),
                 association->second.peer_ver_tag,
@@ -349,7 +349,7 @@ void SCTP_Socket::arm_zero_window_probes(const Send_Allowances& allowances) {
             }
             rto = association->second.rto;
         }
-        schedule_expiration(timer, std::chrono::steady_clock::now() + rto, Deliverable{key, SCTP_Packet{}});
+        schedule_expiration(timer, std::chrono::steady_clock::now() + rto, Deliverable{key, {}, SCTP_Packet{}});
     }
 }
 
@@ -431,8 +431,8 @@ int SCTP_Socket::next_poll_timeout() {
 bool SCTP_Socket::handle_send_packet(const Deliverable& deliverable) {
     std::vector<uint8_t> serialized_packet = serialize_sctp_packet(deliverable.packet);
     const char* data = reinterpret_cast<const char*>(serialized_packet.data());
-    const sockaddr* to = reinterpret_cast<const sockaddr*>(&deliverable.location.address);
-    int sent = sendto(udp_socket, data, serialized_packet.size(), 0, to, sizeof(deliverable.location.address));
+    const sockaddr* to = reinterpret_cast<const sockaddr*>(&deliverable.destination);
+    int sent = sendto(udp_socket, data, serialized_packet.size(), 0, to, sizeof(deliverable.destination));
 
     if (sent == SOCKET_ERROR || static_cast<size_t>(sent) != serialized_packet.size()) {
         std::cout << "Error sending packet: " << sctp_error_string() << std::endl;

@@ -152,6 +152,8 @@ struct error_chunk_value {
     std::vector<error_cause> causes;
 };
 
+// The fixed part of the body, which the peer's other addresses follow, 4 bytes
+// each. STATE_COOKIE_SIZE is a cookie listing none.
 constexpr size_t STATE_COOKIE_BODY_SIZE = 64;
 constexpr size_t STATE_COOKIE_MAC_SIZE = 32;
 constexpr size_t STATE_COOKIE_SIZE = STATE_COOKIE_BODY_SIZE + STATE_COOKIE_MAC_SIZE;
@@ -178,6 +180,7 @@ struct State_Cookie {
     uint16_t peer_in_streams;
     uint32_t local_tie_tag;
     uint32_t peer_tie_tag;
+    std::vector<uint32_t> peer_addresses; // host order; the INIT's IPv4 addresses other than peer_ipv4
     uint8_t mac[STATE_COOKIE_MAC_SIZE];
 };
 

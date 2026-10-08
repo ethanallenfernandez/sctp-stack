@@ -13,13 +13,15 @@ void serialize_data_chunk(const data_chunk_value& v,std::vector<uint8_t>& out);
 void serialize_sack_chunk(const sack_chunk_value& v, std::vector<uint8_t>& out);
 void serialize_cookie_echo_chunk(const cookie_echo_chunk_value& v, std::vector<uint8_t>& out);
 void serialize_error_chunk(const error_chunk_value& v, std::vector<uint8_t>& out);
-// MAC is a plain suffix, so callers can sign the first STATE_COOKIE_BODY_SIZE
-// bytes of the result and write the digest straight into its tail.
+// MAC is a plain suffix, so callers can sign all but the last
+// STATE_COOKIE_MAC_SIZE bytes of the result and write the digest into its tail.
 std::vector<uint8_t> serialize_state_cookie(const State_Cookie& cookie);
 
 
 void append_parameter(std::vector<uint8_t>& out, uint16_t type, const uint8_t* value, size_t len);
 bool find_parameter(const std::vector<uint8_t>& params, uint16_t type, std::vector<uint8_t>& value_out);
+// Every IPv4 Address parameter, host order.
+std::vector<uint32_t> find_ipv4_addresses(const std::vector<uint8_t>& params);
 
 struct Parameter_Scan {
     std::vector<uint8_t> recognized;              // only these are processed

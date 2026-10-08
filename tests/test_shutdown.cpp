@@ -76,6 +76,7 @@ struct SCTP_Socket_Test_Access {
             assoc.next_tsn = NEXT_TSN;
             assoc.cumulative_tsn_ack = cumulative_tsn_ack;
             assoc.last_peer_tsn = LAST_PEER_TSN;
+            assoc.primary_path = key.address;
             socket.associations.insert_or_assign(key, assoc);
             socket.schedule_heartbeat(key, assoc.rto);
         }
@@ -197,7 +198,7 @@ struct SCTP_Socket_Test_Access {
 
     static Result user_shutdown(Association_State state) {
         Stack stack(state, NEXT_TSN - 1);
-        stack.socket.enqueue_packet(Deliverable{stack.key, SCTP_Packet{{}, {{{INIT, 0, 0}, init_chunk_value{}}}}});
+        stack.socket.enqueue_packet(Deliverable{stack.key, stack.key.address, SCTP_Packet{{}, {{{INIT, 0, 0}, init_chunk_value{}}}}});
         stack.socket.schedule_expiration(Expiration_Key{stack.key, Expiration_Timer_Type::T1_INIT},
             std::chrono::steady_clock::now() + std::chrono::seconds(1), Deliverable{});
         stack.socket.sctp_shutdown(stack.key);

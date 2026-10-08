@@ -74,6 +74,7 @@ struct SCTP_Socket_Test_Access {
         association.cumulative_tsn_ack = cumulative_tsn_ack;
         association.next_tsn = cumulative_tsn_ack + 1;
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
+        association.primary_path = key.address;
         stack.associations.insert_or_assign(key, std::move(association));
         return key;
     }
@@ -114,7 +115,7 @@ struct SCTP_Socket_Test_Access {
                 .number_of_duplicate_tsns = 0,
                 .gap_ack_blocks = std::move(gaps),
                 .duplicate_tsns = {}}};
-        stack.handle_sack(SCTP_Common_Header{}, chunk, key.address);
+        stack.handle_sack(SCTP_Common_Header{}, chunk, key, key.address);
     }
 
     static void enter_fast_recovery(
@@ -431,7 +432,7 @@ void test_t1_cookie_exhaustion() {
     check(began, "association reached COOKIE_ECHOED");
     if (began) {
         SCTP_Socket_Test_Access::exhaust_cookie_timer(
-            stack, key, Deliverable{key, echo});
+            stack, key, Deliverable{key, key.address, echo});
         check(!SCTP_Socket_Test_Access::has_association(stack, key),
               "eighth retry exhaustion removed the association");
         check(SCTP_Socket_Test_Access::association_work_is_gone(stack, key),

@@ -47,6 +47,7 @@ struct SCTP_Socket_Test_Access {
         assoc.peer_ver_tag = PEER_TAG;
         assoc.state = ESTABLISHED;
         assoc.last_peer_tsn = 0;
+        assoc.primary_path = key.address;
         stack.associations.insert_or_assign(key, assoc);
     }
 
@@ -58,7 +59,7 @@ struct SCTP_Socket_Test_Access {
     static void fire_heartbeat_timer(SCTP_Socket& stack, const Association_Key& key) {
         stack.handle_expiration(Expiration_Fallback{
             Expiration_Key{key, Expiration_Timer_Type::HEARTBEAT},
-            Clock::now(), 0, Deliverable{key, SCTP_Packet{}}});
+            Clock::now(), 0, Deliverable{key, {}, SCTP_Packet{}}});
     }
 
     static std::vector<SCTP_Packet> drain_sends(SCTP_Socket& stack) {

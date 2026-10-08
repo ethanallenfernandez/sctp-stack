@@ -52,6 +52,7 @@ struct SCTP_Socket_Test_Access {
         association.next_tsn = INITIAL_TSN;
         association.pmdcs = PMDCS;
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
+        association.primary_path = key.address;
         stack.associations.insert_or_assign(key, association);
         return key;
     }
@@ -91,6 +92,7 @@ struct SCTP_Socket_Test_Access {
         association.in_streams = 4;
         association.pmdcs = PMDCS;
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
+        association.primary_path = key.address;
         stack.associations.insert_or_assign(key, association);
         return key;
     }
