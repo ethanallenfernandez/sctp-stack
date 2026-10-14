@@ -69,7 +69,8 @@ class Send_Queue {
 
         // Drops acked DATA from pending retransmissions, and empty packets.
         void remove_acked_retransmissions(const Association_Key& location, const sack_chunk_value& sack);
-        void remove_retransmissions_of_type(const Association_Key& location, Chunk_Type type);
+        // With a destination, only from packets bound there.
+        void remove_retransmissions_of_type(const Association_Key& location, Chunk_Type type, const sockaddr_in* destination = nullptr);
 
         void clear();
 

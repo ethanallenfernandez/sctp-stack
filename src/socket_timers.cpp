@@ -16,7 +16,7 @@
 
 void SCTP_Socket::handle_expiration(const Expiration_Fallback& fallback) {
     if (fallback.key.type == Expiration_Timer_Type::T3_RTX) {
-        handle_t3_expiration(fallback.key.location);
+        handle_t3_expiration(fallback.key.location, fallback.key.path.address);
         return;
     }
     if (fallback.key.type == Expiration_Timer_Type::DELAYED_SACK) {
@@ -24,7 +24,7 @@ void SCTP_Socket::handle_expiration(const Expiration_Fallback& fallback) {
         return;
     }
     if (fallback.key.type == Expiration_Timer_Type::HEARTBEAT) {
-        handle_heartbeat_expiration(fallback.key.location);
+        handle_heartbeat_expiration(fallback.key.location, fallback.key.path.address);
         return;
     }
     if (fallback.key.type == Expiration_Timer_Type::T2_SHUTDOWN) {
@@ -75,7 +75,7 @@ void SCTP_Socket::handle_expiration(const Expiration_Fallback& fallback) {
     }
 }
 
-void SCTP_Socket::record_data_sent(const Association_Key& location, const data_chunk_value& data, std::chrono::steady_clock::time_point sent_at) {
+void SCTP_Socket::record_data_sent(const Association_Key& location, const sockaddr_in& destination, const data_chunk_value& data, std::chrono::steady_clock::time_point sent_at) {
     std::lock_guard<std::mutex> assoc_lock(associations_mutex);
     auto association = associations.find(location);
     if (association == associations.end() || !transmits_data(association->second.state)) {
@@ -83,8 +83,10 @@ void SCTP_Socket::record_data_sent(const Association_Key& location, const data_c
     }
 
     Association& assoc = association->second;
-    assoc.data_sent_at = sent_at;
-    assoc.idle_decaying = false;
+    Peer_Path* path = find_path(assoc, destination);
+    Peer_Path& sent_on = path != nullptr ? *path : primary(assoc);
+    sent_on.data_sent_at = sent_at;
+    sent_on.idle_decaying = false;
     uint32_t chunk_size = static_cast<uint32_t>(data_chunk_wire_size(data));
     bool exceeds_rwnd = chunk_size > assoc.peer_rwnd;
     assoc.peer_rwnd -= std::min(assoc.peer_rwnd, chunk_size);
@@ -92,9 +94,10 @@ void SCTP_Socket::record_data_sent(const Association_Key& location, const data_c
     if (outstanding == assoc.outstanding_data.end()) {
         assoc.zero_window_probing = assoc.zero_window_probe_allowed && exceeds_rwnd;
         assoc.zero_window_probe_allowed = false;
+        sent_on.new_data_sent_at = sent_at;
         assoc.outstanding_data.emplace(
             data.tsn,
-            Outstanding_Data{data, sent_at, sent_at, false, false, 0, false, false}
+            Outstanding_Data{data, sent_at, sent_at, false, false, 0, false, false, sent_on.address}
         );
         if (!assoc.has_rtt_measurement_tsn) {
             assoc.has_rtt_measurement_tsn = true;
@@ -106,38 +109,32 @@ void SCTP_Socket::record_data_sent(const Association_Key& location, const data_c
     outstanding->second.last_sent = sent_at;
     outstanding->second.retransmitted = true;
     outstanding->second.gap_acked = false;
+    outstanding->second.destination = sent_on.address;
     if (assoc.has_rtt_measurement_tsn && tsn_lte(data.tsn, assoc.rtt_measurement_tsn)) {
         assoc.has_rtt_measurement_tsn = false;
     }
 }
 
-void SCTP_Socket::start_t3_if_stopped(const Association_Key& location) {
-    Expiration_Key key{location, Expiration_Timer_Type::T3_RTX};
-    {
-        if (expirations.is_active(key)) {
-            return;
-        }
+void SCTP_Socket::start_t3_if_stopped(const Association_Key& location, const sockaddr_in& destination) {
+    if (!expirations.is_active(Expiration_Key{location, Expiration_Timer_Type::T3_RTX, Association_Key{destination}})) {
+        restart_t3(location, destination);
     }
-    restart_t3(location);
 }
 
-void SCTP_Socket::restart_t3(const Association_Key& location) {
+void SCTP_Socket::restart_t3(const Association_Key& location, const sockaddr_in& destination) {
+    Expiration_Key timer{location, Expiration_Timer_Type::T3_RTX, Association_Key{destination}};
     std::chrono::microseconds rto;
     {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
         auto association = associations.find(location);
-        if (association == associations.end() || !has_unacknowledged_data(association->second)) {
-            cancel_expiration(Expiration_Key{location, Expiration_Timer_Type::T3_RTX});
+        const Peer_Path* path = association == associations.end() ? nullptr : find_path(association->second, destination);
+        if (path == nullptr || !has_unacknowledged_data(association->second, *path)) {
+            cancel_expiration(timer);
             return;
         }
-        rto = association->second.rto;
+        rto = path->rto;
     }
-
-    schedule_expiration(
-        Expiration_Key{location, Expiration_Timer_Type::T3_RTX},
-        std::chrono::steady_clock::now() + rto,
-        Deliverable{location, {}, SCTP_Packet{}}
-    );
+    schedule_expiration(timer, std::chrono::steady_clock::now() + rto, Deliverable{location, {}, SCTP_Packet{}});
 }
 
 void SCTP_Socket::restart_t2(const Association_Key& location) {
@@ -148,7 +145,7 @@ void SCTP_Socket::restart_t2(const Association_Key& location) {
         if (association == associations.end()) {
             return;
         }
-        rto = association->second.rto;
+        rto = data_path(association->second).rto;
     }
 
     schedule_expiration(
@@ -173,9 +170,10 @@ void SCTP_Socket::handle_t2_expiration(const Association_Key& location) {
         }
 
         Association& assoc = association->second;
-        assoc.rto = std::min(assoc.rto * 2, std::chrono::duration_cast<std::chrono::microseconds>(sctp_parameters::RTO_MAX));
+        Peer_Path& path = data_path(assoc);
+        path.rto = std::min(path.rto * 2, std::chrono::duration_cast<std::chrono::microseconds>(sctp_parameters::RTO_MAX));
         unreachable = ++assoc.error_count > assoc.error_threshold;
-        destination = assoc.primary_path;
+        destination = path.address;
         uint16_t src_port = ntohs(local_address.sin_port);
         uint16_t des_port = ntohs(location.address.sin_port);
         packet = assoc.state == SHUTDOWN_SENT
@@ -207,7 +205,7 @@ void SCTP_Socket::handle_t5_expiration(const Association_Key& location) {
             return;
         }
         peer_tag = association->second.peer_ver_tag;
-        destination = association->second.primary_path;
+        destination = data_path(association->second).address;
     }
 
     remove_association(location);
@@ -217,33 +215,43 @@ void SCTP_Socket::handle_t5_expiration(const Association_Key& location) {
     std::cout << "Association aborted: shutdown did not complete in time" << std::endl;
 }
 
-void SCTP_Socket::handle_t3_expiration(const Association_Key& location) {
+// The timed-out chunks are moved to the path they will be retransmitted on,
+// so a queued retransmission still bound for the failed path would duplicate them.
+void SCTP_Socket::handle_t3_expiration(const Association_Key& location, const sockaddr_in& destination) {
     bool unreachable = false;
     {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
         auto association = associations.find(location);
-        if (association == associations.end() || !transmits_data(association->second.state) || !has_unacknowledged_data(association->second)) {
+        if (association == associations.end() || !transmits_data(association->second.state)) {
+            return;
+        }
+        Association& assoc = association->second;
+        Peer_Path* expired = find_path(assoc, destination);
+        if (expired == nullptr || !has_unacknowledged_data(assoc, *expired)) {
             return;
         }
 
-        Association& assoc = association->second;
+        Peer_Path& path = *expired;
         if (!assoc.zero_window_probing) {
-            assoc.ssthresh = std::max(assoc.cwnd / 2, 4U * assoc.pmdcs);
-            assoc.cwnd = assoc.pmdcs;
-            assoc.partial_bytes_acked = 0;
-            assoc.single_packet_in_flight = true;
+            path.ssthresh = std::max(path.cwnd / 2, 4U * assoc.pmdcs);
+            path.cwnd = assoc.pmdcs;
+            path.partial_bytes_acked = 0;
+            path.single_packet_in_flight = true;
         }
-        assoc.rto = std::min(assoc.rto * 2, std::chrono::duration_cast<std::chrono::microseconds>(sctp_parameters::RTO_MAX));
+        path.rto = std::min(path.rto * 2, std::chrono::duration_cast<std::chrono::microseconds>(sctp_parameters::RTO_MAX));
         if (!assoc.zero_window_probing || !assoc.sack_since_t3) {
+            count_path_error(location, path);
             unreachable = ++assoc.error_count > assoc.error_threshold;
         }
         assoc.sack_since_t3 = false;
 
+        sockaddr_in target = retransmission_path(assoc, path.address).address;
         for (auto& [tsn, outstanding] : assoc.outstanding_data) {
-            if (outstanding.gap_acked || outstanding.pending_retransmission) {
+            if (outstanding.gap_acked || outstanding.pending_retransmission || &destination_of(assoc, outstanding) != &path) {
                 continue;
             }
             outstanding.pending_retransmission = true;
+            outstanding.destination = target;
             assoc.peer_rwnd += static_cast<uint32_t>(data_chunk_wire_size(outstanding.data));
             (void)tsn;
         }
@@ -256,45 +264,51 @@ void SCTP_Socket::handle_t3_expiration(const Association_Key& location) {
         return;
     }
 
-    // Everything unacknowledged is now marked, so a queued packet would only
-    // duplicate chunks the first one below is about to carry.
-    sends.remove_retransmissions_of_type(location, DATA);
+    sends.remove_retransmissions_of_type(location, DATA, &destination);
     schedule_pending_retransmission(location);
 }
 
-// RFC 9260 8.3: probe only destinations that are idle, on HB.interval plus the
-// RTO, jittered. Outstanding DATA is the idle test here: T3-rtx is already
-// probing the path, and its expiry counts the same error.
-void SCTP_Socket::handle_heartbeat_expiration(const Association_Key& location) {
+// RFC 9260 8.3. A path's timer runs to its next probe, or, while a probe is
+// out, to one RTO after it was sent. A path is idle when no new DATA went to it
+// since its last probe was due.
+void SCTP_Socket::handle_heartbeat_expiration(const Association_Key& location, const sockaddr_in& destination) {
     Deliverable probe;
-    bool send_probe = false;
     bool unreachable = false;
-    std::chrono::microseconds rto;
     {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
         auto association = associations.find(location);
         if (association == associations.end() || !transmits_data(association->second.state)) {
             return;
         }
-
         Association& assoc = association->second;
-        if (assoc.hb_outstanding && ++assoc.error_count > assoc.error_threshold) {
-            unreachable = true;
+        Peer_Path* path = find_path(assoc, destination);
+        if (path == nullptr) {
+            return;
         }
-        assoc.hb_outstanding = false;
-        rto = assoc.rto;
 
-        if (!unreachable && !has_unacknowledged_data(assoc)) {
-            generate_random(assoc.hb_nonce);
-            assoc.hb_outstanding = true;
-            assoc.hb_sent_at = std::chrono::steady_clock::now();
-            probe = Deliverable{location, assoc.primary_path, build_heartbeat(
-                ntohs(local_address.sin_port),
-                ntohs(location.address.sin_port),
-                assoc.peer_ver_tag,
-                heartbeat_info(assoc.hb_nonce, assoc.primary_path)
-            )};
-            send_probe = true;
+        auto now = std::chrono::steady_clock::now();
+        bool probe_now = !path->hb_outstanding;
+        if (path->hb_outstanding) {
+            path->hb_outstanding = false;
+            path->rto = std::min(path->rto * 2, std::chrono::duration_cast<std::chrono::microseconds>(sctp_parameters::RTO_MAX));
+            bool was_probing = probes_for_confirmation(assoc, *path);
+            bool carries_data = path->confirmed && &data_path(assoc) == path;
+            count_path_error(location, *path);
+            unreachable = carries_data && ++assoc.error_count > assoc.error_threshold;
+            if (was_probing && !path->active) {
+                arm_confirmation_probes(location, assoc);
+            }
+            probe_now = probes_for_confirmation(assoc, *path) || now >= path->hb_next;
+        }
+
+        if (!unreachable) {
+            if (probe_now && path->hb_enabled) {
+                if (path->new_data_sent_at < path->hb_period_start) {
+                    probe = build_probe(location, assoc, *path);
+                }
+                plan_next_probe(assoc, *path, now);
+            }
+            arm_heartbeat(location, assoc, *path);
         }
     }
 
@@ -305,11 +319,9 @@ void SCTP_Socket::handle_heartbeat_expiration(const Association_Key& location) {
         std::cout << "Association failed: peer unreachable" << std::endl;
         return;
     }
-
-    if (send_probe) {
+    if (!probe.packet.chunks.empty()) {
         enqueue_packet(std::move(probe));
     }
-    schedule_heartbeat(location, rto);
 }
 
 void SCTP_Socket::handle_zero_window_probe_expiration(const Association_Key& location) {
@@ -320,36 +332,105 @@ void SCTP_Socket::handle_zero_window_probe_expiration(const Association_Key& loc
     }
 }
 
-void SCTP_Socket::schedule_heartbeat(const Association_Key& location, std::chrono::microseconds rto) {
-    uint32_t jitter;
-    generate_random(jitter);
-    int64_t span = rto.count();
-    std::chrono::microseconds offset{static_cast<int64_t>(jitter % static_cast<uint64_t>(span + 1)) - span / 2};
-
-    schedule_expiration(
-        Expiration_Key{location, Expiration_Timer_Type::HEARTBEAT},
-        std::chrono::steady_clock::now() + sctp_parameters::HB_INTERVAL + rto + offset,
-        Deliverable{location, {}, SCTP_Packet{}}
-    );
-}
-
-void SCTP_Socket::record_heartbeat_sent(const Association_Key& location, std::chrono::steady_clock::time_point sent_at) {
-    std::lock_guard<std::mutex> assoc_lock(associations_mutex);
-    auto association = associations.find(location);
-    if (association != associations.end() && association->second.hb_outstanding) {
-        association->second.hb_sent_at = sent_at;
+void SCTP_Socket::start_heartbeats(const Association_Key& key, Association& assoc) {
+    auto now = std::chrono::steady_clock::now();
+    for (Peer_Path& path : assoc.peer_address_list) {
+        plan_next_probe(assoc, path, now);
+        if (probes_for_confirmation(assoc, path)) {
+            path.hb_next = now;
+        }
+        arm_heartbeat(key, assoc, path);
     }
 }
 
-void SCTP_Socket::update_rto(Association& assoc, std::chrono::microseconds measurement) {
-    if (!assoc.has_srtt) {
-        assoc.srtt = measurement;
-        assoc.rttvar = measurement / 2;
-        assoc.has_srtt = true;
+// HB.interval plus the RTO, jittered by half the RTO either way; every RTO for
+// a path being confirmed.
+void SCTP_Socket::plan_next_probe(const Association& assoc, Peer_Path& path, std::chrono::steady_clock::time_point now) {
+    path.hb_period_start = now;
+    if (probes_for_confirmation(assoc, path)) {
+        path.hb_next = now + path.rto;
+        return;
+    }
+    uint32_t jitter;
+    generate_random(jitter);
+    int64_t span = path.rto.count();
+    std::chrono::microseconds offset{static_cast<int64_t>(jitter % static_cast<uint64_t>(span + 1)) - span / 2};
+    path.hb_next = now + assoc.hb_interval + path.rto + offset;
+}
+
+Deliverable SCTP_Socket::build_probe(const Association_Key& key, const Association& assoc, Peer_Path& path) {
+    generate_random(path.hb_nonce);
+    path.hb_outstanding = true;
+    path.hb_sent_at = std::chrono::steady_clock::now();
+    return Deliverable{key, path.address, build_heartbeat(
+        ntohs(local_address.sin_port),
+        ntohs(key.address.sin_port),
+        assoc.peer_ver_tag,
+        heartbeat_info(path.hb_nonce, path.address)
+    )};
+}
+
+void SCTP_Socket::arm_heartbeat(const Association_Key& key, const Association& assoc, const Peer_Path& path) {
+    Expiration_Key timer{key, Expiration_Timer_Type::HEARTBEAT, Association_Key{path.address}};
+    if (path.hb_outstanding) {
+        schedule_expiration(timer, path.hb_sent_at + path.rto, Deliverable{key, {}, SCTP_Packet{}});
+    } else if (!path.hb_enabled || (!path.confirmed && path.active && !probes_for_confirmation(assoc, path))) {
+        cancel_expiration(timer);
+    } else {
+        schedule_expiration(timer, path.hb_next, Deliverable{key, {}, SCTP_Packet{}});
+    }
+}
+
+// A path that has just taken a turn at confirmation is probed at once.
+void SCTP_Socket::arm_confirmation_probes(const Association_Key& key, Association& assoc) {
+    auto now = std::chrono::steady_clock::now();
+    for (Peer_Path& path : assoc.peer_address_list) {
+        if (probes_for_confirmation(assoc, path) && !path.hb_outstanding
+                && !expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::HEARTBEAT, Association_Key{path.address}})) {
+            path.hb_period_start = now;
+            path.hb_next = now;
+            arm_heartbeat(key, assoc, path);
+        }
+    }
+}
+
+// 8.3: an inactive path stops counting.
+void SCTP_Socket::count_path_error(const Association_Key& key, Peer_Path& path) {
+    if (path.active && ++path.error_count > sctp_parameters::PATH_MAX_RETRANS) {
+        path.active = false;
+        notify_peer_addr_change(key, path.address, Peer_Addr_State::ADDR_UNREACHABLE);
+    }
+}
+
+void SCTP_Socket::clear_path_errors(const Association_Key& key, Peer_Path& path) {
+    path.error_count = 0;
+    if (!path.active) {
+        path.active = true;
+        notify_peer_addr_change(key, path.address, Peer_Addr_State::ADDR_AVAILABLE);
+    }
+}
+
+void SCTP_Socket::record_heartbeat_sent(const Association_Key& location, const sockaddr_in& destination, std::chrono::steady_clock::time_point sent_at) {
+    std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+    auto association = associations.find(location);
+    if (association == associations.end()) {
+        return;
+    }
+    Peer_Path* path = find_path(association->second, destination);
+    if (path != nullptr && path->hb_outstanding) {
+        path->hb_sent_at = sent_at;
+    }
+}
+
+void SCTP_Socket::update_rto(Peer_Path& path, std::chrono::microseconds measurement) {
+    if (!path.has_srtt) {
+        path.srtt = measurement;
+        path.rttvar = measurement / 2;
+        path.has_srtt = true;
     } else {
         using Floating_Microseconds = std::chrono::duration<double, std::micro>;
-        Floating_Microseconds previous_srtt{assoc.srtt};
-        Floating_Microseconds previous_rttvar{assoc.rttvar};
+        Floating_Microseconds previous_srtt{path.srtt};
+        Floating_Microseconds previous_rttvar{path.rttvar};
         Floating_Microseconds new_rtt_measurement{measurement};
         Floating_Microseconds deviation = previous_srtt > new_rtt_measurement ? previous_srtt - new_rtt_measurement : new_rtt_measurement - previous_srtt;
 
@@ -358,22 +439,22 @@ void SCTP_Socket::update_rto(Association& assoc, std::chrono::microseconds measu
         Floating_Microseconds new_rttvar = (1.0 - sctp_parameters::RTO_BETA) * previous_rttvar + sctp_parameters::RTO_BETA * deviation;
         Floating_Microseconds new_srtt = (1.0 - sctp_parameters::RTO_ALPHA) * previous_srtt + sctp_parameters::RTO_ALPHA * new_rtt_measurement;
 
-        assoc.rttvar = std::chrono::duration_cast<std::chrono::microseconds>(new_rttvar);
-        assoc.srtt = std::chrono::duration_cast<std::chrono::microseconds>(new_srtt);
+        path.rttvar = std::chrono::duration_cast<std::chrono::microseconds>(new_rttvar);
+        path.srtt = std::chrono::duration_cast<std::chrono::microseconds>(new_srtt);
     }
 
-    if (assoc.rttvar.count() == 0) {
-        assoc.rttvar = CLOCK_GRANULARITY;
+    if (path.rttvar.count() == 0) {
+        path.rttvar = CLOCK_GRANULARITY;
     }
-    assoc.rto = std::clamp(
-        assoc.srtt + assoc.rttvar * 4,
+    path.rto = std::clamp(
+        path.srtt + path.rttvar * 4,
         std::chrono::duration_cast<std::chrono::microseconds>(sctp_parameters::RTO_MIN),
         std::chrono::duration_cast<std::chrono::microseconds>(sctp_parameters::RTO_MAX)
     );
 }
 
-void SCTP_Socket::schedule_pending_retransmission(
-        const Association_Key& key) {
+// One packet of the lowest marked TSNs that share a destination, sent there.
+void SCTP_Socket::schedule_pending_retransmission(const Association_Key& key, bool gated) {
     Deliverable retransmission;
     {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
@@ -389,18 +470,26 @@ void SCTP_Socket::schedule_pending_retransmission(
                 ordered.push_back({entry.first, &entry.second});
             }
         }
+        if (ordered.empty()) {
+            return;
+        }
         std::sort(ordered.begin(), ordered.end(), [&](const auto& lhs, const auto& rhs) {
             return static_cast<uint32_t>(lhs.first - assoc.cumulative_tsn_ack)
                 < static_cast<uint32_t>(rhs.first - assoc.cumulative_tsn_ack);
         });
 
+        const Peer_Path& to = destination_of(assoc, *ordered.front().second);
+        if (gated && !cwnd_open(assoc, to)) {
+            return;
+        }
         std::vector<data_chunk_value> bundle;
         size_t packet_size = SCTP_COMMON_HEADER_SIZE;
         for (const auto& [tsn, outstanding] : ordered) {
             size_t chunk_size = data_chunk_wire_size(outstanding->data);
-            if (!bundle.empty()
-                    && packet_size + chunk_size
-                        > SCTP_COMMON_HEADER_SIZE + assoc.pmdcs) {
+            if (&destination_of(assoc, *outstanding) != &to) {
+                continue;
+            }
+            if (!bundle.empty() && packet_size + chunk_size > SCTP_COMMON_HEADER_SIZE + assoc.pmdcs) {
                 break;
             }
             bundle.push_back(outstanding->data);
@@ -408,10 +497,7 @@ void SCTP_Socket::schedule_pending_retransmission(
             packet_size += chunk_size;
             (void)tsn;
         }
-        if (bundle.empty()) {
-            return;
-        }
-        retransmission = Deliverable{key, assoc.primary_path, build_data(
+        retransmission = Deliverable{key, to.address, build_data(
             ntohs(local_address.sin_port),
             ntohs(key.address.sin_port),
             assoc.peer_ver_tag,

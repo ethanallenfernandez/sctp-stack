@@ -67,6 +67,12 @@ public:
     void sctp_shutdown(const sockaddr_in& association_id);
     void sctp_shutdown(const Association_Key& association_id);
     std::optional<Notification> sctp_recv_notification(int timeout_ms = 0);
+    // Each fails if the association or the destination is unknown. A new
+    // interval applies to every destination of the association.
+    bool sctp_change_heartbeat(const Association_Key& association_id, const sockaddr_in& destination, bool enabled, std::optional<std::chrono::milliseconds> interval = std::nullopt);
+    bool sctp_request_heartbeat(const Association_Key& association_id, const sockaddr_in& destination);
+    // Refused for an UNCONFIRMED destination, which nothing may be sent to.
+    bool sctp_set_primary(const Association_Key& association_id, const sockaddr_in& destination);
     void sctp_subscribe(Notification_Type type, bool on);
     
     inline Association_Key get_this_association_key() {
@@ -104,6 +110,7 @@ private:
     void forget_peer_addresses(const Association_Key& key);
     void close_associations(std::chrono::milliseconds linger);
     void notify_assoc_change(const Association_Key& key, Assoc_Change_State state);
+    void notify_peer_addr_change(const Association_Key& key, const sockaddr_in& address, Peer_Addr_State state);
     void run_expire();
     void run_sending();
     void start_transmission_opportunity();
@@ -125,20 +132,28 @@ private:
     void cancel_expiration(const Expiration_Key& key);
     void cancel_expirations(const Association_Key& location);
     void handle_expiration(const Expiration_Fallback& fallback);
-    void handle_t3_expiration(const Association_Key& location);
+    void handle_t3_expiration(const Association_Key& location, const sockaddr_in& destination);
     void handle_delayed_sack_expiration(const Association_Key& location);
-    void handle_heartbeat_expiration(const Association_Key& location);
+    void handle_heartbeat_expiration(const Association_Key& location, const sockaddr_in& destination);
     void handle_zero_window_probe_expiration(const Association_Key& location);
-    void schedule_heartbeat(const Association_Key& location, std::chrono::microseconds rto);
-    void record_heartbeat_sent(const Association_Key& location, std::chrono::steady_clock::time_point sent_at);
-    void record_data_sent(const Association_Key& location, const data_chunk_value& data, std::chrono::steady_clock::time_point sent_at);
-    void start_t3_if_stopped(const Association_Key& location);
-    void restart_t3(const Association_Key& location);
+    // These take associations_mutex as held.
+    void start_heartbeats(const Association_Key& key, Association& assoc);
+    void arm_heartbeat(const Association_Key& key, const Association& assoc, const Peer_Path& path);
+    void arm_confirmation_probes(const Association_Key& key, Association& assoc);
+    void plan_next_probe(const Association& assoc, Peer_Path& path, std::chrono::steady_clock::time_point now);
+    Deliverable build_probe(const Association_Key& key, const Association& assoc, Peer_Path& path);
+    void count_path_error(const Association_Key& key, Peer_Path& path);
+    void clear_path_errors(const Association_Key& key, Peer_Path& path);
+    void record_heartbeat_sent(const Association_Key& location, const sockaddr_in& destination, std::chrono::steady_clock::time_point sent_at);
+    void record_data_sent(const Association_Key& location, const sockaddr_in& destination, const data_chunk_value& data, std::chrono::steady_clock::time_point sent_at);
+    void start_t3_if_stopped(const Association_Key& location, const sockaddr_in& destination);
+    void restart_t3(const Association_Key& location, const sockaddr_in& destination);
     void handle_t2_expiration(const Association_Key& location);
     void handle_t5_expiration(const Association_Key& location);
     void restart_t2(const Association_Key& location);
-    void schedule_pending_retransmission(const Association_Key& key);
-    void update_rto(Association& assoc, std::chrono::microseconds measurement);
+    // Gated, it waits for the destination's cwnd; T3-rtx and Fast Retransmit send their first packet regardless.
+    void schedule_pending_retransmission(const Association_Key& key, bool gated = false);
+    void update_rto(Peer_Path& path, std::chrono::microseconds measurement);
     void handle_recv_packet(const uint8_t* data, size_t n, const sockaddr_in& src);
     Packet_Validation validate_verification_tag(const SCTP_Packet& pkt, const Association_Key& key);
     Packet_Validation ootb_response(const SCTP_Packet& pkt);

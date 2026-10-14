@@ -5,6 +5,7 @@
 // installs a working socket and verifies that the same TSN reaches the peer.
 
 #include "serialize.hpp"
+#include "socket_internal.hpp"
 #include <sctp/platform.hpp>
 #include <sctp/socket.hpp>
 
@@ -33,9 +34,9 @@ struct SCTP_Socket_Test_Access {
         association.state = ESTABLISHED;
         association.peer_ver_tag = 0x10203040;
         association.next_tsn = initial_tsn;
-        association.rto = sctp_parameters::RTO_INITIAL;
+        association.peer_address_list = {Peer_Path{peer, true}};
         association.pmdcs = 1200;
-        association.cwnd = 4380;
+        primary(association).cwnd = 4380;
         association.peer_rwnd = 65535;
         association.out_streams = 1;
         association.next_ssn.assign(1, 0);

@@ -3,6 +3,7 @@
 #include <sctp/socket.hpp>
 #include <sctp/utils.hpp>
 #include "serialize.hpp"
+#include "socket_internal.hpp"
 
 #include <chrono>
 #include <cstdio>
@@ -152,7 +153,7 @@ struct SCTP_Socket_Test_Access {
     static uint64_t t3_generation(
             SCTP_Socket& stack, const Association_Key& key) {
         return stack.expirations.generation_of(
-            Expiration_Key{key, Expiration_Timer_Type::T3_RTX});
+            Expiration_Key{key, Expiration_Timer_Type::T3_RTX, key});
     }
 };
 
@@ -553,8 +554,8 @@ void test_fast_retransmit(uint32_t first_tsn, const std::string& label) {
 
     Association during = SCTP_Socket_Test_Access::association(stack, key);
     check(during.in_fast_recovery, "sender entered Fast Recovery");
-    check(during.cwnd == during.ssthresh
-              && during.ssthresh >= 4 * during.pmdcs,
+    check(primary(during).cwnd == primary(during).ssthresh
+              && primary(during).ssthresh >= 4 * during.pmdcs,
           "Fast Recovery applied the RFC congestion reduction");
     check(during.fast_recovery_exit_tsn == first_tsn + 4,
           "Fast Recovery recorded the highest outstanding TSN");

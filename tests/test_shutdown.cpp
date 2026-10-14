@@ -5,6 +5,7 @@
 #include <sctp/socket.hpp>
 #include <sctp/platform.hpp>
 #include "serialize.hpp"
+#include "socket_internal.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -78,7 +79,7 @@ struct SCTP_Socket_Test_Access {
             assoc.last_peer_tsn = LAST_PEER_TSN;
             assoc.primary_path = key.address;
             socket.associations.insert_or_assign(key, assoc);
-            socket.schedule_heartbeat(key, assoc.rto);
+            socket.start_heartbeats(key, socket.associations.at(key));
         }
 
         void add_outstanding(uint32_t tsn, bool gap_acked) {
@@ -97,7 +98,7 @@ struct SCTP_Socket_Test_Access {
                 auto gap = it->second.outstanding_data.find(NEXT_TSN - 1);
                 result.gap_ack_kept = gap != it->second.outstanding_data.end() && gap->second.gap_acked;
                 result.error_count = it->second.error_count;
-                result.rto = it->second.rto;
+                result.rto = primary(it->second).rto;
                 result.peer_tag = it->second.peer_ver_tag;
             }
             result.delivered = socket.receives.messages(key);
@@ -107,9 +108,9 @@ struct SCTP_Socket_Test_Access {
                 socket.sends.commit(*pending);
             }
             result.t2_armed = socket.expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::T2_SHUTDOWN});
-            result.t3_armed = socket.expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::T3_RTX});
+            result.t3_armed = socket.expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::T3_RTX, key});
             result.t5_armed = socket.expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::T5_SHUTDOWN_GUARD});
-            result.heartbeat_armed = socket.expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::HEARTBEAT});
+            result.heartbeat_armed = socket.expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::HEARTBEAT, key});
             while (auto notification = socket.notifications.dequeue()) {
                 result.notifications.push_back(*notification);
             }
@@ -276,15 +277,15 @@ struct SCTP_Socket_Test_Access {
         Stack stack(state, NEXT_TSN - 1);
         data_chunk_value data{NEXT_TSN, 0, 0, 0, {'h', 'i'}};
         stack.socket.associations.at(stack.key).next_tsn = NEXT_TSN + 1;
-        stack.socket.record_data_sent(stack.key, data, std::chrono::steady_clock::now());
-        stack.socket.handle_t3_expiration(stack.key);
+        stack.socket.record_data_sent(stack.key, stack.key.address, data, std::chrono::steady_clock::now());
+        stack.socket.handle_t3_expiration(stack.key, stack.key.address);
         return stack.collect();
     }
 
     static Result heartbeat_expires(Association_State state) {
         Stack stack(state, NEXT_TSN - 1);
-        stack.socket.expirations.cancel(Expiration_Key{stack.key, Expiration_Timer_Type::HEARTBEAT});
-        stack.socket.handle_heartbeat_expiration(stack.key);
+        stack.socket.expirations.cancel(Expiration_Key{stack.key, Expiration_Timer_Type::HEARTBEAT, stack.key});
+        stack.socket.handle_heartbeat_expiration(stack.key, stack.key.address);
         return stack.collect();
     }
 

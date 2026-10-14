@@ -152,13 +152,14 @@ void Send_Queue::remove_acked_retransmissions(const Association_Key& location, c
     retransmission = std::move(retained);
 }
 
-void Send_Queue::remove_retransmissions_of_type(const Association_Key& location, Chunk_Type type) {
+void Send_Queue::remove_retransmissions_of_type(const Association_Key& location, Chunk_Type type, const sockaddr_in* destination) {
     std::lock_guard<std::mutex> lock(mutex);
     std::deque<Queued> retained;
     while (!retransmission.empty()) {
         Queued queued = std::move(retransmission.front());
         retransmission.pop_front();
-        if (queued.deliverable.location == location) {
+        if (queued.deliverable.location == location
+                && (destination == nullptr || Association_Key{*destination} == Association_Key{queued.deliverable.destination})) {
             auto& chunks = queued.deliverable.packet.chunks;
             chunks.erase(
                 std::remove_if(

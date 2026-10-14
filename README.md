@@ -59,6 +59,13 @@ Implemented:
   association, zero window probing, Max.Burst, slow start, congestion avoidance,
   idle cwnd decay, an advertised receive window with receiver SWS avoidance and
   window updates, SACKs bundled with outgoing DATA.
+- Multi-homed peers (§5.4, §6.4, §7.2, §8.2, §8.3): the peer's address list
+  is learned from INIT and INIT ACK and each address is confirmed by
+  heartbeat. Every destination has its own heartbeat timer, RTO, T3-rtx timer,
+  cwnd and error count, and goes inactive past Path.Max.Retrans. DATA fails
+  over to an alternate when the primary is inactive, and timed-out DATA is
+  retransmitted to a different destination. Heartbeats can be disabled,
+  re-timed or requested per destination, and the primary can be changed.
 - Path heartbeats and failure detection (§8.1, §8.3), ABORT and ERROR handling,
   graceful shutdown (§9), verification tag rules (§8.5), CRC-32C.
 - Fragmentation and reassembly (§6.9): messages larger than the PMDCS are split
@@ -68,4 +75,4 @@ Implemented:
   its own stream, and unordered delivery. Messages are chunked at send time and
   bundled (§6.10), with sender SWS avoidance (§6.1).
 
-Not yet implemented: multi-homing (§6.4), PMTU discovery (§7.3), and IPv6.
+Not yet implemented: multiple local addresses, PMTU discovery (§7.3), and IPv6.

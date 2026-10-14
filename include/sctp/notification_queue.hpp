@@ -35,6 +35,17 @@ struct Assoc_Change {
     Assoc_Change_State state;
 };
 
+enum class Peer_Addr_State {
+    ADDR_AVAILABLE,
+    ADDR_UNREACHABLE,
+    ADDR_CONFIRMED
+};
+
+struct Peer_Addr_Change {
+    sockaddr_in address;
+    Peer_Addr_State state;
+};
+
 // Every cause of one ERROR chunk, raw, including codes we do not act on.
 struct Remote_Error {
     std::vector<error_cause> causes;
@@ -47,7 +58,7 @@ struct Notification {
     Notification_Type type;
     Association_Key src;
     uint64_t sequence_number;   // assigned by enqueue
-    std::variant<Assoc_Change, Remote_Error, Shutdown_Event> payload;
+    std::variant<Assoc_Change, Remote_Error, Shutdown_Event, Peer_Addr_Change> payload;
 };
 
 constexpr size_t MAX_QUEUED_NOTIFICATIONS = 1024;

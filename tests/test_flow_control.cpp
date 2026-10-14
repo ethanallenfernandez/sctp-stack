@@ -52,9 +52,9 @@ struct SCTP_Socket_Test_Access {
         assoc.next_tsn = INITIAL_TSN;
         assoc.cumulative_tsn_ack = INITIAL_TSN - 1;
         assoc.last_peer_tsn = PEER_TSN - 1;
-        assoc.cwnd = cwnd;
+        primary(assoc).cwnd = cwnd;
         assoc.peer_rwnd = peer_rwnd;
-        assoc.data_sent_at = Clock::now();
+        primary(assoc).data_sent_at = Clock::now();
         assoc.primary_path = key.address;
         stack.associations.insert_or_assign(key, assoc);
     }
@@ -127,13 +127,18 @@ struct SCTP_Socket_Test_Access {
         stack.send_allowances();
     }
 
+    // T3-rtx is kept per destination: the association's only one here.
+    static Expiration_Key timer_key(const Association_Key& key, Expiration_Timer_Type type) {
+        return Expiration_Key{key, type, type == Expiration_Timer_Type::T3_RTX ? key : Association_Key{}};
+    }
+
     static void fire(SCTP_Socket& stack, const Association_Key& key, Expiration_Timer_Type type) {
         stack.handle_expiration(Expiration_Fallback{
-            Expiration_Key{key, type}, Clock::now(), 0, Deliverable{key, {}, SCTP_Packet{}}});
+            timer_key(key, type), Clock::now(), 0, Deliverable{key, {}, SCTP_Packet{}}});
     }
 
     static bool timer_armed(SCTP_Socket& stack, const Association_Key& key, Expiration_Timer_Type type) {
-        return stack.expirations.is_active(Expiration_Key{key, type});
+        return stack.expirations.is_active(timer_key(key, type));
     }
 
     static bool send_pending(SCTP_Socket& stack) {
@@ -341,11 +346,11 @@ void test_zero_window_probe() {
     check(!Access::transmit(stack).has_value(), "only one probe is in flight");
 
     Association& assoc = Access::tcb(stack, key);
-    uint32_t cwnd = assoc.cwnd;
+    uint32_t cwnd = primary(assoc).cwnd;
     Access::deliver_sack(stack, 40000, INITIAL_TSN - 1, 0);
     Access::fire(stack, key, Expiration_Timer_Type::T3_RTX);
     check(assoc.error_count == 0, "a probe expiring while SACKs arrive is not an error");
-    check(assoc.cwnd == cwnd, "probing leaves cwnd alone");
+    check(primary(assoc).cwnd == cwnd, "probing leaves cwnd alone");
     Access::fire(stack, key, Expiration_Timer_Type::T3_RTX);
     check(assoc.error_count == 1, "one expiring with no SACK since is");
 
@@ -377,7 +382,7 @@ void test_initial_cwnd() {
 
     SCTP_Socket stack;
     Association fresh = Access::new_association(stack, Association_Key{peer_address(40000)});
-    check(fresh.pmdcs == 1200 && fresh.cwnd == 4404, "min(4 * PMDCS, max(2 * PMDCS, 4404)) with a 1200-byte PMDCS");
+    check(fresh.pmdcs == 1200 && primary(fresh).cwnd == 4404, "min(4 * PMDCS, max(2 * PMDCS, 4404)) with a 1200-byte PMDCS");
 }
 
 void test_slow_start_grows_a_full_window() {
@@ -392,8 +397,8 @@ void test_slow_start_grows_a_full_window() {
     send_all(stack);
 
     Access::deliver_sack(stack, 40000, INITIAL_TSN, 65535);
-    check(Access::tcb(stack, key).cwnd == 1200 + CHUNK, "cwnd grows by the bytes acknowledged");
-    check(Access::tcb(stack, key).partial_bytes_acked == 0, "partial_bytes_acked is untouched");
+    check(primary(Access::tcb(stack, key)).cwnd == 1200 + CHUNK, "cwnd grows by the bytes acknowledged");
+    check(primary(Access::tcb(stack, key)).partial_bytes_acked == 0, "partial_bytes_acked is untouched");
 }
 
 void test_slow_start_increase_is_capped() {
@@ -408,7 +413,7 @@ void test_slow_start_increase_is_capped() {
     send_all(stack);
 
     Access::deliver_sack(stack, 40000, INITIAL_TSN + 2, 65535);
-    check(Access::tcb(stack, key).cwnd == 2400 + DEFAULT_PMDCS, "3 chunks acked, but cwnd grows by one PMDCS");
+    check(primary(Access::tcb(stack, key)).cwnd == 2400 + DEFAULT_PMDCS, "3 chunks acked, but cwnd grows by one PMDCS");
 }
 
 void test_slow_start_needs_a_full_window() {
@@ -421,7 +426,7 @@ void test_slow_start_needs_a_full_window() {
     send_all(stack);
 
     Access::deliver_sack(stack, 40000, INITIAL_TSN, 65535);
-    check(Access::tcb(stack, key).cwnd == 4404, "cwnd is unchanged");
+    check(primary(Access::tcb(stack, key)).cwnd == 4404, "cwnd is unchanged");
 }
 
 void test_slow_start_pauses_in_fast_recovery() {
@@ -438,7 +443,7 @@ void test_slow_start_pauses_in_fast_recovery() {
     Access::tcb(stack, key).fast_recovery_exit_tsn = INITIAL_TSN + 1;
 
     Access::deliver_sack(stack, 40000, INITIAL_TSN, 65535);
-    check(Access::tcb(stack, key).cwnd == 1200, "cwnd is unchanged");
+    check(primary(Access::tcb(stack, key)).cwnd == 1200, "cwnd is unchanged");
 }
 
 void test_congestion_avoidance() {
@@ -448,23 +453,23 @@ void test_congestion_avoidance() {
     Association_Key key{peer_address(40000)};
     Access::establish(stack, key, 2400, 65535);
     Association& assoc = Access::tcb(stack, key);
-    assoc.ssthresh = 1000;
+    primary(assoc).ssthresh = 1000;
     for (int i = 0; i < 6; ++i) {
         stack.sctp_send_data(key, MESSAGE);
     }
 
     check(send_all(stack) == 3, "three chunks fill the window");
     Access::deliver_sack(stack, 40000, INITIAL_TSN, 65535);
-    check(assoc.cwnd == 2400 && assoc.partial_bytes_acked == CHUNK, "first SACK: bytes counted, cwnd unchanged");
+    check(primary(assoc).cwnd == 2400 && primary(assoc).partial_bytes_acked == CHUNK, "first SACK: bytes counted, cwnd unchanged");
 
     check(send_all(stack) == 1, "one more chunk refills it");
     Access::deliver_sack(stack, 40000, INITIAL_TSN + 1, 65535);
-    check(assoc.cwnd == 2400 && assoc.partial_bytes_acked == 2 * CHUNK, "second SACK: still counting");
+    check(primary(assoc).cwnd == 2400 && primary(assoc).partial_bytes_acked == 2 * CHUNK, "second SACK: still counting");
 
     check(send_all(stack) == 1, "and again");
     Access::deliver_sack(stack, 40000, INITIAL_TSN + 2, 65535);
-    check(assoc.cwnd == 2400 + DEFAULT_PMDCS, "a full cwnd acknowledged adds one PMDCS");
-    check(assoc.partial_bytes_acked == 3 * CHUNK - 2400, "and cwnd is taken off partial_bytes_acked");
+    check(primary(assoc).cwnd == 2400 + DEFAULT_PMDCS, "a full cwnd acknowledged adds one PMDCS");
+    check(primary(assoc).partial_bytes_acked == 3 * CHUNK - 2400, "and cwnd is taken off partial_bytes_acked");
 }
 
 void test_congestion_avoidance_needs_a_full_window() {
@@ -474,18 +479,18 @@ void test_congestion_avoidance_needs_a_full_window() {
     Association_Key key{peer_address(40000)};
     Access::establish(stack, key, 2400, 65535);
     Association& assoc = Access::tcb(stack, key);
-    assoc.ssthresh = 1000;
-    assoc.partial_bytes_acked = 2000;
+    primary(assoc).ssthresh = 1000;
+    primary(assoc).partial_bytes_acked = 2000;
     stack.sctp_send_data(key, MESSAGE);
     stack.sctp_send_data(key, MESSAGE);
     send_all(stack);
 
     Access::deliver_sack(stack, 40000, INITIAL_TSN, 65535);
-    check(assoc.cwnd == 2400, "cwnd is unchanged");
-    check(assoc.partial_bytes_acked == 2400, "partial_bytes_acked is capped at cwnd");
+    check(primary(assoc).cwnd == 2400, "cwnd is unchanged");
+    check(primary(assoc).partial_bytes_acked == 2400, "partial_bytes_acked is capped at cwnd");
 
     Access::deliver_sack(stack, 40000, INITIAL_TSN + 1, 65535);
-    check(assoc.partial_bytes_acked == 0, "it resets once everything sent is acknowledged");
+    check(primary(assoc).partial_bytes_acked == 0, "it resets once everything sent is acknowledged");
 }
 
 std::vector<uint32_t> tsns_of(const SCTP_Packet& packet) {
@@ -520,22 +525,22 @@ void test_idle_cwnd_decay() {
     Association_Key key{peer_address(40000)};
     Access::establish(stack, key, 20000, 65535);
     Association& assoc = Access::tcb(stack, key);
-    assoc.data_sent_at = Clock::now() - std::chrono::milliseconds(2500);
+    primary(assoc).data_sent_at = Clock::now() - std::chrono::milliseconds(2500);
 
     Access::refresh_allowances(stack);
-    check(assoc.ssthresh == 20000, "ssthresh is set to cwnd before the first decay");
-    check(assoc.cwnd == 5000, "two idle RTOs halve cwnd twice");
+    check(primary(assoc).ssthresh == 20000, "ssthresh is set to cwnd before the first decay");
+    check(primary(assoc).cwnd == 5000, "two idle RTOs halve cwnd twice");
     Access::refresh_allowances(stack);
-    check(assoc.cwnd == 5000, "the elapsed RTOs are only applied once");
+    check(primary(assoc).cwnd == 5000, "the elapsed RTOs are only applied once");
 
-    assoc.data_sent_at = Clock::now() - std::chrono::milliseconds(1100);
+    primary(assoc).data_sent_at = Clock::now() - std::chrono::milliseconds(1100);
     Access::refresh_allowances(stack);
-    check(assoc.cwnd == 4 * DEFAULT_PMDCS, "cwnd stops at 4 * PMDCS");
-    check(assoc.ssthresh == 20000, "ssthresh is kept through later decays");
+    check(primary(assoc).cwnd == 4 * DEFAULT_PMDCS, "cwnd stops at 4 * PMDCS");
+    check(primary(assoc).ssthresh == 20000, "ssthresh is kept through later decays");
 
     stack.sctp_send_data(key, MESSAGE);
     Access::transmit(stack);
-    check(!assoc.idle_decaying && Clock::now() - assoc.data_sent_at < std::chrono::seconds(1),
+    check(!primary(assoc).idle_decaying && Clock::now() - primary(assoc).data_sent_at < std::chrono::seconds(1),
           "sending DATA ends the idle period");
 }
 
@@ -546,12 +551,12 @@ void test_idle_decay_never_raises_cwnd() {
     Association_Key key{peer_address(40000)};
     Access::establish(stack, key, DEFAULT_PMDCS, 65535);
     Association& assoc = Access::tcb(stack, key);
-    uint32_t ssthresh = assoc.ssthresh;
-    assoc.data_sent_at = Clock::now() - std::chrono::seconds(10);
+    uint32_t ssthresh = primary(assoc).ssthresh;
+    primary(assoc).data_sent_at = Clock::now() - std::chrono::seconds(10);
 
     Access::refresh_allowances(stack);
-    check(assoc.cwnd == DEFAULT_PMDCS, "cwnd stays at one PMDCS rather than rising to 4 * PMDCS");
-    check(assoc.ssthresh == ssthresh, "and ssthresh is untouched");
+    check(primary(assoc).cwnd == DEFAULT_PMDCS, "cwnd stays at one PMDCS rather than rising to 4 * PMDCS");
+    check(primary(assoc).ssthresh == ssthresh, "and ssthresh is untouched");
 }
 
 void test_t3_marks_everything_outstanding() {
@@ -567,7 +572,7 @@ void test_t3_marks_everything_outstanding() {
 
     Access::fire(stack, key, Expiration_Timer_Type::T3_RTX);
     Association& assoc = Access::tcb(stack, key);
-    check(assoc.cwnd == DEFAULT_PMDCS, "cwnd drops to one PMDCS");
+    check(primary(assoc).cwnd == DEFAULT_PMDCS, "cwnd drops to one PMDCS");
     check(Access::retransmission_queued(stack, key), "the first retransmission is queued at once");
     check(assoc.outstanding_data.at(INITIAL_TSN + 2).pending_retransmission,
           "what did not fit is marked for retransmission");
@@ -595,7 +600,7 @@ void test_marked_chunks_wait_for_cwnd() {
     check(send_all(stack) == 3, "three chunks in flight");
 
     Association& assoc = Access::tcb(stack, key);
-    assoc.cwnd = 1500;
+    primary(assoc).cwnd = 1500;
     assoc.outstanding_data.at(INITIAL_TSN + 2).pending_retransmission = true;
     check(!Access::transmit(stack).has_value(), "a marked chunk waits while flightsize is at cwnd");
 
@@ -869,18 +874,18 @@ void test_duplicate_tsns_count_in_congestion_avoidance() {
     Association_Key key{peer_address(40000)};
     Access::establish(stack, key, 2400, 65535);
     Association& assoc = Access::tcb(stack, key);
-    assoc.ssthresh = 1000;
+    primary(assoc).ssthresh = 1000;
     stack.sctp_send_data(key, MESSAGE);
     stack.sctp_send_data(key, MESSAGE);
     send_all(stack);
     assoc.outstanding_data.at(INITIAL_TSN).retransmitted = true;
 
     Access::deliver_sack(stack, 40000, INITIAL_TSN, 65535);
-    check(assoc.partial_bytes_acked == CHUNK, "the acked chunk is counted");
+    check(primary(assoc).partial_bytes_acked == CHUNK, "the acked chunk is counted");
     Access::deliver_sack(stack, 40000, INITIAL_TSN, 65535, {}, {INITIAL_TSN});
-    check(assoc.partial_bytes_acked == 2 * CHUNK, "a report of it as a duplicate counts its size again");
+    check(primary(assoc).partial_bytes_acked == 2 * CHUNK, "a report of it as a duplicate counts its size again");
     Access::deliver_sack(stack, 40000, INITIAL_TSN, 65535, {}, {INITIAL_TSN});
-    check(assoc.partial_bytes_acked == 2 * CHUNK, "but only once");
+    check(primary(assoc).partial_bytes_acked == 2 * CHUNK, "but only once");
 }
 
 } // namespace

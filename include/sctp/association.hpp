@@ -32,6 +32,14 @@ struct Outstanding_Data {
     uint16_t missing_reports;
     bool fast_retransmitted;
     bool pending_retransmission;
+    // Where it was last sent, or, while pending retransmission, where it goes next.
+    sockaddr_in destination{};
+};
+
+struct Acked_Retransmission {
+    uint32_t tsn;
+    uint32_t size;
+    sockaddr_in destination;
 };
 
 // A chunk received above the Cumulative TSN Ack. `assembled` once its message
@@ -81,6 +89,29 @@ struct Reassembly {
 struct Peer_Path {
     sockaddr_in address;
     bool confirmed;
+    bool active{true};
+    uint16_t error_count{0};
+    bool hb_enabled{true};
+    bool hb_outstanding{false};
+    uint64_t hb_nonce{0};
+    std::chrono::steady_clock::time_point hb_sent_at{};
+    std::chrono::steady_clock::time_point hb_next{};
+    std::chrono::steady_clock::time_point hb_period_start{};
+    // Last first transmission of DATA, which makes the path not idle (8.3).
+    std::chrono::steady_clock::time_point new_data_sent_at{};
+    bool has_srtt{false};
+    std::chrono::microseconds srtt{0};
+    std::chrono::microseconds rttvar{0};
+    std::chrono::microseconds rto{sctp_parameters::RTO_INITIAL};
+    uint32_t cwnd{0};
+    uint32_t ssthresh{0};
+    uint32_t partial_bytes_acked{0};
+    // Set by a T3-rtx expiry, cleared by the next SACK acknowledging DATA sent
+    // here: until then only one packet may be in flight.
+    bool single_packet_in_flight{false};
+    // Last DATA transmission, moved forward by each idle cwnd decay.
+    std::chrono::steady_clock::time_point data_sent_at{};
+    bool idle_decaying{false};
 };
 
 struct Association {
@@ -93,9 +124,6 @@ struct Association {
     sockaddr_in primary_path;
     uint16_t error_count;
     uint16_t error_threshold;
-    uint32_t hb_nonce;
-    bool hb_outstanding;
-    std::chrono::steady_clock::time_point hb_sent_at;
     uint32_t peer_rwnd;
     uint32_t peer_max_rwnd;
     bool zero_window_probe_allowed;
@@ -114,25 +142,13 @@ struct Association {
     std::map<uint32_t, Outstanding_Data> outstanding_data;
     bool has_rtt_measurement_tsn;
     uint32_t rtt_measurement_tsn;
-    bool has_srtt;
-    std::chrono::microseconds srtt;
-    std::chrono::microseconds rttvar;
-    std::chrono::microseconds rto;
     uint32_t pmdcs;
-    uint32_t cwnd;
-    uint32_t ssthresh;
-    uint32_t partial_bytes_acked;
-    // Set by a T3-rtx expiry, cleared by the next SACK acknowledging new DATA:
-    // until then only one packet may be in flight.
-    bool single_packet_in_flight;
+    std::chrono::milliseconds hb_interval;
     // New-DATA packets sent in the current transmission opportunity.
     uint32_t burst_count;
     // TSN and size of retransmitted chunks recently acked cumulatively, which
     // the peer may yet report as Duplicate TSNs.
-    std::deque<std::pair<uint32_t, uint32_t>> acked_retransmissions;
-    // Last DATA transmission, moved forward by each idle cwnd decay.
-    std::chrono::steady_clock::time_point data_sent_at;
-    bool idle_decaying;
+    std::deque<Acked_Retransmission> acked_retransmissions;
     bool in_fast_recovery;
     uint32_t fast_recovery_exit_tsn;
     std::map<uint32_t, Held_Chunk> tsn_ooo_buffer;

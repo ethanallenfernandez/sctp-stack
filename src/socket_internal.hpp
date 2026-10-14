@@ -61,17 +61,95 @@ inline bool same_transport_address(const sockaddr_in& a, const sockaddr_in& b) {
     return Association_Key{a} == Association_Key{b};
 }
 
-inline const Peer_Path* find_path(const Association& assoc, const sockaddr_in& address) {
+inline Peer_Path* find_path(Association& assoc, const sockaddr_in& address) {
     auto path = std::find_if(assoc.peer_address_list.begin(), assoc.peer_address_list.end(), [&](const Peer_Path& candidate) {
         return same_transport_address(candidate.address, address);
     });
     return path == assoc.peer_address_list.end() ? nullptr : &*path;
 }
 
+inline const Peer_Path* find_path(const Association& assoc, const sockaddr_in& address) {
+    return find_path(const_cast<Association&>(assoc), address);
+}
+
+inline Peer_Path& primary(Association& assoc) {
+    Peer_Path* path = find_path(assoc, assoc.primary_path);
+    return path != nullptr ? *path : assoc.peer_address_list.front();
+}
+
+inline const Peer_Path& primary(const Association& assoc) {
+    return primary(const_cast<Association&>(assoc));
+}
+
+inline Peer_Path make_path(const sockaddr_in& address, bool confirmed, uint32_t pmdcs) {
+    Peer_Path path{address, confirmed};
+    path.cwnd = initial_cwnd(pmdcs);
+    path.ssthresh = RWND;
+    return path;
+}
+
+// New DATA goes to the primary while it is active, and otherwise to one
+// alternate, the first active CONFIRMED path (8.2).
+inline Peer_Path& data_path(Association& assoc) {
+    Peer_Path& preferred = primary(assoc);
+    if (preferred.active) {
+        return preferred;
+    }
+    auto alternate = std::find_if(assoc.peer_address_list.begin(), assoc.peer_address_list.end(), [](const Peer_Path& path) {
+        return path.confirmed && path.active;
+    });
+    return alternate == assoc.peer_address_list.end() ? preferred : *alternate;
+}
+
+inline const Peer_Path& data_path(const Association& assoc) {
+    return data_path(const_cast<Association&>(assoc));
+}
+
+// 6.4: timed-out DATA goes to an active CONFIRMED path other than the one it
+// was last sent to, the next such in list order, if there is one.
+inline Peer_Path& retransmission_path(Association& assoc, const sockaddr_in& last) {
+    Peer_Path& preferred = data_path(assoc);
+    if (!same_transport_address(preferred.address, last)) {
+        return preferred;
+    }
+    auto& paths = assoc.peer_address_list;
+    size_t from = static_cast<size_t>(&preferred - paths.data());
+    for (size_t step = 1; step < paths.size(); ++step) {
+        Peer_Path& candidate = paths[(from + step) % paths.size()];
+        if (candidate.confirmed && candidate.active) {
+            return candidate;
+        }
+    }
+    return preferred;
+}
+
+inline Peer_Path& destination_of(Association& assoc, const Outstanding_Data& outstanding) {
+    Peer_Path* path = find_path(assoc, outstanding.destination);
+    return path != nullptr ? *path : primary(assoc);
+}
+
+inline const Peer_Path& destination_of(const Association& assoc, const Outstanding_Data& outstanding) {
+    return destination_of(const_cast<Association&>(assoc), outstanding);
+}
+
+// Paths awaiting confirmation are probed every RTO, HB.Max.Burst of them at a
+// time in list order; the rest wait for one of those to confirm or fail.
+inline bool probes_for_confirmation(const Association& assoc, const Peer_Path& path) {
+    uint32_t ahead = 0;
+    for (const Peer_Path& candidate : assoc.peer_address_list) {
+        bool probing = !candidate.confirmed && candidate.active && candidate.hb_enabled;
+        if (&candidate == &path) {
+            return probing && ahead < sctp_parameters::HB_MAX_BURST;
+        }
+        ahead += probing;
+    }
+    return false;
+}
+
 // A reply goes back where its packet came from, unless that address is UNCONFIRMED.
 inline sockaddr_in reply_destination(const Association& assoc, const sockaddr_in& src) {
     const Peer_Path* path = find_path(assoc, src);
-    return path != nullptr && path->confirmed ? src : assoc.primary_path;
+    return path != nullptr && path->confirmed ? src : data_path(assoc).address;
 }
 
 // The INIT's source, which the INIT ACK carrying the cookie was sent to.
@@ -93,14 +171,26 @@ inline bool has_unacknowledged_data(const Association& assoc) {
     );
 }
 
-inline size_t bytes_in_flight(const Association& assoc) {
+inline bool has_unacknowledged_data(const Association& assoc, const Peer_Path& path) {
+    return std::any_of(assoc.outstanding_data.begin(), assoc.outstanding_data.end(), [&](const auto& entry) {
+        return !entry.second.gap_acked && &destination_of(assoc, entry.second) == &path;
+    });
+}
+
+inline size_t bytes_in_flight(const Association& assoc, const Peer_Path* path = nullptr) {
     size_t total = 0;
     for (const auto& [tsn, outstanding] : assoc.outstanding_data) {
-        if (!outstanding.gap_acked && !outstanding.pending_retransmission) {
+        if (!outstanding.gap_acked && !outstanding.pending_retransmission
+                && (path == nullptr || &destination_of(assoc, outstanding) == path)) {
             total += data_chunk_wire_size(outstanding.data);
         }
     }
     return total;
+}
+
+inline bool cwnd_open(const Association& assoc, const Peer_Path& path) {
+    size_t flight = bytes_in_flight(assoc, &path);
+    return path.single_packet_in_flight ? flight == 0 : flight < path.cwnd;
 }
 
 // RFC 9260 6: DATA is sent and SACKs processed in these states...
@@ -121,19 +211,33 @@ inline uint32_t read_be32(const uint8_t* p) {
     return static_cast<uint32_t>(p[0]) << 24 | static_cast<uint32_t>(p[1]) << 16 | static_cast<uint32_t>(p[2]) << 8 | p[3];
 }
 
-// The Heartbeat Info is ours to define: a nonce the ACK is matched against, and
-// the destination it went to, which tells paths apart once there is more than
-// one. The send time is not in here - the TCB records it after sendto, which is
-// both more accurate and not something the peer can forge.
-constexpr size_t HEARTBEAT_INFO_SIZE = 10;
+// The Heartbeat Info is ours to define: the nonce, then the destination's
+// address and UDP port as they sit in sockaddr_in. The send time is not in
+// here - the path records it after sendto, which is both more accurate and not
+// something the peer can forge.
+constexpr size_t HEARTBEAT_INFO_SIZE = 14;
 
-inline std::vector<uint8_t> heartbeat_info(uint32_t nonce, const sockaddr_in& destination) {
-    std::vector<uint8_t> info = be32_bytes(nonce);
+inline std::vector<uint8_t> heartbeat_info(uint64_t nonce, const sockaddr_in& destination) {
+    std::vector<uint8_t> info = be32_bytes(static_cast<uint32_t>(nonce >> 32));
+    std::vector<uint8_t> low = be32_bytes(static_cast<uint32_t>(nonce));
+    info.insert(info.end(), low.begin(), low.end());
     const uint8_t* address = reinterpret_cast<const uint8_t*>(&destination.sin_addr.s_addr);
     info.insert(info.end(), address, address + sizeof(destination.sin_addr.s_addr));
     const uint8_t* port = reinterpret_cast<const uint8_t*>(&destination.sin_port);
     info.insert(info.end(), port, port + sizeof(destination.sin_port));
     return info;
+}
+
+inline uint64_t heartbeat_info_nonce(const std::vector<uint8_t>& info) {
+    return static_cast<uint64_t>(read_be32(info.data())) << 32 | read_be32(info.data() + 4);
+}
+
+inline sockaddr_in heartbeat_info_destination(const std::vector<uint8_t>& info) {
+    sockaddr_in destination{};
+    destination.sin_family = AF_INET;
+    std::copy_n(info.data() + 8, sizeof(destination.sin_addr.s_addr), reinterpret_cast<uint8_t*>(&destination.sin_addr.s_addr));
+    std::copy_n(info.data() + 12, sizeof(destination.sin_port), reinterpret_cast<uint8_t*>(&destination.sin_port));
+    return destination;
 }
 
 // RFC 9260 3.3.10.1: Stream Identifier, then 16 reserved bits.

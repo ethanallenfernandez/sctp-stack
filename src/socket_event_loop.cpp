@@ -78,22 +78,22 @@ void SCTP_Socket::run_expire() {
 namespace {
     // A no-op unless cwnd is above 4 * PMDCS: the decay is never allowed to
     // raise cwnd, as it would after a T3-rtx expiry left cwnd at one PMDCS.
-    void decay_idle_cwnd(Association& assoc, std::chrono::steady_clock::time_point now) {
-        if (assoc.rto.count() <= 0 || now - assoc.data_sent_at < assoc.rto) {
+    void decay_idle_cwnd(Peer_Path& path, uint32_t pmdcs, std::chrono::steady_clock::time_point now) {
+        if (path.rto.count() <= 0 || now - path.data_sent_at < path.rto) {
             return;
         }
-        auto periods = (now - assoc.data_sent_at) / assoc.rto;
-        assoc.data_sent_at += periods * assoc.rto;
-        uint32_t floor = 4 * assoc.pmdcs;
-        if (assoc.cwnd <= floor) {
+        auto periods = (now - path.data_sent_at) / path.rto;
+        path.data_sent_at += periods * path.rto;
+        uint32_t floor = 4 * pmdcs;
+        if (path.cwnd <= floor) {
             return;
         }
-        if (!assoc.idle_decaying) {
-            assoc.ssthresh = assoc.cwnd;
-            assoc.idle_decaying = true;
+        if (!path.idle_decaying) {
+            path.ssthresh = path.cwnd;
+            path.idle_decaying = true;
         }
-        for (; periods > 0 && assoc.cwnd > floor; --periods) {
-            assoc.cwnd = std::max(assoc.cwnd / 2, floor);
+        for (; periods > 0 && path.cwnd > floor; --periods) {
+            path.cwnd = std::max(path.cwnd / 2, floor);
         }
     }
 
@@ -225,11 +225,13 @@ Send_Allowances SCTP_Socket::send_allowances() {
         if (!transmits_data(assoc.state)) {
             continue;
         }
-        decay_idle_cwnd(assoc, now);
+        for (Peer_Path& path : assoc.peer_address_list) {
+            decay_idle_cwnd(path, assoc.pmdcs, now);
+        }
         size_t flight_size = bytes_in_flight(assoc);
         allowances.emplace(key, Send_Allowance{
             .flight_size = flight_size,
-            .cwnd_open = assoc.single_packet_in_flight ? flight_size == 0 : flight_size < assoc.cwnd,
+            .cwnd_open = cwnd_open(assoc, data_path(assoc)),
             .burst_spent = assoc.burst_count >= sctp_parameters::MAX_BURST,
             .rwnd = assoc.peer_rwnd,
             .zero_window_probe = assoc.zero_window_probe_allowed && flight_size == 0,
@@ -262,14 +264,16 @@ void SCTP_Socket::prepare_data_packet(Deliverable& deliverable, bool new_data) {
             return;
         }
         Association& assoc = association->second;
+        const Peer_Path* path = find_path(assoc, deliverable.destination);
+        const Peer_Path& sent_on = path != nullptr ? *path : primary(assoc);
         size_t data_size = 0;
         for (const auto& chunk : chunks) {
             if (chunk.chunk_header.type == DATA) {
                 data_size += data_chunk_wire_size(std::get<data_chunk_value>(chunk.chunk_value));
             }
         }
-        size_t flight_after = bytes_in_flight(assoc) + (new_data ? data_size : 0);
-        if (flight_after >= assoc.cwnd || data_size >= assoc.peer_rwnd || assoc.state == SHUTDOWN_PENDING) {
+        size_t flight_after = bytes_in_flight(assoc, &sent_on) + (new_data ? data_size : 0);
+        if (flight_after >= sent_on.cwnd || data_size >= assoc.peer_rwnd || assoc.state == SHUTDOWN_PENDING) {
             last_data->chunk_header.flag |= DATA_IMMEDIATE_SACK_FLAG;
         }
         if (!sack_pending || !receives_data(assoc.state)) {
@@ -288,14 +292,16 @@ void SCTP_Socket::prepare_data_packet(Deliverable& deliverable, bool new_data) {
     }
 }
 
-// Chunks marked for retransmission go out one packet at a time as cwnd allows,
-// each built only once there is room for it. The packet T3-rtx or a Fast
-// Retransmit sends first is queued by them directly, and is not held here.
+// Chunks marked for retransmission go out one packet at a time as their
+// destination's cwnd allows, each built only once there is room for it. The
+// packet T3-rtx or a Fast Retransmit sends first is queued by them directly,
+// and is not held here.
 void SCTP_Socket::refill_retransmissions(const Send_Allowances& allowances) {
     for (const auto& [key, allowance] : allowances) {
-        if (allowance.cwnd_open && !sends.has_retransmission_for(key)) {
-            schedule_pending_retransmission(key);
+        if (!sends.has_retransmission_for(key)) {
+            schedule_pending_retransmission(key, true);
         }
+        (void)allowance;
     }
 }
 
@@ -318,7 +324,7 @@ void SCTP_Socket::refill_new_data(Send_Allowances& allowances) {
             if (chunks.empty()) {
                 continue;
             }
-            deliverable = Deliverable{key, association->second.primary_path, build_data(
+            deliverable = Deliverable{key, data_path(association->second).address, build_data(
                 ntohs(local_address.sin_port),
                 ntohs(key.address.sin_port),
                 association->second.peer_ver_tag,
@@ -347,7 +353,7 @@ void SCTP_Socket::arm_zero_window_probes(const Send_Allowances& allowances) {
             if (association == associations.end() || association->second.zero_window_probe_allowed) {
                 continue;
             }
-            rto = association->second.rto;
+            rto = data_path(association->second).rto;
         }
         schedule_expiration(timer, std::chrono::steady_clock::now() + rto, Deliverable{key, {}, SCTP_Packet{}});
     }
@@ -444,11 +450,11 @@ bool SCTP_Socket::handle_send_packet(const Deliverable& deliverable) {
 void SCTP_Socket::schedule_expirations_after_send( const Deliverable& deliverable, std::chrono::steady_clock::time_point sent_at) {
     bool sent_data = false;
     for (const auto& chunk : deliverable.packet.chunks) {
-        // A heartbeat arms no timer of its own: the periodic one is already
+        // A heartbeat arms no timer of its own: its path's is already
         // running. It is timestamped here rather than at build time so the RTT
         // it measures excludes however long the packet sat in the send queue.
         if (chunk.chunk_header.type == HEARTBEAT) {
-            record_heartbeat_sent(deliverable.location, sent_at);
+            record_heartbeat_sent(deliverable.location, deliverable.destination, sent_at);
             continue;
         }
 
@@ -459,7 +465,7 @@ void SCTP_Socket::schedule_expirations_after_send( const Deliverable& deliverabl
 
         for (const auto& policy : handlers->second) {
             if (policy.timer_type == Expiration_Timer_Type::T3_RTX) {
-                record_data_sent(deliverable.location, std::get<data_chunk_value>(chunk.chunk_value), sent_at);
+                record_data_sent(deliverable.location, deliverable.destination, std::get<data_chunk_value>(chunk.chunk_value), sent_at);
                 sent_data = true;
                 continue;
             }
@@ -484,7 +490,7 @@ void SCTP_Socket::schedule_expirations_after_send( const Deliverable& deliverabl
     }
 
     if (sent_data) {
-        start_t3_if_stopped(deliverable.location);
+        start_t3_if_stopped(deliverable.location, deliverable.destination);
     }
 }
 
