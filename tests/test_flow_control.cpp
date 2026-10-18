@@ -740,6 +740,83 @@ void test_full_buffer_takes_the_tsn_blocking_complete_messages() {
           "all three are delivered, in SSN order");
 }
 
+std::vector<std::pair<uint16_t, uint16_t>> gaps_of(const sack_chunk_value& sack) {
+    std::vector<std::pair<uint16_t, uint16_t>> gaps;
+    for (const auto& block : sack.gap_ack_blocks) {
+        gaps.emplace_back(block.start, block.end);
+    }
+    return gaps;
+}
+
+void test_held_tsns_are_ordered_across_the_wrap() {
+    std::printf("1.6: DATA held above the Cumulative TSN Ack is kept in serial order across the wrap:\n");
+
+    constexpr uint8_t WHOLE = DATA_FLAG_U | DATA_FLAG_B | DATA_FLAG_E;
+    SCTP_Socket stack;
+    Association_Key key{peer_address(40000)};
+    Access::establish(stack, key, 4404, 65535);
+    Association& assoc = Access::tcb(stack, key);
+    assoc.last_peer_tsn = 0xFFFFFFFD;
+    Access::deliver_data(stack, 40000, 1, 10, true, WHOLE);
+    Access::deliver_data(stack, 40000, 0xFFFFFFFF, 10, true, WHOLE);
+    Access::deliver_data(stack, 40000, 3, 10, true, WHOLE);
+
+    std::vector<uint32_t> held;
+    for (const auto& [tsn, chunk] : assoc.tsn_ooo_buffer) {
+        held.push_back(tsn);
+        (void)chunk;
+    }
+    check(held == std::vector<uint32_t>{0xFFFFFFFF, 1, 3}, "0xFFFFFFFF is held ahead of 1 and 3");
+    auto sack = last_sack(Access::drain(stack));
+    check(sack && gaps_of(*sack) == std::vector<std::pair<uint16_t, uint16_t>>{{2, 2}, {4, 4}, {6, 6}},
+          "the SACK reports them as three blocks in order");
+
+    Access::deliver_data(stack, 40000, 0xFFFFFFFE, 10, true, WHOLE);
+    sack = last_sack(Access::drain(stack));
+    check(assoc.last_peer_tsn == 0xFFFFFFFF, "filling the gap advances the Cumulative TSN Ack to 0xFFFFFFFF");
+    check(sack && gaps_of(*sack) == std::vector<std::pair<uint16_t, uint16_t>>{{2, 2}, {4, 4}},
+          "and the blocks past the wrap are reported relative to it");
+}
+
+void test_full_buffer_drops_the_highest_tsn_across_the_wrap() {
+    std::printf("6.2: with the window at 0, the TSN dropped to make room is the highest in serial order:\n");
+
+    SCTP_Socket stack;
+    Association_Key key{peer_address(40000)};
+    Access::establish(stack, key, 4404, 65535);
+    Association& assoc = Access::tcb(stack, key);
+    assoc.last_peer_tsn = 0xFFFFFFFC;
+    Access::deliver_data(stack, 40000, 0xFFFFFFFD, 60000, true, DATA_FLAG_U | DATA_FLAG_B | DATA_FLAG_E);
+    Access::deliver_data(stack, 40000, 0xFFFFFFFF, 100, true, DATA_FLAG_U | DATA_FLAG_B);
+    Access::deliver_data(stack, 40000, 1, RWND - 60100, true, DATA_FLAG_U | DATA_FLAG_B);
+    auto sack = last_sack(Access::drain(stack));
+    check(sack && sack->a_rwnd == 0 && sack->gap_ack_blocks.size() == 2, "buffer full, with 0xFFFFFFFF and 1 held");
+
+    Access::deliver_data(stack, 40000, 0xFFFFFFFE, 10, true, DATA_FLAG_U | DATA_FLAG_B | DATA_FLAG_E);
+    check(assoc.last_peer_tsn == 0xFFFFFFFF && assoc.tsn_ooo_buffer.empty(),
+          "TSN 1 is dropped, not 0xFFFFFFFF, which the missing TSN then releases");
+    sack = last_sack(Access::drain(stack));
+    check(sack && sack->cumulative_tsn_ack == 0xFFFFFFFF && sack->gap_ack_blocks.empty(), "the SACK no longer reports 1");
+}
+
+void test_data_beyond_a_gap_ack_block_is_dropped() {
+    std::printf("3.3.4: DATA further ahead than a Gap Ack Block can report is dropped:\n");
+
+    constexpr uint8_t WHOLE = DATA_FLAG_U | DATA_FLAG_B | DATA_FLAG_E;
+    SCTP_Socket stack;
+    Association_Key key{peer_address(40000)};
+    Access::establish(stack, key, 4404, 65535);
+    Access::deliver_data(stack, 40000, PEER_TSN + 65535, 1, true, WHOLE);
+    auto sack = last_sack(Access::drain(stack));
+    check(Access::tcb(stack, key).tsn_ooo_buffer.empty(), "a TSN 65536 past the Cumulative TSN Ack is not held");
+    check(sack && sack->gap_ack_blocks.empty(), "and the immediate SACK does not report it");
+
+    Access::deliver_data(stack, 40000, PEER_TSN + 65534, 1, true, WHOLE);
+    sack = last_sack(Access::drain(stack));
+    check(sack && gaps_of(*sack) == std::vector<std::pair<uint16_t, uint16_t>>{{65535, 65535}},
+          "one 65535 past it is held and reported");
+}
+
 void test_unanswered_retransmissions_end_the_association() {
     std::printf("8.1: T3-rtx expiries past Association.Max.Retrans:\n");
 
@@ -919,6 +996,9 @@ int main() {
     test_full_buffer_drops_new_data();
     test_full_buffer_prefers_the_lower_tsn();
     test_full_buffer_takes_the_tsn_blocking_complete_messages();
+    test_held_tsns_are_ordered_across_the_wrap();
+    test_full_buffer_drops_the_highest_tsn_across_the_wrap();
+    test_data_beyond_a_gap_ack_block_is_dropped();
     test_unanswered_retransmissions_end_the_association();
     test_probe_expiries_with_sacks_do_not_end_the_association();
     test_sack_is_bundled_with_data();

@@ -42,9 +42,16 @@ EX_BINS    = $(EX_SRCS:%.cpp=$(BUILD)/%)
 TEST_SRCS := $(wildcard tests/*.cpp)
 TEST_BINS  = $(TEST_SRCS:%.cpp=$(BUILD)/%)
 
-DEPS       = $(LIB_OBJS:.o=.d) $(EX_BINS:%=%.d) $(TEST_BINS:%=%.d)
+FUZZ_SRCS := $(wildcard fuzz/*.cpp)
+FUZZ_BINS  = $(FUZZ_SRCS:%.cpp=$(BUILD)/%)
+FUZZ_TIME ?= 60
+# clang otherwise finds GCC's static libstdc++.a ahead of the shared one, and
+# that fails to link alongside the sanitizer runtimes.
+FUZZ_LDFLAGS ?= -L/usr/lib
 
-.PHONY: all lib test run asan clean help
+DEPS       = $(LIB_OBJS:.o=.d) $(EX_BINS:%=%.d) $(TEST_BINS:%=%.d) $(FUZZ_BINS:%=%.d)
+
+.PHONY: all lib test run asan tsan fuzz fuzz-run clean help
 .DEFAULT_GOAL := all
 
 all: $(LIB) $(EX_BINS) $(TEST_BINS)
@@ -69,6 +76,12 @@ $(BUILD)/tests/%: tests/%.cpp $(LIB)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -MMD -MP $< $(LIB) -o $@ $(LDFLAGS)
 
+# libFuzzer supplies main(); the library is built with fuzzer-no-link so its
+# coverage is traced too.
+$(BUILD)/fuzz/%: fuzz/%.cpp $(LIB)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -fsanitize=fuzzer -MMD -MP $< $(LIB) -o $@ $(FUZZ_LDFLAGS) $(LDFLAGS)
+
 # ---- actions ---------------------------------------------------------------
 test: $(TEST_BINS)
 	@for t in $(TEST_BINS); do \
@@ -87,6 +100,32 @@ asan:
 		SANITIZE="-fsanitize=address,undefined" \
 		test run
 
+# TSan cannot share a binary with ASan, so it gets a tree of its own.
+tsan:
+	@$(MAKE) --no-print-directory \
+		BUILD=$(BUILD)/tsan \
+		OPT="-O1 -g -fno-omit-frame-pointer" \
+		SANITIZE="-fsanitize=thread" \
+		test run
+
+# libFuzzer is clang-only. Each target runs FUZZ_TIME seconds; its corpus
+# persists under build/fuzz/corpus and grows across runs.
+fuzz:
+	@$(MAKE) --no-print-directory \
+		BUILD=$(BUILD)/fuzz \
+		CXX=clang++ \
+		OPT="-O1 -g -fno-omit-frame-pointer" \
+		SANITIZE="-fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=undefined" \
+		fuzz-run
+
+fuzz-run: $(FUZZ_BINS)
+	@for f in $(FUZZ_BINS); do \
+		echo "=== $$f"; \
+		mkdir -p $(BUILD)/corpus/$$(basename $$f) $(BUILD)/crashes; \
+		$$f -max_total_time=$(FUZZ_TIME) -artifact_prefix=$(BUILD)/crashes/ \
+			$(BUILD)/corpus/$$(basename $$f) || exit 1; \
+	done
+
 clean:
 	rm -rf $(BUILD)
 
@@ -96,8 +135,10 @@ help:
 	@echo "make test       build and run wire-conformance tests"
 	@echo "make run        run the loopback example"
 	@echo "make asan       rebuild under ASan+UBSan into $(BUILD)/asan, run tests + example"
+	@echo "make tsan       rebuild under TSan into $(BUILD)/tsan, run tests + example"
+	@echo "make fuzz       build libFuzzer targets with clang into $(BUILD)/fuzz, run each FUZZ_TIME s"
 	@echo "make clean      remove $(BUILD)/"
 	@echo ""
-	@echo "Overrides: CXX=clang++  OPT=-O0  BUILD=/tmp/out"
+	@echo "Overrides: CXX=clang++  OPT=-O0  BUILD=/tmp/out  FUZZ_TIME=600"
 
 -include $(DEPS)

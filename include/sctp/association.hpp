@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <sctp/platform.hpp>
 #include <sctp/sctp.hpp>
+#include <sctp/utils.hpp>
 
 enum Association_State {
     COOKIE_WAIT, 
@@ -139,7 +140,7 @@ struct Association {
     uint16_t cookie_retransmits;
     uint8_t stale_cookie_retries;
     uint32_t cumulative_tsn_ack;
-    std::map<uint32_t, Outstanding_Data> outstanding_data;
+    std::map<uint32_t, Outstanding_Data, Tsn_Less> outstanding_data;
     bool has_rtt_measurement_tsn;
     uint32_t rtt_measurement_tsn;
     uint32_t pmdcs;
@@ -151,7 +152,7 @@ struct Association {
     std::deque<Acked_Retransmission> acked_retransmissions;
     bool in_fast_recovery;
     uint32_t fast_recovery_exit_tsn;
-    std::map<uint32_t, Held_Chunk> tsn_ooo_buffer;
+    std::map<uint32_t, Held_Chunk, Tsn_Less> tsn_ooo_buffer;
     std::vector<uint32_t> duplicate_tsns;
     uint8_t delayed_sack_packet_count;
     uint16_t ack_state;

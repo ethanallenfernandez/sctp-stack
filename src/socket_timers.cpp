@@ -473,10 +473,6 @@ void SCTP_Socket::schedule_pending_retransmission(const Association_Key& key, bo
         if (ordered.empty()) {
             return;
         }
-        std::sort(ordered.begin(), ordered.end(), [&](const auto& lhs, const auto& rhs) {
-            return static_cast<uint32_t>(lhs.first - assoc.cumulative_tsn_ack)
-                < static_cast<uint32_t>(rhs.first - assoc.cumulative_tsn_ack);
-        });
 
         const Peer_Path& to = destination_of(assoc, *ordered.front().second);
         if (gated && !cwnd_open(assoc, to)) {

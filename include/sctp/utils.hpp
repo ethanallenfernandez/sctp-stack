@@ -24,6 +24,12 @@ inline bool tsn_gte(uint32_t a, uint32_t b) {
     return a == b || tsn_gt(a, b);
 }
 
+// A strict weak ordering only while every key lies within half the TSN space
+// of the others.
+struct Tsn_Less {
+    bool operator()(uint32_t a, uint32_t b) const { return tsn_lt(a, b); }
+};
+
 inline bool ssn_gt(uint16_t a, uint16_t b) {
     constexpr uint16_t HALF_SSN_SPACE = uint16_t{1} << 15;
     uint16_t distance = static_cast<uint16_t>(a - b);

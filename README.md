@@ -25,6 +25,7 @@ src/              implementation + internal headers (not installed)
   checksum.{hpp,cpp}    CRC-32C
 examples/         runnable demos, linked against the library
 tests/            conformance tests, one binary per area
+fuzz/             libFuzzer targets for the packet and State Cookie codecs
 build/            all build output (gitignored, never written in-tree)
 ```
 
@@ -39,13 +40,16 @@ make            # library + examples + tests -> build/
 make test       # build and run wire-conformance tests
 make run        # run the loopback example
 make asan       # rebuild under ASan+UBSan into build/asan, run tests + example
+make tsan       # rebuild under TSan into build/tsan, run tests + example
+make fuzz       # libFuzzer targets in fuzz/ (clang), FUZZ_TIME seconds each
 make clean      # remove build/
 make help       # target list
 ```
 
 Overrides: `make CXX=clang++`, `make OPT=-O0`, `make BUILD=/tmp/out`.
 
-Sanitized objects build into `build/asan` so they never mix with the plain ones.
+Sanitized objects build into `build/asan`, `build/tsan` and `build/fuzz` so they
+never mix with the plain ones.
 
 ## Status
 

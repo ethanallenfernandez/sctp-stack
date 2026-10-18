@@ -92,17 +92,14 @@ namespace {
     }
 
     bool make_room(Association& assoc, uint32_t tsn, size_t& used) {
-        auto highest = assoc.tsn_ooo_buffer.end();
-        for (auto it = assoc.tsn_ooo_buffer.begin(); it != assoc.tsn_ooo_buffer.end(); ++it) {
-            if (!it->second.assembled && (highest == assoc.tsn_ooo_buffer.end() || tsn_gt(it->first, highest->first))) {
-                highest = it;
-            }
-        }
-        if (highest == assoc.tsn_ooo_buffer.end() || tsn_gt(tsn, highest->first)) {
+        auto highest = std::find_if(assoc.tsn_ooo_buffer.rbegin(), assoc.tsn_ooo_buffer.rend(), [](const auto& entry) {
+            return !entry.second.assembled;
+        });
+        if (highest == assoc.tsn_ooo_buffer.rend() || tsn_gt(tsn, highest->first)) {
             return false;
         }
         used -= highest->second.data.user_data.size();
-        assoc.tsn_ooo_buffer.erase(highest);
+        assoc.tsn_ooo_buffer.erase(std::next(highest).base());
         return true;
     }
 
@@ -1544,18 +1541,9 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
                 }
             }
 
-            bool have_exit = false;
-            uint32_t exit_tsn = 0;
-            for (const auto& [tsn, outstanding] : assoc.outstanding_data) {
-                (void)outstanding;
-                if (!have_exit || tsn_gt(tsn, exit_tsn)) {
-                    have_exit = true;
-                    exit_tsn = tsn;
-                }
-            }
-            if (have_exit) {
+            if (!assoc.outstanding_data.empty()) {
                 assoc.in_fast_recovery = true;
-                assoc.fast_recovery_exit_tsn = exit_tsn;
+                assoc.fast_recovery_exit_tsn = assoc.outstanding_data.rbegin()->first;
                 entered_fast_recovery = true;
             }
         }
@@ -1662,20 +1650,10 @@ void SCTP_Socket::send_sack(const Association_Key& key) {
 
 // Caller must hold associations_mutex.
 SCTP_Packet SCTP_Socket::make_sack(const Association_Key& key, Association& assoc) {
-    std::vector<uint16_t> offsets;
-    offsets.reserve(assoc.tsn_ooo_buffer.size());
-    for (const auto& [tsn, data] : assoc.tsn_ooo_buffer) {
-        uint32_t offset = tsn - assoc.last_peer_tsn;
-        if (offset > 0 && offset <= UINT16_MAX) {
-            offsets.push_back(static_cast<uint16_t>(offset));
-        }
-        (void)data;
-    }
-    std::sort(offsets.begin(), offsets.end());
-    offsets.erase(std::unique(offsets.begin(), offsets.end()), offsets.end()); // Should not be necessary, but nonetheless...
-
     std::vector<sack_gap_ack_block> gaps;
-    for (uint16_t offset : offsets) {
+    for (const auto& [tsn, data] : assoc.tsn_ooo_buffer) {
+        uint16_t offset = static_cast<uint16_t>(tsn - assoc.last_peer_tsn);
+        (void)data;
         if (gaps.empty() || static_cast<uint32_t>(gaps.back().end) + 1 != offset) {
             gaps.push_back({offset, offset});
         } else {
@@ -1776,8 +1754,9 @@ void SCTP_Socket::handle_data_packet(
                 saw_duplicate = true;
                 continue;
             }
-            if (used >= RWND && !make_room(assoc, tsn, used)
-                    && !(tsn == assoc.last_peer_tsn + 1 && blocked_on_cumulative_tsn(assoc))) {
+            // Past what a Gap Ack Block can report, and past any window we can offer.
+            if (tsn - assoc.last_peer_tsn > UINT16_MAX || (used >= RWND && !make_room(assoc, tsn, used)
+                    && !(tsn == assoc.last_peer_tsn + 1 && blocked_on_cumulative_tsn(assoc)))) {
                 dropped = true;
                 continue;
             }
