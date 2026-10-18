@@ -105,6 +105,11 @@ struct SCTP_Socket_Test_Access {
         stack.handle_recv_packet(wire.data(), wire.size(), peer_address());
     }
 
+    static void deliver_abort(SCTP_Socket& stack) {
+        std::vector<uint8_t> wire = serialize_sctp_packet(build_abort(PEER_PORT, LOCAL_PORT, OUR_TAG, false, {}));
+        stack.handle_recv_packet(wire.data(), wire.size(), peer_address());
+    }
+
     static bool has_association(SCTP_Socket& stack, const Association_Key& key) {
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
         return stack.associations.count(key) != 0;
@@ -341,6 +346,35 @@ static void test_partial_delivery() {
     check(SCTP_Socket_Test_Access::last_peer_tsn(stack, key) == PEER_TSN + FRAGMENTS - 1, "no fragment was dropped");
 }
 
+static void test_partial_delivery_aborted() {
+    std::printf("An association ending part way through partial delivery (RFC 6458 6.1.7):\n");
+    SCTP_Socket stack;
+    stack.sctp_subscribe(Notification_Type::SCTP_PARTIAL_DELIVERY_EVENT, true);
+    Association_Key key = SCTP_Socket_Test_Access::add_receiving_association(stack);
+    constexpr uint32_t FILLING = (RWND - PMDCS) / FRAGMENT_SIZE + 1;
+    for (uint32_t i = 0; i < FILLING; ++i) {
+        SCTP_Socket_Test_Access::deliver(stack, PEER_TSN + i, i == 0 ? DATA_FLAG_B : 0, message(FRAGMENT_SIZE), 0, 2);
+    }
+    std::vector<uint8_t> buffer(100);
+    bool partial = false;
+    check(stack.sctp_recv_data_from(key, buffer, &partial) == 100 && partial, "the message is part way through partial delivery");
+
+    SCTP_Socket_Test_Access::deliver_abort(stack);
+    auto first = stack.sctp_recv_notification();
+    const auto* event = first ? std::get_if<Partial_Delivery_Event>(&first->payload) : nullptr;
+    check(event && first->type == Notification_Type::SCTP_PARTIAL_DELIVERY_EVENT && event->stream == 2 && event->ssn == 0,
+          "SCTP_PARTIAL_DELIVERY_EVENT names its stream and SSN");
+    auto second = stack.sctp_recv_notification();
+    const auto* change = second ? std::get_if<Assoc_Change>(&second->payload) : nullptr;
+    check(change && change->state == Assoc_Change_State::COMM_LOST, "followed by COMM_LOST");
+    check(stack.sctp_recv_data_from(key, buffer, &partial) == 0, "what was left unread is dropped");
+
+    key = SCTP_Socket_Test_Access::add_receiving_association(stack);
+    SCTP_Socket_Test_Access::deliver(stack, PEER_TSN, DATA_FLAG_B | DATA_FLAG_E, {'n', 'e', 'w'});
+    check(read_available(stack, key, partial) == std::vector<uint8_t>{'n', 'e', 'w'} && !partial,
+          "a new association on the same address starts a message of its own");
+}
+
 static void test_short_receive_buffer() {
     std::printf("A receive buffer smaller than the message:\n");
     SCTP_Socket stack;
@@ -466,6 +500,8 @@ int main() {
     test_window_counts_reassembly();
     std::printf("\n");
     test_partial_delivery();
+    std::printf("\n");
+    test_partial_delivery_aborted();
     std::printf("\n");
     test_short_receive_buffer();
     std::printf("\n");

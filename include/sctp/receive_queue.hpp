@@ -36,6 +36,8 @@ class Receive_Queue {
         void push(const Association_Key& key, std::vector<uint8_t> bytes, bool complete = true, uint16_t stream = 0);
         std::optional<Read> read_any(uint8_t* out, size_t capacity);
         std::optional<Read> read_from(const Association_Key& key, uint8_t* out, size_t capacity);
+        // Drops a message whose end will never arrive, read or not.
+        void abandon_open(const Association_Key& key);
         void clear();
 
         // Inspection, and the per-association occupancy a_rwnd will be built from.

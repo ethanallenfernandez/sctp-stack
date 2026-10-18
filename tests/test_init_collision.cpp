@@ -6,6 +6,7 @@
 #include <sctp/platform.hpp>
 #include "serialize.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <mutex>
@@ -14,6 +15,13 @@
 #include <vector>
 
 struct SCTP_Socket_Test_Access {
+    // Set before sctp_run: the event loop reads the clock.
+    static void offset_cookie_clock(SCTP_Socket& stack, const std::atomic<int>& seconds) {
+        stack.cookie_authorizer.clock = [&seconds] {
+            return std::chrono::steady_clock::now() + std::chrono::seconds(seconds.load());
+        };
+    }
+
     static size_t association_count(SCTP_Socket& stack) {
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
         return stack.associations.size();
@@ -148,6 +156,12 @@ bool recv_cookie_ack(RawPeer& peer, uint32_t& vtag, int timeout_ms = 2000) {
     return true;
 }
 
+bool assoc_change(SCTP_Socket& stack, Assoc_Change_State state) {
+    auto notification = stack.sctp_recv_notification(500);
+    const auto* change = notification ? std::get_if<Assoc_Change>(&notification->payload) : nullptr;
+    return change != nullptr && change->state == state;
+}
+
 std::string recv_string(SCTP_Socket& stack) {
     std::vector<uint8_t> buffer(2048);
     size_t n = stack.sctp_recv_data(buffer, nullptr);
@@ -265,6 +279,7 @@ void test_peer_restart() {
     uint32_t vtag = 0;
     peer.send_echo(old_stack_tag, first.cookie);
     if (!recv_cookie_ack(peer, vtag)) { check(false, "first handshake COOKIE ACK"); return; }
+    check(assoc_change(stack, Assoc_Change_State::COMM_UP), "COMM_UP reported");
     peer.send_data(old_stack_tag, OLD_TSN, "BEFORE");
     settle();
     check(recv_string(stack) == "BEFORE", "original association carries DATA");
@@ -291,12 +306,47 @@ void test_peer_restart() {
     check(tcb.state == ESTABLISHED && tcb.this_ver_tag == new_stack_tag && tcb.peer_ver_tag == NEW_TAG,
           "association now holds the new tags");
     check(SCTP_Socket_Test_Access::association_count(stack) == 1, "and there is still exactly one");
+    check(assoc_change(stack, Assoc_Change_State::RESTART), "RESTART reported");
     settle();
     check(recv_string(stack) == "AFTER", "DATA bundled with the restart cookie is delivered");
 
     peer.send_data(old_stack_tag, NEW_TSN + 1, "STALE-TAG");
     settle();
     check(recv_string(stack).empty(), "DATA under the old tag is rejected");
+}
+
+/*------------------------------- 5.2.4 E ----------------------------------*/
+
+void test_stale_cookie_for_the_live_association() {
+    std::printf("A stale cookie whose tags both match is a retransmission (5.2.4 action E):\n");
+    constexpr uint16_t STACK_PORT = 39751, PEER_PORT = 39752;
+    constexpr uint32_t PEER_TAG = 0x7E7E7E7E, PEER_TSN = 0x700;
+
+    SCTP_Socket stack;
+    std::atomic<int> clock_offset{0};
+    SCTP_Socket_Test_Access::offset_cookie_clock(stack, clock_offset);
+    RawPeer peer;
+    if (!start(stack, STACK_PORT) || !peer.open(PEER_PORT, STACK_PORT)) { check(false, "setup"); return; }
+
+    peer.send_init(PEER_TAG, PEER_TSN);
+    Init_Ack ack;
+    if (!recv_init_ack(peer, ack)) { check(false, "INIT ACK"); return; }
+    uint32_t vtag = 0;
+    peer.send_echo(ack.value.initiate_tag, ack.cookie);
+    if (!recv_cookie_ack(peer, vtag)) { check(false, "handshake COOKIE ACK"); return; }
+    check(assoc_change(stack, Assoc_Change_State::COMM_UP), "COMM_UP reported");
+
+    clock_offset = static_cast<int>(ack.parsed.lifespan_us / 1'000'000) + 10;
+    peer.send_echo(ack.value.initiate_tag, ack.cookie);
+    SCTP_Packet reply;
+    check(peer.recv_type(COOKIE_ACK, reply, 1000) && reply.header.verification_tag == PEER_TAG,
+          "the stale cookie is answered with a COOKIE ACK, not a Stale Cookie ERROR");
+    check(!stack.sctp_recv_notification(200), "and nothing is reported to the ULP");
+
+    Association tcb;
+    SCTP_Socket_Test_Access::snapshot(stack, PEER_PORT, tcb);
+    check(tcb.state == ESTABLISHED && tcb.this_ver_tag == ack.value.initiate_tag && tcb.peer_ver_tag == PEER_TAG,
+          "association is undisturbed");
 }
 
 /*--------------------------- 5.2.4 C, unlisted ---------------------------*/
@@ -369,6 +419,7 @@ int main() {
     test_init_in_cookie_wait();
     test_init_in_cookie_echoed();
     test_peer_restart();
+    test_stale_cookie_for_the_live_association();
     test_old_cookies_are_discarded();
     test_simultaneous_open();
 

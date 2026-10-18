@@ -239,6 +239,10 @@ namespace {
         reports.erase(fits, reports.end());
     }
 
+    error_cause missing_parameter_cause(uint16_t type) {
+        return error_cause{CAUSE_MISSING_MANDATORY_PARAM, {0, 0, 0, 1, static_cast<uint8_t>(type >> 8), static_cast<uint8_t>(type)}};
+    }
+
     error_cause unresolvable_address_cause(const std::vector<uint8_t>& host_name) {
         std::vector<uint8_t> info;
         append_parameter(info, PARAM_HOST_NAME_ADDRESS, host_name.data(), host_name.size());
@@ -774,7 +778,11 @@ void SCTP_Socket::handle_init_ack(const SCTP_Common_Header& header, const SCTP_C
     Parameter_Scan params = scan_init_ack(init_ack);
     std::vector<uint8_t> cookie;
     if (!find_parameter(params.recognized, PARAM_STATE_COOKIE, cookie)) {
-        std::cout << "Dropped INIT_ACK with no State Cookie parameter" << std::endl;
+        assoc_lock.unlock();
+        std::cout << "Aborting INIT_ACK with no State Cookie parameter" << std::endl;
+        remove_association(key);
+        send_abort(header, key, src, init_ack.initiate_tag, false, {missing_parameter_cause(PARAM_STATE_COOKIE)});
+        notify_assoc_change(key, Assoc_Change_State::CANT_STR_ASSOC);
         return;
     }
     if (init_ack.out_streams == 0 || init_ack.in_streams == 0) {
@@ -935,6 +943,7 @@ bool SCTP_Socket::handle_cookie_echo(
         cancel_expirations(key);
         sends.purge(key);
         forget_peer_addresses(key);
+        abandon_partial_delivery(key, tcb);
         tcb = init_new_association(cookie);
         add_peer_addresses(key, tcb, cookie_addresses(cookie));
         destination = reply_destination(tcb, src);
@@ -948,6 +957,7 @@ bool SCTP_Socket::handle_cookie_echo(
         tcb.peer_rwnd = cookie.peer_a_rwnd;
         tcb.peer_max_rwnd = cookie.peer_a_rwnd;
         tcb.tsn_ooo_buffer.clear();
+        abandon_partial_delivery(key, tcb);
         tcb.reassembly = {};
         tcb.inbound_streams.clear();
         tcb.held_deliveries.clear();

@@ -66,6 +66,21 @@ Receive_Queue::Read Receive_Queue::read_locked(std::unordered_map<Association_Ke
     return read;
 }
 
+void Receive_Queue::abandon_open(const Association_Key& key) {
+    std::lock_guard<std::mutex> lock(mutex);
+    auto it = pending.find(key);
+    if (it == pending.end() || it->second.messages.back().complete) {
+        return;
+    }
+    const Message& tail = it->second.messages.back();
+    it->second.bytes -= tail.bytes.size() - tail.offset;
+    it->second.messages.pop_back();
+    if (it->second.messages.empty()) {
+        pending.erase(it);
+        ready.erase(std::find(ready.begin(), ready.end(), key));
+    }
+}
+
 void Receive_Queue::clear() {
     std::lock_guard<std::mutex> lock(mutex);
     pending.clear();

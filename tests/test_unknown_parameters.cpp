@@ -290,7 +290,24 @@ void test_init_ack_silent_and_stop() {
     check(r.sent.size() == 1 && r.sent[0].chunks.size() == 1, "10 and Unrecognized Parameter: COOKIE ECHO alone");
 
     r = Access::deliver(true, OUR_TAG, init_chunk(INIT_ACK, concat({parameter(0x4000, {}), some_cookie()})));
-    check(r.sent.empty() && r.state == COOKIE_WAIT, "State Cookie behind a 01 is never reached");
+    check(first_with(r, COOKIE_ECHO) == nullptr && first_with(r, ABORT) != nullptr && !r.association_left,
+          "State Cookie behind a 01 is never reached, so it is missing");
+}
+
+void test_init_ack_missing_state_cookie() {
+    std::printf("INIT ACK: no State Cookie (3.3.3, 3.3.10.2):\n");
+
+    auto r = Access::deliver(true, OUR_TAG, init_chunk(INIT_ACK, parameter(0x8008, {1})));
+    check(!r.association_left, "TCB removed");
+    const SCTP_Packet* abort = first_with(r, ABORT);
+    check(abort != nullptr && r.sent.size() == 1, "ABORT, and nothing else");
+    if (!abort) return;
+    check(abort->header.verification_tag == PEER_TAG && (abort->chunks[0].chunk_header.flag & CHUNK_FLAG_T_BIT) == 0,
+          "ABORT carries the peer's Initiate Tag, T bit clear");
+    const auto& causes = std::get<error_chunk_value>(abort->chunks[0].chunk_value).causes;
+    check(causes.size() == 1 && causes[0].code == CAUSE_MISSING_MANDATORY_PARAM
+              && causes[0].info == std::vector<uint8_t>{0, 0, 0, 1, 0, 7},
+          "Missing Mandatory Parameter: one, the State Cookie");
 }
 
 void test_init_ack_host_name() {
@@ -317,6 +334,7 @@ int main() {
     test_init_host_name();
     test_init_ack_bundles_error();
     test_init_ack_silent_and_stop();
+    test_init_ack_missing_state_cookie();
     test_init_ack_host_name();
 
     std::printf("\n%s (%d failure%s)\n",

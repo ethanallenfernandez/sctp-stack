@@ -258,7 +258,11 @@ void SCTP_Socket::forget_peer_addresses(const Association_Key& key) {
 void SCTP_Socket::remove_association(const Association_Key& key) {
     {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
-        associations.erase(key);
+        auto it = associations.find(key);
+        if (it != associations.end()) {
+            abandon_partial_delivery(key, it->second);
+            associations.erase(it);
+        }
         forget_peer_addresses(key);
     }
     cancel_expirations(key);
@@ -267,6 +271,15 @@ void SCTP_Socket::remove_association(const Association_Key& key) {
 
 void SCTP_Socket::notify_assoc_change(const Association_Key& key, Assoc_Change_State state) {
     notifications.enqueue(Notification{Notification_Type::SCTP_ASSOC_CHANGE, key, 0, Assoc_Change{state}});
+}
+
+void SCTP_Socket::abandon_partial_delivery(const Association_Key& key, const Association& assoc) {
+    if (!assoc.reassembly.open || !assoc.reassembly.partially_delivered) {
+        return;
+    }
+    receives.abandon_open(key);
+    notifications.enqueue(Notification{Notification_Type::SCTP_PARTIAL_DELIVERY_EVENT, key, 0,
+        Partial_Delivery_Event{assoc.reassembly.stream, assoc.reassembly.ssn}});
 }
 
 void SCTP_Socket::notify_peer_addr_change(const Association_Key& key, const sockaddr_in& address, Peer_Addr_State state) {

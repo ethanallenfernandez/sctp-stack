@@ -3,7 +3,8 @@
 namespace {
     // Bounded by association lifetimes, so never dropped at the cap.
     bool is_lifecycle(Notification_Type type) {
-        return type == Notification_Type::SCTP_ASSOC_CHANGE || type == Notification_Type::SCTP_SHUTDOWN_EVENT;
+        return type == Notification_Type::SCTP_ASSOC_CHANGE || type == Notification_Type::SCTP_SHUTDOWN_EVENT
+            || type == Notification_Type::SCTP_PARTIAL_DELIVERY_EVENT;
     }
 }
 

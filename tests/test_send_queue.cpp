@@ -4,6 +4,7 @@
 // stack's UDP socket invalid, verifies that the queued DATA is retained, then
 // installs a working socket and verifies that the same TSN reaches the peer.
 
+#include "builders.hpp"
 #include "serialize.hpp"
 #include "socket_internal.hpp"
 #include <sctp/platform.hpp>
@@ -50,6 +51,14 @@ struct SCTP_Socket_Test_Access {
         stack.local_address.sin_family = AF_INET;
         stack.local_address.sin_port = htons(19001);
         return key;
+    }
+
+    static void remove_retransmissions_of_type(SCTP_Socket& stack, const Association_Key& key, Chunk_Type type) {
+        stack.sends.remove_retransmissions_of_type(key, type);
+    }
+
+    static bool has_retransmission_for(SCTP_Socket& stack, const Association_Key& key) {
+        return stack.sends.has_retransmission_for(key);
     }
 
     static void invalidate_socket(SCTP_Socket& stack) {
@@ -358,6 +367,25 @@ static void test_sack_trims_retransmission_queue() {
         "fully acknowledged retransmission packet was discarded");
 }
 
+static void test_cookie_echo_takes_its_error() {
+    std::printf("A COOKIE ECHO retransmission is withdrawn with the ERROR bundled behind it (3.2.2):\n");
+
+    SCTP_Socket stack;
+    sockaddr_in peer{};
+    peer.sin_family = AF_INET;
+    peer.sin_port = htons(19002);
+    sctp_parse_ipv4("127.0.0.1", peer.sin_addr);
+    Association_Key key{peer};
+
+    SCTP_Packet retry = build_cookie_echo(19001, 19002, 0x10203040, std::vector<uint8_t>(96, 0x42),
+                                          {error_cause{CAUSE_UNRECOGNIZED_PARAMS, {0xC0, 0x00, 0x00, 0x04}}});
+    check(retry.chunks.size() == 2 && retry.chunks[1].chunk_header.type == OP_ERROR, "the retry carries the ERROR");
+    SCTP_Socket_Test_Access::enqueue(stack, Deliverable{key, key.address, std::move(retry)}, Send_Priority::RETRANSMISSION);
+
+    SCTP_Socket_Test_Access::remove_retransmissions_of_type(stack, key, COOKIE_ECHO);
+    check(!SCTP_Socket_Test_Access::has_retransmission_for(stack, key), "nothing is left to send the ERROR on its own");
+}
+
 static void test_stream_sequence_numbers() {
     std::printf("Stream Sequence Numbers (RFC 9260 6.5, 6.6):\n");
 
@@ -395,6 +423,8 @@ int main() {
     test_send_priority_order();
     std::printf("\n");
     test_sack_trims_retransmission_queue();
+    std::printf("\n");
+    test_cookie_echo_takes_its_error();
     std::printf("\n");
     test_stream_sequence_numbers();
 

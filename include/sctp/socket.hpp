@@ -110,6 +110,8 @@ private:
     void forget_peer_addresses(const Association_Key& key);
     void close_associations(std::chrono::milliseconds linger);
     void notify_assoc_change(const Association_Key& key, Assoc_Change_State state);
+    // For a TCB being discarded or reset. Takes associations_mutex as held.
+    void abandon_partial_delivery(const Association_Key& key, const Association& assoc);
     void notify_peer_addr_change(const Association_Key& key, const sockaddr_in& address, Peer_Addr_State state);
     void run_expire();
     void run_sending();

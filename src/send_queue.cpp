@@ -161,12 +161,16 @@ void Send_Queue::remove_retransmissions_of_type(const Association_Key& location,
         if (queued.deliverable.location == location
                 && (destination == nullptr || Association_Key{*destination} == Association_Key{queued.deliverable.destination})) {
             auto& chunks = queued.deliverable.packet.chunks;
+            bool carried = std::any_of(chunks.begin(), chunks.end(), [&](const SCTP_Chunk& chunk) {
+                return chunk.chunk_header.type == type;
+            });
+            // The only ERROR retransmitted is one bundled behind a COOKIE ECHO, and it goes with it.
             chunks.erase(
                 std::remove_if(
                     chunks.begin(),
                     chunks.end(),
                     [&](const SCTP_Chunk& chunk) {
-                        return chunk.chunk_header.type == type;
+                        return carried && (chunk.chunk_header.type == type || chunk.chunk_header.type == OP_ERROR);
                     }
                 ),
                 chunks.end()
