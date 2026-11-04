@@ -52,9 +52,9 @@ struct SCTP_Socket_Test_Access {
     };
 
     static void receive(SCTP_Socket& stack, const sockaddr_in& udp_src, uint32_t tag, std::vector<SCTP_Chunk> chunks,
-                        uint16_t sctp_port = PEER_SCTP_PORT) {
+                        uint16_t sctp_port = PEER_SCTP_PORT, uint16_t our_port = OUR_PORT) {
         SCTP_Packet packet;
-        packet.header = {sctp_port, OUR_PORT, tag, 0};
+        packet.header = {sctp_port, our_port, tag, 0};
         packet.chunks = std::move(chunks);
         std::vector<uint8_t> wire = serialize_sctp_packet(packet);
         stack.handle_recv_packet(wire.data(), wire.size(), udp_src);
@@ -188,6 +188,38 @@ void test_other_sctp_port_is_out_of_the_blue() {
     check(assoc && assoc->state == ESTABLISHED && Access::association_count(stack) == 1, "the association is untouched");
 }
 
+void test_unbound_port_is_out_of_the_blue() {
+    std::printf("A packet to an SCTP port other than ours belongs to no endpoint here:\n");
+    SCTP_Socket stack;
+    Access::set_local_port(stack);
+
+    Access::receive(stack, A, 0, {init_chunk()}, PEER_SCTP_PORT, OUR_PORT + 1);
+    auto sent = Access::drain(stack);
+    const Access::Sent* abort = first_with(sent, ABORT);
+    check(abort && !first_with(sent, INIT_ACK), "an INIT is ABORTed, not answered");
+    check(abort && abort->packet.header.verification_tag == PEER_TAG
+              && !(abort->packet.chunks[0].chunk_header.flag & CHUNK_FLAG_T_BIT),
+          "under its Initiate Tag, T bit clear");
+    check(abort && abort->packet.header.src_port == OUR_PORT + 1 && abort->packet.header.des_port == PEER_SCTP_PORT,
+          "from the port it was sent to");
+    check(Access::association_count(stack) == 0, "no TCB");
+
+    uint32_t our_tag = establish(stack);
+    check(our_tag != 0, "established on our port");
+    Access::receive(stack, A, our_tag, {heartbeat_chunk()}, PEER_SCTP_PORT, OUR_PORT + 1);
+    sent = Access::drain(stack);
+    abort = first_with(sent, ABORT);
+    check(abort && (abort->packet.chunks[0].chunk_header.flag & CHUNK_FLAG_T_BIT) && !first_with(sent, HEARTBEAT_ACK),
+          "the association's peer and tag at another port: a reflected ABORT");
+    Association* assoc = Access::tcb(stack, key_of(A));
+    check(assoc && assoc->state == ESTABLISHED, "the association is untouched");
+
+    Access::receive(stack, A, our_tag, {{{ABORT, 0, 0}, error_chunk_value{}}}, PEER_SCTP_PORT, OUR_PORT + 1);
+    sent = Access::drain(stack);
+    assoc = Access::tcb(stack, key_of(A));
+    check(sent.empty() && assoc && assoc->state == ESTABLISHED, "an ABORT there is dropped");
+}
+
 /*------------------------------ port changes -------------------------------*/
 
 void test_port_follows_the_peer() {
@@ -313,6 +345,7 @@ int main() {
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
     test_keyed_on_sctp_port();
     test_other_sctp_port_is_out_of_the_blue();
+    test_unbound_port_is_out_of_the_blue();
     test_port_follows_the_peer();
     test_port_per_destination();
     test_associate_with_udp_port();

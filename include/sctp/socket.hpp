@@ -30,6 +30,7 @@ enum class Packet_Validation {
     ACCEPT,
     DISCARD,
     ABORT_OOTB,
+    ABORT_INIT,
     SHUTDOWN_COMPLETE_OOTB,
 };
 

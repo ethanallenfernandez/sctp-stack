@@ -73,6 +73,7 @@ struct SCTP_Socket_Test_Access {
         SCTP_Packet packet;
         packet.header = {PEER_PORT, OUR_PORT, tag, 0};
         packet.chunks = std::move(chunks);
+        stack.local_address.sin_port = htons(OUR_PORT);
         std::vector<uint8_t> wire = serialize_sctp_packet(packet);
         stack.handle_recv_packet(wire.data(), wire.size(), src);
     }

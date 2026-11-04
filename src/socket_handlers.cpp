@@ -438,6 +438,10 @@ void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockad
             std::cout << "Aborting out of the blue packet" << std::endl;
             send_abort(in_pkt.header, key, src, in_pkt.header.verification_tag, true, {});
             return;
+        case Packet_Validation::ABORT_INIT:
+            std::cout << "Aborting INIT to an unbound port" << std::endl;
+            send_abort(in_pkt.header, key, src, std::get<init_chunk_value>(in_pkt.chunks[0].chunk_value).initiate_tag, false, {});
+            return;
         case Packet_Validation::SHUTDOWN_COMPLETE_OOTB:
             std::cout << "Answering out of the blue SHUTDOWN_ACK" << std::endl;
             enqueue_packet(Deliverable{key, src, build_shutdown_complete(
@@ -560,6 +564,17 @@ Packet_Validation SCTP_Socket::validate_verification_tag(const SCTP_Packet& pkt,
     }
 
     const SCTP_Chunk_Header& first = pkt.chunks[0].chunk_header;
+
+    // Our SCTP port is our UDP port; no endpoint here listens on any other.
+    if (pkt.header.des_port != ntohs(local_address.sin_port)) {
+        if (first.type != INIT) {
+            return ootb_response(pkt);
+        }
+        return pkt.header.verification_tag == 0 && pkt.chunks.size() == 1
+                && std::get<init_chunk_value>(pkt.chunks[0].chunk_value).initiate_tag != 0
+            ? Packet_Validation::ABORT_INIT
+            : Packet_Validation::DISCARD;
+    }
 
     if (first.type == INIT) {
         return pkt.header.verification_tag == 0 && pkt.chunks.size() == 1

@@ -74,6 +74,7 @@ struct SCTP_Socket_Test_Access {
             stack.associations.insert_or_assign(key, assoc);
         }
 
+        stack.local_address.sin_port = htons(LOCAL_PORT);
         std::vector<uint8_t> wire = serialize_sctp_packet(packet);
         stack.handle_recv_packet(wire.data(), wire.size(), src);
 
@@ -92,6 +93,7 @@ struct SCTP_Socket_Test_Access {
             stack.associations.insert_or_assign(key, assoc);
         }
 
+        stack.local_address.sin_port = htons(LOCAL_PORT);
         std::vector<uint8_t> wire = serialize_sctp_packet(packet);
         stack.handle_recv_packet(wire.data(), wire.size(), src);
 

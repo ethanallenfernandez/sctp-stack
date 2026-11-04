@@ -178,7 +178,7 @@ struct Association_Key {
 
 struct Association_Hash {
     size_t operator()(const Association_Key& k) const {
-        return std::hash<uint32_t>()(k.address.sin_addr.s_addr) ^ std::hash<uint16_t>()(k.address.sin_port);
+        return std::hash<uint64_t>()(uint64_t{k.address.sin_addr.s_addr} << 16 | k.address.sin_port);
     }
 };
 #endif
