@@ -21,6 +21,10 @@ using Clock = std::chrono::steady_clock;
 
 namespace {
 
+bool same_transport_address(const sockaddr_in& a, const sockaddr_in& b) {
+    return a.sin_addr.s_addr == b.sin_addr.s_addr && a.sin_port == b.sin_port;
+}
+
 constexpr uint32_t OUR_TAG = 0x0A0B0C0D;
 constexpr uint32_t PEER_TAG = 0x11223344;
 constexpr uint16_t PEER_PORT = 40000;
@@ -56,7 +60,7 @@ struct SCTP_Socket_Test_Access {
         stack.local_address.sin_port = htons(LOCAL_PORT);
         sctp_parse_ipv4("127.0.0.1", stack.local_address.sin_addr);
 
-        Association assoc = stack.init_new_association(key);
+        Association assoc = stack.init_new_association(key.address);
         assoc.this_ver_tag = OUR_TAG;
         assoc.peer_ver_tag = PEER_TAG;
         assoc.state = ESTABLISHED;
@@ -80,7 +84,7 @@ struct SCTP_Socket_Test_Access {
 
     static void fire_heartbeat_timer(SCTP_Socket& stack, const Association_Key& key, const sockaddr_in& path) {
         stack.handle_expiration(Expiration_Fallback{
-            Expiration_Key{key, Expiration_Timer_Type::HEARTBEAT, Association_Key{path}},
+            Expiration_Key{key, Expiration_Timer_Type::HEARTBEAT, path_key(path)},
             Clock::now(), 0, Deliverable{key, {}, SCTP_Packet{}}});
     }
 
@@ -142,7 +146,7 @@ struct SCTP_Socket_Test_Access {
     }
 
     static bool timer_armed(SCTP_Socket& stack, const Association_Key& key, const sockaddr_in& path) {
-        return stack.expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::HEARTBEAT, Association_Key{path}});
+        return stack.expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::HEARTBEAT, path_key(path)});
     }
 
     static bool timer_armed(SCTP_Socket& stack, const Association_Key& key) {
@@ -152,7 +156,7 @@ struct SCTP_Socket_Test_Access {
     // Whether the path's heartbeat timer falls due within `within`. Destructive:
     // every timer due by then is taken off the heap.
     static bool due_within(SCTP_Socket& stack, const Association_Key& key, const sockaddr_in& path, Clock::duration within) {
-        Expiration_Key timer{key, Expiration_Timer_Type::HEARTBEAT, Association_Key{path}};
+        Expiration_Key timer{key, Expiration_Timer_Type::HEARTBEAT, path_key(path)};
         for (const auto& fallback : stack.expirations.drain_expired(Clock::now() + within)) {
             if (fallback.key == timer) {
                 return true;

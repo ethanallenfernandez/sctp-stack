@@ -13,7 +13,7 @@ enum class Cookie_Result {
     MALFORMED,        // wrong size or version
     UNKNOWN_SECRET,   // signed by a key we no longer hold
     BAD_MAC,
-    WRONG_ENDPOINT,   // ports do not match the packet, or it came from an address the INIT did not give
+    WRONG_ENDPOINT,   // SCTP ports do not match the packet, or it came from an address the INIT did not give
     STALE,            // past its lifespan; caller sends an ERROR
 };
 

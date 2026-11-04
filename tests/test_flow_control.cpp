@@ -45,7 +45,7 @@ struct SCTP_Socket_Test_Access {
         stack.local_address.sin_port = htons(LOCAL_PORT);
         sctp_parse_ipv4("127.0.0.1", stack.local_address.sin_addr);
 
-        Association assoc = stack.init_new_association(key);
+        Association assoc = stack.init_new_association(key.address);
         assoc.this_ver_tag = OUR_TAG;
         assoc.peer_ver_tag = PEER_TAG;
         assoc.state = ESTABLISHED;
@@ -60,7 +60,7 @@ struct SCTP_Socket_Test_Access {
     }
 
     static Association new_association(SCTP_Socket& stack, const Association_Key& key) {
-        return stack.init_new_association(key);
+        return stack.init_new_association(key.address);
     }
 
     static std::optional<SCTP_Packet> transmit(SCTP_Socket& stack) {
@@ -129,7 +129,7 @@ struct SCTP_Socket_Test_Access {
 
     // T3-rtx is kept per destination: the association's only one here.
     static Expiration_Key timer_key(const Association_Key& key, Expiration_Timer_Type type) {
-        return Expiration_Key{key, type, type == Expiration_Timer_Type::T3_RTX ? key : Association_Key{}};
+        return Expiration_Key{key, type, type == Expiration_Timer_Type::T3_RTX ? path_key(key.address) : Association_Key{}};
     }
 
     static void fire(SCTP_Socket& stack, const Association_Key& key, Expiration_Timer_Type type) {

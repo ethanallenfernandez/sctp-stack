@@ -45,7 +45,7 @@ struct SCTP_Socket_Test_Access {
         stack.local_address.sin_port = htons(LOCAL_PORT);
         sctp_parse_ipv4("127.0.0.1", stack.local_address.sin_addr);
 
-        Association assoc = stack.init_new_association(key);
+        Association assoc = stack.init_new_association(key.address);
         assoc.this_ver_tag = OUR_TAG;
         assoc.peer_ver_tag = state == COOKIE_WAIT ? 0 : PEER_TAG;
         assoc.state = state;
@@ -65,7 +65,7 @@ struct SCTP_Socket_Test_Access {
         sockaddr_in src = peer_address();
         Association_Key key{src};
         if (state) {
-            Association assoc = stack.init_new_association(key);
+            Association assoc = stack.init_new_association(key.address);
             assoc.this_ver_tag = OUR_TAG;
             assoc.peer_ver_tag = *state == COOKIE_WAIT ? 0 : PEER_TAG;
             assoc.state = *state;
@@ -85,7 +85,7 @@ struct SCTP_Socket_Test_Access {
         sockaddr_in src = peer_address();
         Association_Key key{src};
         if (with_cookie_wait_tcb) {
-            Association assoc = stack.init_new_association(key);
+            Association assoc = stack.init_new_association(key.address);
             assoc.this_ver_tag = OUR_TAG;
             assoc.state = COOKIE_WAIT;
             assoc.primary_path = key.address;

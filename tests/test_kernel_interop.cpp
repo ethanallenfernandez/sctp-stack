@@ -19,9 +19,9 @@
 //     unshare -rn sh -c 'ip link set lo up; echo 9899 > /proc/sys/net/sctp/udp_port;
 //         echo 9900 > /proc/sys/net/sctp/encap_port; tcpdump -i lo -w x.pcap & ...'
 //
-// The stack derives SCTP ports from UDP ports, so the kernel's SCTP port must
-// equal net.sctp.udp_port, ours equals our UDP port, and a kernel client must
-// bind before connecting.
+// Our SCTP port equals our UDP port. The kernel's mostly equal its
+// net.sctp.udp_port too, except in the phase that sets them apart, and a kernel
+// client binds before connecting.
 
 #include <sctp/platform.hpp>
 #include <sctp/socket.hpp>
@@ -775,6 +775,67 @@ void phase_kernel_initiates(SCTP_Socket& stack) {
     check(await_empty(stack), "TCB removed");
 }
 
+// Kernel SCTP ports other than its UDP port, both ways: the association is
+// keyed on the SCTP port in the common header, and reached through the UDP one.
+void phase_distinct_ports(SCTP_Socket& stack) {
+    section("SCTP ports apart from the UDP port");
+    constexpr uint16_t LISTEN_PORT = 5001;
+    constexpr uint16_t CLIENT_PORT = 5002;
+
+    int listener = kernel_socket();
+    sockaddr_in kaddr = loopback(LISTEN_PORT);
+    if (listener < 0 || ::bind(listener, reinterpret_cast<sockaddr*>(&kaddr), sizeof kaddr) != 0
+        || ::listen(listener, 1) != 0) {
+        std::printf("  [FAIL] kernel listener on %u: %s\n", LISTEN_PORT, std::strerror(errno));
+        failures++;
+        if (listener >= 0) ::close(listener);
+        return;
+    }
+    Association_Key key = stack.sctp_associate("127.0.0.1", LISTEN_PORT, KERNEL_PORT);
+    bool up = stack.await_established_association(key, TIMEOUT_MS) == 0;
+    int fd = up ? ::accept(listener, nullptr, nullptr) : -1;
+    ::close(listener);
+    check(up && fd >= 0, "we associate to SCTP port 5001 through UDP port 9899");
+    expect_change(stack, Assoc_Change_State::COMM_UP, "COMM_UP");
+    if (fd >= 0) {
+        set_timeouts(fd, TIMEOUT_MS);
+        auto out = pattern(4000, 7);
+        stack.sctp_send_data(key, out);
+        Kernel_Message m;
+        check(kernel_recv(fd, m) == 1 && m.bytes == out, "kernel receives ours");
+        auto in = pattern(4000, 8);
+        std::vector<uint8_t> got;
+        check(kernel_send(fd, in) && our_recv(stack, key, got) && got == in, "we receive the kernel's");
+        ::close(fd);
+        expect_change(stack, Assoc_Change_State::SHUTDOWN_COMP, "kernel close(): SHUTDOWN_COMP");
+        check(await_empty(stack), "TCB removed");
+    }
+
+    fd = kernel_socket();
+    sockaddr_in self = loopback(CLIENT_PORT);
+    sockaddr_in peer = loopback(OUR_PORT);
+    int r = ::bind(fd, reinterpret_cast<sockaddr*>(&self), sizeof self) == 0
+        ? ::connect(fd, reinterpret_cast<sockaddr*>(&peer), sizeof peer) : -1;
+    check(r == 0, "kernel connects from SCTP port 5002 through UDP port 9899");
+    expect_change(stack, Assoc_Change_State::COMM_UP, "COMM_UP");
+    if (r == 0) {
+        set_timeouts(fd, TIMEOUT_MS);
+        key = Association_Key{loopback(CLIENT_PORT)};
+        auto in = pattern(4000, 9);
+        std::vector<uint8_t> got;
+        check(kernel_send(fd, in) && our_recv(stack, key, got) && got == in, "we receive it, keyed on SCTP port 5002");
+        auto out = pattern(4000, 10);
+        stack.sctp_send_data(key, out);
+        Kernel_Message m;
+        check(kernel_recv(fd, m) == 1 && m.bytes == out, "kernel receives ours");
+    }
+    ::close(fd);
+    if (r == 0) {
+        expect_change(stack, Assoc_Change_State::SHUTDOWN_COMP, "kernel close(): SHUTDOWN_COMP");
+    }
+    check(await_empty(stack), "TCB removed");
+}
+
 } // namespace
 
 /*----------------------------------- test ----------------------------------*/
@@ -838,6 +899,7 @@ int main() {
     phase_teardowns(stack, listener);
     ::close(listener);
     phase_kernel_initiates(stack);
+    phase_distinct_ports(stack);
 
     stack.sctp_close(1000);
 

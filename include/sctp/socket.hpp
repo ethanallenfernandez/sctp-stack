@@ -10,6 +10,7 @@
 #include <sctp/notification_queue.hpp>
 #include <sctp/receive_queue.hpp>
 
+#include <optional>
 #include <string_view>
 #include <string>
 #include <vector>
@@ -50,7 +51,10 @@ public:
     // linger_ms defaults to the socket's own, as sctp_set_linger left it.
     void sctp_close(int linger_ms = USE_SOCKET_LINGER);
     void sctp_set_linger(int linger_ms);
-    Association_Key sctp_associate(std::string_view ip_address, int port);
+    // port is the peer's SCTP port. udp_port is the UDP encapsulation port to
+    // reach it at, by default the same; once the peer answers, each of its
+    // addresses is sent to whatever UDP port it last sent from.
+    Association_Key sctp_associate(std::string_view ip_address, int port, std::optional<int> udp_port = std::nullopt);
     int await_established_association(const Association_Key& association_id, int timeout_ms);
     // Refused if the stream is not one the association negotiated. An unordered
     // message takes no SSN and may be delivered ahead of others on its stream.
@@ -88,7 +92,8 @@ private:
     sctp_socket_t udp_socket;
     Wakeup_Pair wakeup;
     std::unordered_map<Association_Key, Association, Association_Hash> associations;
-    // A peer's transport addresses other than the one its association is keyed on.
+    // A peer's transport addresses other than the one its association is keyed
+    // on. Keys, here and in associations, carry the peer's SCTP port.
     std::unordered_map<Association_Key, Association_Key, Association_Hash> peer_addresses;
     std::mutex associations_mutex;
     Send_Queue sends;
@@ -100,11 +105,13 @@ private:
 
 private:
     void event_loop();
-    Association init_new_association(const Association_Key& key);
+    Association init_new_association(const sockaddr_in& destination);
     Association init_new_association(const State_Cookie& cookie);
     void remove_association(const Association_Key& key);
+    // src is where a packet that passed the tag check came from.
+    void record_encapsulation_port(const Association_Key& key, const sockaddr_in& src);
     // These take associations_mutex as held.
-    Association_Key association_key_for(const sockaddr_in& src);
+    Association_Key association_key_for(const Association_Key& peer);
     // Appends the addresses the association lacks, as UNCONFIRMED, and maps each to key.
     void add_peer_addresses(const Association_Key& key, Association& assoc, const std::vector<sockaddr_in>& addresses);
     void forget_peer_addresses(const Association_Key& key);

@@ -46,7 +46,7 @@ struct SCTP_Socket_Test_Access {
         sctp_parse_ipv4("127.0.0.1", peer.sin_addr);
         Association_Key key{peer};
 
-        Association association = stack.init_new_association(key);
+        Association association = stack.init_new_association(key.address);
         association.state = ESTABLISHED;
         association.peer_ver_tag = 0x10203040;
         association.next_tsn = INITIAL_TSN;
@@ -84,7 +84,7 @@ struct SCTP_Socket_Test_Access {
         stack.local_address.sin_port = htons(LOCAL_PORT);
         sctp_parse_ipv4("127.0.0.1", stack.local_address.sin_addr);
         Association_Key key{peer_address()};
-        Association association = stack.init_new_association(key);
+        Association association = stack.init_new_association(key.address);
         association.state = ESTABLISHED;
         association.this_ver_tag = OUR_TAG;
         association.peer_ver_tag = 0x10203040;

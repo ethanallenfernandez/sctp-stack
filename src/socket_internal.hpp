@@ -57,13 +57,29 @@ inline uint32_t initial_cwnd(uint32_t pmdcs) {
     return std::min(4U * pmdcs, std::max(2U * pmdcs, 4404U));
 }
 
-inline bool same_transport_address(const sockaddr_in& a, const sockaddr_in& b) {
-    return Association_Key{a} == Association_Key{b};
+// The peer's SCTP port is the association's, so within one association a
+// destination is its IP address alone. The UDP port beside it is only where
+// encapsulated packets for it go.
+inline bool same_destination(const sockaddr_in& a, const sockaddr_in& b) {
+    return a.sin_addr.s_addr == b.sin_addr.s_addr;
+}
+
+inline Association_Key path_key(const sockaddr_in& address) {
+    sockaddr_in destination{};
+    destination.sin_family = AF_INET;
+    destination.sin_addr = address.sin_addr;
+    return Association_Key{destination};
+}
+
+inline Association_Key peer_key(const sockaddr_in& address, uint16_t sctp_port) {
+    Association_Key key = path_key(address);
+    key.address.sin_port = htons(sctp_port);
+    return key;
 }
 
 inline Peer_Path* find_path(Association& assoc, const sockaddr_in& address) {
     auto path = std::find_if(assoc.peer_address_list.begin(), assoc.peer_address_list.end(), [&](const Peer_Path& candidate) {
-        return same_transport_address(candidate.address, address);
+        return same_destination(candidate.address, address);
     });
     return path == assoc.peer_address_list.end() ? nullptr : &*path;
 }
@@ -109,7 +125,7 @@ inline const Peer_Path& data_path(const Association& assoc) {
 // was last sent to, the next such in list order, if there is one.
 inline Peer_Path& retransmission_path(Association& assoc, const sockaddr_in& last) {
     Peer_Path& preferred = data_path(assoc);
-    if (!same_transport_address(preferred.address, last)) {
+    if (!same_destination(preferred.address, last)) {
         return preferred;
     }
     auto& paths = assoc.peer_address_list;
@@ -159,6 +175,10 @@ inline sockaddr_in cookie_source(const State_Cookie& cookie) {
     source.sin_addr.s_addr = htonl(cookie.peer_ipv4);
     source.sin_port = htons(cookie.peer_udp_port);
     return source;
+}
+
+inline Association_Key cookie_key(const State_Cookie& cookie) {
+    return peer_key(cookie_source(cookie), cookie.sctp_src_port);
 }
 
 inline bool has_unacknowledged_data(const Association& assoc) {

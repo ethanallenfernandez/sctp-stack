@@ -56,7 +56,7 @@ struct SCTP_Socket_Test_Access {
         sockaddr_in src = peer_address();
         Association_Key key{src};
         if (cookie_wait) {
-            Association assoc = stack.init_new_association(key);
+            Association assoc = stack.init_new_association(key.address);
             assoc.state = COOKIE_WAIT;
             assoc.this_ver_tag = OUR_TAG;
             assoc.peer_ver_tag = 0;

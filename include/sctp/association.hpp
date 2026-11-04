@@ -85,8 +85,8 @@ struct Reassembly {
     std::vector<uint8_t> bytes;
 };
 
-// A destination transport address of the peer. The UDP port is the
-// encapsulation port, which RFC 6951 keeps per destination.
+// A destination of the peer. sin_port holds not the SCTP port, which is the
+// association's, but the UDP encapsulation port this address last sent from.
 struct Peer_Path {
     sockaddr_in address;
     bool confirmed;
@@ -167,6 +167,7 @@ struct Association {
     std::vector<Delivery> held_deliveries;
 };
 
+// The peer's primary address and its SCTP port.
 struct Association_Key {
     sockaddr_in address;
 

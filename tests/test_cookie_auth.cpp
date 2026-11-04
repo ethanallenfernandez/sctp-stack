@@ -210,10 +210,12 @@ void test_wrong_endpoint() {
     check_result(auth.verify(cookie, echo_header(), elsewhere, decoded, staleness),
                  Cookie_Result::WRONG_ENDPOINT, "different source address");
 
+    // A NAT may rebind the encapsulation port between INIT and COOKIE ECHO; the
+    // new one is recorded, not refused.
     sockaddr_in other_udp_port = peer_address();
     other_udp_port.sin_port = htons(PEER_PORT + 1);
     check_result(auth.verify(cookie, echo_header(), other_udp_port, decoded, staleness),
-                 Cookie_Result::WRONG_ENDPOINT, "different source UDP port");
+                 Cookie_Result::VALID, "different source UDP port");
 
     SCTP_Common_Header other_src = echo_header();
     other_src.src_port = PEER_PORT + 1;

@@ -51,7 +51,7 @@ bool is_assoc_change(const std::optional<Notification>& n, Assoc_Change_State st
 struct SCTP_Socket_Test_Access {
     static void add_association(SCTP_Socket& stack, Association_State state) {
         Association_Key key = peer_key();
-        Association assoc = stack.init_new_association(key);
+        Association assoc = stack.init_new_association(key.address);
         assoc.state = state;
         assoc.this_ver_tag = OUR_TAG;
         assoc.peer_ver_tag = PEER_TAG;

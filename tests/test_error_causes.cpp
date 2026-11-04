@@ -68,7 +68,7 @@ struct SCTP_Socket_Test_Access {
     }
 
     Association& add(Association_State state) {
-        Association assoc = stack.init_new_association(peer_key());
+        Association assoc = stack.init_new_association(peer_key().address);
         assoc.state = state;
         assoc.this_ver_tag = OUR_TAG;
         assoc.peer_ver_tag = state == COOKIE_WAIT ? 0 : PEER_TAG;

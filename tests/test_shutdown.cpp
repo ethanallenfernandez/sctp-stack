@@ -70,7 +70,7 @@ struct SCTP_Socket_Test_Access {
             socket.local_address.sin_port = htons(LOCAL_PORT);
             sctp_parse_ipv4("127.0.0.1", socket.local_address.sin_addr);
 
-            Association assoc = socket.init_new_association(key);
+            Association assoc = socket.init_new_association(key.address);
             assoc.this_ver_tag = OUR_TAG;
             assoc.peer_ver_tag = PEER_TAG;
             assoc.state = state;
@@ -108,9 +108,9 @@ struct SCTP_Socket_Test_Access {
                 socket.sends.commit(*pending);
             }
             result.t2_armed = socket.expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::T2_SHUTDOWN});
-            result.t3_armed = socket.expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::T3_RTX, key});
+            result.t3_armed = socket.expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::T3_RTX, path_key(key.address)});
             result.t5_armed = socket.expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::T5_SHUTDOWN_GUARD});
-            result.heartbeat_armed = socket.expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::HEARTBEAT, key});
+            result.heartbeat_armed = socket.expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::HEARTBEAT, path_key(key.address)});
             while (auto notification = socket.notifications.dequeue()) {
                 result.notifications.push_back(*notification);
             }
@@ -284,7 +284,7 @@ struct SCTP_Socket_Test_Access {
 
     static Result heartbeat_expires(Association_State state) {
         Stack stack(state, NEXT_TSN - 1);
-        stack.socket.expirations.cancel(Expiration_Key{stack.key, Expiration_Timer_Type::HEARTBEAT, stack.key});
+        stack.socket.expirations.cancel(Expiration_Key{stack.key, Expiration_Timer_Type::HEARTBEAT, path_key(stack.key.address)});
         stack.socket.handle_heartbeat_expiration(stack.key, stack.key.address);
         return stack.collect();
     }

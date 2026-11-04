@@ -270,13 +270,13 @@ namespace {
     }
 
     // The source address first, then each IPv4 Address parameter once, all with
-    // the source's UDP port.
+    // the source's UDP port until each sends from its own.
     std::vector<sockaddr_in> transport_addresses(const sockaddr_in& src, const std::vector<uint8_t>& recognized) {
         std::vector<sockaddr_in> out{src};
         for (uint32_t address : find_ipv4_addresses(recognized)) {
             sockaddr_in listed = src;
             listed.sin_addr.s_addr = htonl(address);
-            if (std::none_of(out.begin(), out.end(), [&](const sockaddr_in& seen) { return same_transport_address(seen, listed); })) {
+            if (std::none_of(out.begin(), out.end(), [&](const sockaddr_in& seen) { return same_destination(seen, listed); })) {
                 out.push_back(listed);
             }
         }
@@ -419,10 +419,10 @@ void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockad
     Association_Key key;
     {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
-        key = association_key_for(src);
+        key = association_key_for(peer_key(src, in_pkt.header.src_port));
         if (associations.count(key) == 0) {
             for (const sockaddr_in& address : init_addresses(in_pkt, src)) {
-                Association_Key listed = association_key_for(address);
+                Association_Key listed = association_key_for(peer_key(address, in_pkt.header.src_port));
                 if (associations.count(listed) != 0) {
                     key = listed;
                     break;
@@ -470,6 +470,11 @@ void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockad
         if (!handle_cookie_echo(in_pkt.header, in_pkt.chunks[0], key, src)) {
             return;
         }
+    }
+
+    // An INIT carries no proof that it came from the peer.
+    if (in_pkt.chunks.empty() || in_pkt.chunks[0].chunk_header.type != INIT) {
+        record_encapsulation_port(key, src);
     }
 
     // 9.2: any packet from the peer in SHUTDOWN-SENT gives it more time.
@@ -697,7 +702,7 @@ void SCTP_Socket::handle_init(const SCTP_Common_Header& header, const SCTP_Chunk
                     // reported it: that is how it found this TCB.
                     local_tag = assoc.this_ver_tag;
                     local_tsn = assoc.next_tsn;
-                    destination = assoc.primary_path;
+                    destination = primary(assoc).address;
                     break;
                 default:
                     std::copy_if(addresses.begin(), addresses.end(), std::back_inserter(added), [&](const sockaddr_in& address) {
@@ -893,7 +898,7 @@ bool SCTP_Socket::handle_cookie_echo(
     // here. Holding the lock through a restart's purge keeps an API-thread send
     // on the new association from being purged with the old one's packets.
     std::lock_guard<std::mutex> assoc_lock(associations_mutex);
-    key = association_key_for(cookie_source(cookie));
+    key = association_key_for(cookie_key(cookie));
     auto it = associations.find(key);
     if (it == associations.end()) {
         if (result == Cookie_Result::STALE) {
@@ -1019,7 +1024,7 @@ void SCTP_Socket::handle_error(const SCTP_Common_Header&, const SCTP_Chunk& chun
                     assoc.peer_ver_tag = 0;
                     assoc.init_retransmits = 0;
                     assoc.cookie_retransmits = 0;
-                    destination = assoc.primary_path;
+                    destination = primary(assoc).address;
                     retry_init = build_init(
                         ntohs(local_address.sin_port),
                         ntohs(key.address.sin_port),
@@ -1609,7 +1614,7 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
             bool retransmits_earliest = schedule_fast_retransmission && ack.have_earliest
                 && earliest != assoc.outstanding_data.end() && earliest->second.pending_retransmission;
             if (!has_unacknowledged_data(assoc, paths[i])) {
-                if (expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::T3_RTX, Association_Key{paths[i].address}})) {
+                if (expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::T3_RTX, path_key(paths[i].address)})) {
                     t3_actions.emplace_back(paths[i].address, T3_Action::STOP);
                 }
             } else if ((ack.have_earliest && sack_acknowledges(sack, ack.earliest_tsn)) || retransmits_earliest) {
@@ -1627,7 +1632,7 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
     for (const auto& [destination, action] : t3_actions) {
         switch (action) {
             case T3_Action::STOP:
-                cancel_expiration(Expiration_Key{key, Expiration_Timer_Type::T3_RTX, Association_Key{destination}});
+                cancel_expiration(Expiration_Key{key, Expiration_Timer_Type::T3_RTX, path_key(destination)});
                 break;
             case T3_Action::RESTART:
                 restart_t3(key, destination);

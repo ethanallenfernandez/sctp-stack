@@ -132,7 +132,6 @@ Cookie_Result Cookie_Auth::verify(
         || out.sctp_dst_port != header.des_port
         || out.local_ver_tag != header.verification_tag
         || !listed
-        || out.peer_udp_port != ntohs(src.sin_port)
     ) {
         return Cookie_Result::WRONG_ENDPOINT;
     }

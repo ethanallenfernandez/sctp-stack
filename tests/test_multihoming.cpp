@@ -17,6 +17,10 @@
 
 namespace {
 
+bool same_transport_address(const sockaddr_in& a, const sockaddr_in& b) {
+    return a.sin_addr.s_addr == b.sin_addr.s_addr && a.sin_port == b.sin_port;
+}
+
 constexpr uint32_t PEER_TAG = 0x11223344;
 constexpr uint32_t PEER_TSN = 1000;
 constexpr uint16_t PEER_PORT = 40000;
@@ -90,7 +94,7 @@ struct SCTP_Socket_Test_Access {
     }
 
     static Association_Key key_for(SCTP_Socket& stack, const sockaddr_in& at) {
-        return stack.association_key_for(at);
+        return stack.association_key_for(Association_Key{at});
     }
 
     static size_t aliases(SCTP_Socket& stack) {
@@ -104,7 +108,7 @@ struct SCTP_Socket_Test_Access {
     // Our side as initiator, in COOKIE-WAIT towards `at`, as sctp_associate leaves it.
     static uint32_t cookie_wait(SCTP_Socket& stack, const sockaddr_in& at) {
         Association_Key key{at};
-        Association assoc = stack.init_new_association(key);
+        Association assoc = stack.init_new_association(key.address);
         stack.associations.insert_or_assign(key, assoc);
         return assoc.this_ver_tag;
     }

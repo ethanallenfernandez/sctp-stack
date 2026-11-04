@@ -149,7 +149,7 @@ void SCTP_Socket::close_associations(std::chrono::milliseconds linger) {
     wait_until(std::chrono::steady_clock::now() + CLOSE_DRAIN_TIMEOUT, [this] { return sends.size() == 0; });
 }
 
-Association_Key SCTP_Socket::sctp_associate(std::string_view ip_address, int port) {
+Association_Key SCTP_Socket::sctp_associate(std::string_view ip_address, int port, std::optional<int> udp_port) {
     if (!running.load()) {
         throw std::runtime_error("Socket is not running");
     }
@@ -159,10 +159,10 @@ Association_Key SCTP_Socket::sctp_associate(std::string_view ip_address, int por
     if (!sctp_parse_ipv4(ip_address, to_location.sin_addr)) {
         throw std::runtime_error("Invalid IPv4 address");
     }
-    to_location.sin_port =  htons(port);
+    to_location.sin_port = htons(udp_port.value_or(port));
 
-    Association_Key key{to_location};
-    Association assoc = init_new_association(key);
+    Association_Key key = peer_key(to_location, static_cast<uint16_t>(port));
+    Association assoc = init_new_association(to_location);
 
     std::unique_lock<std::mutex> assoc_lock(associations_mutex);
     associations.insert_or_assign(key, assoc);
@@ -179,12 +179,12 @@ Association_Key SCTP_Socket::sctp_associate(std::string_view ip_address, int por
     return key;
 }
 
-Association SCTP_Socket::init_new_association(const Association_Key& key) {
+Association SCTP_Socket::init_new_association(const sockaddr_in& destination) {
     Association result{};
 
     result.pmdcs = DEFAULT_PMDCS;
-    result.peer_address_list = {make_path(key.address, true, result.pmdcs)};
-    result.primary_path = key.address;
+    result.peer_address_list = {make_path(destination, true, result.pmdcs)};
+    result.primary_path = destination;
     result.state = COOKIE_WAIT;
 
     result.this_ver_tag = generate_nonzero_tag();
@@ -229,13 +229,12 @@ Association SCTP_Socket::init_new_association(const State_Cookie& cookie) {
     return result;
 }
 
-Association_Key SCTP_Socket::association_key_for(const sockaddr_in& src) {
-    Association_Key direct{src};
-    if (associations.count(direct) != 0) {
-        return direct;
+Association_Key SCTP_Socket::association_key_for(const Association_Key& peer) {
+    if (associations.count(peer) != 0) {
+        return peer;
     }
-    auto alias = peer_addresses.find(direct);
-    return alias == peer_addresses.end() ? direct : alias->second;
+    auto alias = peer_addresses.find(peer);
+    return alias == peer_addresses.end() ? peer : alias->second;
 }
 
 void SCTP_Socket::add_peer_addresses(const Association_Key& key, Association& assoc, const std::vector<sockaddr_in>& addresses) {
@@ -243,10 +242,20 @@ void SCTP_Socket::add_peer_addresses(const Association_Key& key, Association& as
         if (find_path(assoc, address) == nullptr) {
             assoc.peer_address_list.push_back(make_path(address, false, assoc.pmdcs));
         }
-        if (!same_transport_address(address, key.address)) {
-            peer_addresses.emplace(Association_Key{address}, key);
+        if (!same_destination(address, key.address)) {
+            peer_addresses.emplace(peer_key(address, ntohs(key.address.sin_port)), key);
         }
     }
+}
+
+void SCTP_Socket::record_encapsulation_port(const Association_Key& key, const sockaddr_in& src) {
+    std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+    auto it = associations.find(key);
+    Peer_Path* path = it == associations.end() ? nullptr : find_path(it->second, src);
+    if (path == nullptr) {
+        return;
+    }
+    path->address.sin_port = src.sin_port;
 }
 
 void SCTP_Socket::forget_peer_addresses(const Association_Key& key) {
@@ -283,7 +292,9 @@ void SCTP_Socket::abandon_partial_delivery(const Association_Key& key, const Ass
 }
 
 void SCTP_Socket::notify_peer_addr_change(const Association_Key& key, const sockaddr_in& address, Peer_Addr_State state) {
-    notifications.enqueue(Notification{Notification_Type::SCTP_PEER_ADDR_CHANGE, key, 0, Peer_Addr_Change{address, state}});
+    sockaddr_in transport_address = address;
+    transport_address.sin_port = key.address.sin_port;
+    notifications.enqueue(Notification{Notification_Type::SCTP_PEER_ADDR_CHANGE, key, 0, Peer_Addr_Change{transport_address, state}});
 }
 
 bool SCTP_Socket::sctp_change_heartbeat(const Association_Key& association_id, const sockaddr_in& destination, bool enabled, std::optional<std::chrono::milliseconds> interval) {

@@ -168,7 +168,7 @@ struct State_Cookie {
     uint16_t sctp_src_port;           // peer's, from the INIT common header
     uint16_t sctp_dst_port;           // ours
     uint32_t peer_ipv4;               // host order; serializer applies htonl
-    uint16_t peer_udp_port;           // host order; rebuilds the Association_Key
+    uint16_t peer_udp_port;           // host order; the INIT's encapsulation port, which every address starts with
     uint32_t local_ver_tag;           // tag we advertised in INIT ACK
     uint32_t peer_ver_tag;            // INIT Initiate Tag
     uint32_t local_initial_tsn;

@@ -21,6 +21,10 @@ using Clock = std::chrono::steady_clock;
 
 namespace {
 
+bool same_transport_address(const sockaddr_in& a, const sockaddr_in& b) {
+    return a.sin_addr.s_addr == b.sin_addr.s_addr && a.sin_port == b.sin_port;
+}
+
 constexpr uint32_t OUR_TAG = 0x0A0B0C0D;
 constexpr uint32_t PEER_TAG = 0x11223344;
 constexpr uint16_t PEER_PORT = 40000;
@@ -47,7 +51,7 @@ struct SCTP_Socket_Test_Access {
         stack.local_address.sin_port = htons(LOCAL_PORT);
         sctp_parse_ipv4("127.0.0.1", stack.local_address.sin_addr);
 
-        Association assoc = stack.init_new_association(key);
+        Association assoc = stack.init_new_association(key.address);
         assoc.this_ver_tag = OUR_TAG;
         assoc.peer_ver_tag = PEER_TAG;
         assoc.state = ESTABLISHED;
@@ -92,7 +96,7 @@ struct SCTP_Socket_Test_Access {
     }
 
     static bool t3_armed(SCTP_Socket& stack, const Association_Key& key, const sockaddr_in& destination) {
-        return stack.expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::T3_RTX, Association_Key{destination}});
+        return stack.expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::T3_RTX, path_key(destination)});
     }
 
     static Association& tcb(SCTP_Socket& stack, const Association_Key& key) {

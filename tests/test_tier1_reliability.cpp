@@ -69,7 +69,7 @@ struct SCTP_Socket_Test_Access {
         address.sin_port = htons(29999);
         sctp_parse_ipv4("127.0.0.1", address.sin_addr);
         Association_Key key{address};
-        Association association = stack.init_new_association(key);
+        Association association = stack.init_new_association(key.address);
         association.state = ESTABLISHED;
         association.peer_ver_tag = 0x10203040;
         association.cumulative_tsn_ack = cumulative_tsn_ack;
@@ -153,7 +153,7 @@ struct SCTP_Socket_Test_Access {
     static uint64_t t3_generation(
             SCTP_Socket& stack, const Association_Key& key) {
         return stack.expirations.generation_of(
-            Expiration_Key{key, Expiration_Timer_Type::T3_RTX, key});
+            Expiration_Key{key, Expiration_Timer_Type::T3_RTX, path_key(key.address)});
     }
 };
 

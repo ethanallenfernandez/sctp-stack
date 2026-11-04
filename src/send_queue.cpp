@@ -159,7 +159,7 @@ void Send_Queue::remove_retransmissions_of_type(const Association_Key& location,
         Queued queued = std::move(retransmission.front());
         retransmission.pop_front();
         if (queued.deliverable.location == location
-                && (destination == nullptr || Association_Key{*destination} == Association_Key{queued.deliverable.destination})) {
+                && (destination == nullptr || destination->sin_addr.s_addr == queued.deliverable.destination.sin_addr.s_addr)) {
             auto& chunks = queued.deliverable.packet.chunks;
             bool carried = std::any_of(chunks.begin(), chunks.end(), [&](const SCTP_Chunk& chunk) {
                 return chunk.chunk_header.type == type;

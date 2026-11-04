@@ -116,13 +116,13 @@ void SCTP_Socket::record_data_sent(const Association_Key& location, const sockad
 }
 
 void SCTP_Socket::start_t3_if_stopped(const Association_Key& location, const sockaddr_in& destination) {
-    if (!expirations.is_active(Expiration_Key{location, Expiration_Timer_Type::T3_RTX, Association_Key{destination}})) {
+    if (!expirations.is_active(Expiration_Key{location, Expiration_Timer_Type::T3_RTX, path_key(destination)})) {
         restart_t3(location, destination);
     }
 }
 
 void SCTP_Socket::restart_t3(const Association_Key& location, const sockaddr_in& destination) {
-    Expiration_Key timer{location, Expiration_Timer_Type::T3_RTX, Association_Key{destination}};
+    Expiration_Key timer{location, Expiration_Timer_Type::T3_RTX, path_key(destination)};
     std::chrono::microseconds rto;
     {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
@@ -371,7 +371,7 @@ Deliverable SCTP_Socket::build_probe(const Association_Key& key, const Associati
 }
 
 void SCTP_Socket::arm_heartbeat(const Association_Key& key, const Association& assoc, const Peer_Path& path) {
-    Expiration_Key timer{key, Expiration_Timer_Type::HEARTBEAT, Association_Key{path.address}};
+    Expiration_Key timer{key, Expiration_Timer_Type::HEARTBEAT, path_key(path.address)};
     if (path.hb_outstanding) {
         schedule_expiration(timer, path.hb_sent_at + path.rto, Deliverable{key, {}, SCTP_Packet{}});
     } else if (!path.hb_enabled || (!path.confirmed && path.active && !probes_for_confirmation(assoc, path))) {
@@ -386,7 +386,7 @@ void SCTP_Socket::arm_confirmation_probes(const Association_Key& key, Associatio
     auto now = std::chrono::steady_clock::now();
     for (Peer_Path& path : assoc.peer_address_list) {
         if (probes_for_confirmation(assoc, path) && !path.hb_outstanding
-                && !expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::HEARTBEAT, Association_Key{path.address}})) {
+                && !expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::HEARTBEAT, path_key(path.address)})) {
             path.hb_period_start = now;
             path.hb_next = now;
             arm_heartbeat(key, assoc, path);
