@@ -410,10 +410,11 @@ static void test_end_to_end() {
     SCTP_Socket a, b;
     constexpr int A_PORT = 39130, B_PORT = 39131;
     bool started = a.sctp_bind("127.0.0.1", A_PORT) && a.sctp_run() && b.sctp_bind("127.0.0.1", B_PORT) && b.sctp_run();
-    Association_Key a_to_b = a.sctp_associate("127.0.0.1", B_PORT);
+    Association_Key a_to_b;
+    a.sctp_associate("127.0.0.1", B_PORT, a_to_b);
     Association_Key b_to_a = a.get_this_association_key();
-    bool established = started && a.await_established_association(a_to_b, 3000) == 0
-        && b.await_established_association(b_to_a, 3000) == 0;
+    bool established = started && a.await_established_association(a_to_b, 3000) == Sctp_Status::OK
+        && b.await_established_association(b_to_a, 3000) == Sctp_Status::OK;
     check(established, "association established");
     if (!established) {
         return;

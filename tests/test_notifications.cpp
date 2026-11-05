@@ -238,7 +238,8 @@ void test_handshake_comm_up() {
         return;
     }
 
-    Association_Key key = client.sctp_associate("127.0.0.1", 47102);
+    Association_Key key;
+    client.sctp_associate("127.0.0.1", 47102, key);
     auto client_event = client.sctp_recv_notification(5000);
     auto server_event = server.sctp_recv_notification(5000);
     check(is_assoc_change(client_event, Assoc_Change_State::COMM_UP), "initiator gets COMM_UP");

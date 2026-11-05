@@ -29,7 +29,7 @@ void SCTP_Socket::event_loop() {
             if (sctp_error_interrupted(err)) {
                 continue;
             }
-            std::cout << "Error polling socket: " << sctp_error_string(err) << std::endl;
+            std::cerr << "Error polling socket: " << sctp_error_string(err) << std::endl;
             running.store(false);
             break;
         }
@@ -38,7 +38,7 @@ void SCTP_Socket::event_loop() {
             wakeup.drain();
         }
         if ((descriptors[1].revents & (SCTP_POLL_ERROR | SCTP_POLL_FATAL)) != 0) {
-            std::cout << "Event-loop wakeup poll reported an error" << std::endl;
+            std::cerr << "Event-loop wakeup poll reported an error" << std::endl;
             running.store(false);
             break;
         }
@@ -50,7 +50,7 @@ void SCTP_Socket::event_loop() {
             run_receiving();
         }
         if ((descriptors[0].revents & SCTP_POLL_FATAL) != 0) {
-            std::cout << "Socket poll reported a fatal error" << std::endl;
+            std::cerr << "Socket poll reported a fatal error" << std::endl;
             running.store(false);
             break;
         }
@@ -68,9 +68,9 @@ void SCTP_Socket::run_expire() {
         try {
             handle_expiration(fallback);
         } catch (const std::exception& e) {
-            std::cout << "Error handling timer expiration: " << e.what() << std::endl;
+            std::cerr << "Error handling timer expiration: " << e.what() << std::endl;
         } catch (...) {
-            std::cout << "Error handling timer expiration" << std::endl;
+            std::cerr << "Error handling timer expiration" << std::endl;
         }
     }
 }
@@ -368,7 +368,7 @@ void SCTP_Socket::run_receiving() {
         if (n == SOCKET_ERROR) {
             int err = sctp_last_error();
             if (!sctp_error_would_block(err)) {
-                std::cout << "Error receiving packet: " << sctp_error_string(err) << std::endl;
+                std::cerr << "Error receiving packet: " << sctp_error_string(err) << std::endl;
             }
             return;
         }
@@ -378,7 +378,7 @@ void SCTP_Socket::run_receiving() {
         try {
             handle_recv_packet(buffer, static_cast<size_t>(n), src);
         } catch (const std::exception& e) {
-            std::cout << "Error handling packet: " << e.what() << std::endl;
+            std::cerr << "Error handling packet: " << e.what() << std::endl;
         }
     }
 }
@@ -441,7 +441,7 @@ bool SCTP_Socket::handle_send_packet(const Deliverable& deliverable) {
     int sent = sendto(udp_socket, data, serialized_packet.size(), 0, to, sizeof(deliverable.destination));
 
     if (sent == SOCKET_ERROR || static_cast<size_t>(sent) != serialized_packet.size()) {
-        std::cout << "Error sending packet: " << sctp_error_string() << std::endl;
+        std::cerr << "Error sending packet: " << sctp_error_string() << std::endl;
         return false;
     }
     return true;

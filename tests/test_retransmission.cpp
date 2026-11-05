@@ -165,7 +165,7 @@ struct RawPeer {
         send(cookie_ack);
 
         Association_Key key{self};
-        return stack.await_established_association(key, 1000) == 0;
+        return stack.await_established_association(key, 1000) == Sctp_Status::OK;
     }
 
     void send_sack(
@@ -227,7 +227,7 @@ bool setup(SCTP_Socket& stack, RawPeer& peer, Association_Key& key) {
             || !stack.sctp_run()) {
         return false;
     }
-    key = stack.sctp_associate("127.0.0.1", PEER_PORT);
+    stack.sctp_associate("127.0.0.1", PEER_PORT, key);
     return peer.complete_handshake(stack);
 }
 

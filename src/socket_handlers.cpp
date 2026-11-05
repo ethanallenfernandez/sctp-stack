@@ -14,7 +14,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
-#include <iostream>
 #include <iterator>
 #include <mutex>
 #include <stdexcept>
@@ -403,16 +402,13 @@ void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockad
     uint32_t calculated_checksum = calculate_sctp_checksum(data_copy.data(), data_copy.size());
 
     if (calculated_checksum != received_checksum) {
-        std::cout << "Dropped packet with invalid checksum. Received: " << received_checksum
-                  << ", Calculated: " << calculated_checksum << std::endl;
         return;
     }
 
     SCTP_Packet in_pkt;
     try {
         in_pkt = deserialize_sctp_packet(data, n);
-    } catch (const std::exception& e) {
-        std::cout << "Dropped malformed packet: " << e.what() << std::endl;
+    } catch (const std::exception&) {
         return;
     }
 
@@ -435,20 +431,16 @@ void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockad
         case Packet_Validation::ACCEPT:
             break;
         case Packet_Validation::ABORT_OOTB:
-            std::cout << "Aborting out of the blue packet" << std::endl;
             send_abort(in_pkt.header, key, src, in_pkt.header.verification_tag, true, {});
             return;
         case Packet_Validation::ABORT_INIT:
-            std::cout << "Aborting INIT to an unbound port" << std::endl;
             send_abort(in_pkt.header, key, src, std::get<init_chunk_value>(in_pkt.chunks[0].chunk_value).initiate_tag, false, {});
             return;
         case Packet_Validation::SHUTDOWN_COMPLETE_OOTB:
-            std::cout << "Answering out of the blue SHUTDOWN_ACK" << std::endl;
             enqueue_packet(Deliverable{key, src, build_shutdown_complete(
                 in_pkt.header.des_port, in_pkt.header.src_port, in_pkt.header.verification_tag, true)});
             return;
         case Packet_Validation::DISCARD:
-            std::cout << "Dropped packet with bad verification tag" << std::endl;
             return;
     }
 
@@ -470,7 +462,6 @@ void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockad
     // cookie's local tag, which every accepting path leaves in the TCB.
     bool carried_cookie_echo = !in_pkt.chunks.empty() && in_pkt.chunks[0].chunk_header.type == COOKIE_ECHO;
     if (carried_cookie_echo) {
-        std::cout << "Recieved COOKIE_ECHO" << std::endl;
         if (!handle_cookie_echo(in_pkt.header, in_pkt.chunks[0], key, src)) {
             return;
         }
@@ -498,51 +489,39 @@ void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockad
     for (size_t i = carried_cookie_echo ? 1 : 0; i < in_pkt.chunks.size(); i++) {
         switch(in_pkt.chunks[i].chunk_header.type) {
             case INIT:
-                std::cout << "Recieved INIT" << std::endl;
                 SCTP_Socket::handle_init(in_pkt.header, in_pkt.chunks[i], key, src);
                 break;
             case INIT_ACK:
-                std::cout << "Recieved INIT_ACK" << std::endl;
                 SCTP_Socket::handle_init_ack(in_pkt.header, in_pkt.chunks[i], key, src);
                 break;
             case COOKIE_ACK:
-                std::cout << "Recieved COOKIE_ACK" << std::endl;
                 SCTP_Socket::handle_cookie_ack(in_pkt.header, in_pkt.chunks[i], key, src);
                 break;
             case DATA:
                 // Special, needs to be handled once per packet, not once per chunk. Handler called after the loop.
-                std::cout << "Recieved DATA" << std::endl;
                 break;
             case SACK:
-                std::cout << "Recieved SACK" << std::endl;
                 SCTP_Socket::handle_sack(in_pkt.header, in_pkt.chunks[i], key, src);
                 break;
             case OP_ERROR:
-                std::cout << "Recieved ERROR" << std::endl;
                 SCTP_Socket::handle_error(in_pkt.header, in_pkt.chunks[i], key, src);
                 break;
             case ABORT:
-                std::cout << "Recieved ABORT" << std::endl;
                 SCTP_Socket::handle_abort(in_pkt.header, in_pkt.chunks[i], key, src);
                 return; // ABORT so stop processing packets
             case HEARTBEAT:
-                std::cout << "Recieved HEARTBEAT" << std::endl;
                 SCTP_Socket::handle_heartbeat(in_pkt.header, in_pkt.chunks[i], key, src);
                 break;
             case HEARTBEAT_ACK:
-                std::cout << "Recieved HEARTBEAT_ACK" << std::endl;
                 SCTP_Socket::handle_heartbeat_ack(in_pkt.header, in_pkt.chunks[i], key, src);
                 break;
             case SHUTDOWN:
-                std::cout << "Recieved SHUTDOWN" << std::endl;
                 SCTP_Socket::handle_shutdown(in_pkt.header, in_pkt.chunks[i], key, src);
                 break;
             case SHUTDOWN_ACK:
-                std::cout << "Recieved SHUTDOWN_ACK" << std::endl;
                 SCTP_Socket::handle_shutdown_ack(in_pkt.header, in_pkt.chunks[i], key, src);
                 break;
             case SHUTDOWN_COMPLETE:
-                std::cout << "Recieved SHUTDOWN_COMPLETE" << std::endl;
                 SCTP_Socket::handle_shutdown_complete(in_pkt.header, in_pkt.chunks[i], key, src);
                 break;
             default:
@@ -672,21 +651,18 @@ void SCTP_Socket::handle_init(const SCTP_Common_Header& header, const SCTP_Chunk
     // The association closed here is the one this INIT asks for. A TCB already
     // held for this peer survives: an INIT carries no proof of origin.
     if (init.initiate_tag == 0) {
-        std::cout << "Aborting INIT with a zero Initiate Tag" << std::endl;
         send_abort(header, key, src, header.verification_tag, true, {error_cause{CAUSE_INVALID_MANDATORY_PARAM, {}}});
         return;
     }
     // The Initiate Tag is the peer's own, learned from the chunk rather than
     // reflected off the header, so the T bit stays clear.
     if (init.out_streams == 0 || init.in_streams == 0) {
-        std::cout << "Aborting INIT advertising zero streams" << std::endl;
         send_abort(header, key, src, init.initiate_tag, false, {error_cause{CAUSE_INVALID_MANDATORY_PARAM, {}}});
         return;
     }
     Parameter_Scan params = scan_init(init);
     std::vector<uint8_t> host_name;
     if (find_parameter(params.recognized, PARAM_HOST_NAME_ADDRESS, host_name)) {
-        std::cout << "Aborting INIT carrying a Host Name Address" << std::endl;
         send_abort(header, key, src, init.initiate_tag, false, {unresolvable_address_cause(host_name)});
         return;
     }
@@ -740,7 +716,6 @@ void SCTP_Socket::handle_init(const SCTP_Common_Header& header, const SCTP_Chunk
         }
     }
     if (!added.empty()) {
-        std::cout << "Aborting INIT that adds addresses to its association" << std::endl;
         send_abort(header, key, src, init.initiate_tag, false, new_address_causes(added, params.recognized));
         return;
     }
@@ -788,7 +763,6 @@ void SCTP_Socket::handle_init_ack(const SCTP_Common_Header& header, const SCTP_C
     // follows the purge in remove_association, and reflects our own tag.
     if (init_ack.initiate_tag == 0) {
         assoc_lock.unlock();
-        std::cout << "Aborting INIT_ACK with a zero Initiate Tag" << std::endl;
         remove_association(key);
         send_abort(header, key, src, header.verification_tag, true, {error_cause{CAUSE_INVALID_MANDATORY_PARAM, {}}});
         notify_assoc_change(key, Assoc_Change_State::CANT_STR_ASSOC);
@@ -799,7 +773,6 @@ void SCTP_Socket::handle_init_ack(const SCTP_Common_Header& header, const SCTP_C
     std::vector<uint8_t> cookie;
     if (!find_parameter(params.recognized, PARAM_STATE_COOKIE, cookie)) {
         assoc_lock.unlock();
-        std::cout << "Aborting INIT_ACK with no State Cookie parameter" << std::endl;
         remove_association(key);
         send_abort(header, key, src, init_ack.initiate_tag, false, {missing_parameter_cause(PARAM_STATE_COOKIE)});
         notify_assoc_change(key, Assoc_Change_State::CANT_STR_ASSOC);
@@ -807,7 +780,6 @@ void SCTP_Socket::handle_init_ack(const SCTP_Common_Header& header, const SCTP_C
     }
     if (init_ack.out_streams == 0 || init_ack.in_streams == 0) {
         assoc_lock.unlock();
-        std::cout << "Aborting INIT_ACK advertising zero streams" << std::endl;
         remove_association(key);
         send_abort(header, key, src, init_ack.initiate_tag, false, {error_cause{CAUSE_INVALID_MANDATORY_PARAM, {}}});
         notify_assoc_change(key, Assoc_Change_State::CANT_STR_ASSOC);
@@ -816,7 +788,6 @@ void SCTP_Socket::handle_init_ack(const SCTP_Common_Header& header, const SCTP_C
     std::vector<uint8_t> host_name;
     if (find_parameter(params.recognized, PARAM_HOST_NAME_ADDRESS, host_name)) {
         assoc_lock.unlock();
-        std::cout << "Aborting INIT_ACK carrying a Host Name Address" << std::endl;
         remove_association(key);
         send_abort(header, key, src, init_ack.initiate_tag, false, {unresolvable_address_cause(host_name)});
         notify_assoc_change(key, Assoc_Change_State::CANT_STR_ASSOC);
@@ -905,7 +876,6 @@ bool SCTP_Socket::handle_cookie_echo(
     uint32_t staleness_us = 0;
     Cookie_Result result = cookie_authorizer.verify(echo.cookie_data, header, src, cookie, staleness_us);
     if (result != Cookie_Result::VALID && result != Cookie_Result::STALE) {
-        std::cout << "Dropped COOKIE_ECHO with an unverifiable cookie" << std::endl;
         return false;
     }
 
@@ -959,7 +929,6 @@ bool SCTP_Socket::handle_cookie_echo(
             send_error(header, key, destination, cookie.peer_ver_tag, {error_cause{CAUSE_COOKIE_WHILE_SHUTTING_DOWN, {}}});
             return false;
         }
-        std::cout << "Peer restarted, association reset" << std::endl;
         cancel_expirations(key);
         sends.purge(key);
         forget_peer_addresses(key);
@@ -992,7 +961,6 @@ bool SCTP_Socket::handle_cookie_echo(
         }
     } else {
         // C, and anything not in the table
-        std::cout << "Dropped COOKIE_ECHO that does not match the existing association" << std::endl;
         return false;
     }
 
@@ -1068,12 +1036,10 @@ void SCTP_Socket::handle_error(const SCTP_Common_Header&, const SCTP_Chunk& chun
     cancel_expiration(Expiration_Key{key, Expiration_Timer_Type::T1_COOKIE});
     sends.remove_retransmissions_of_type(key, COOKIE_ECHO);
     if (!handshake_failed) {
-        std::cout << "Retrying association with a Cookie Preservative" << std::endl;
         enqueue_packet(Deliverable{key, destination, std::move(retry_init)});
         return;
     }
 
-    std::cout << "Association failed: peer kept reporting a stale cookie" << std::endl;
     remove_association(key);
     notify_assoc_change(key, Assoc_Change_State::CANT_STR_ASSOC);
 }
@@ -1330,7 +1296,6 @@ void SCTP_Socket::handle_shutdown(const SCTP_Common_Header& header, const SCTP_C
     }
 
     if (violation) {
-        std::cout << "Aborting association: SHUTDOWN acknowledges a TSN never sent" << std::endl;
         abort_association(key, header, src, {error_cause{CAUSE_PROTOCOL_VIOLATION, {}}});
         return;
     }
@@ -1400,7 +1365,6 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
             });
     }
     if (acks_unsent) {
-        std::cout << "Aborting association: SACK acknowledges a TSN never sent" << std::endl;
         abort_association(key, header, src, {error_cause{CAUSE_PROTOCOL_VIOLATION, {}}});
         return;
     }
@@ -1734,7 +1698,6 @@ void SCTP_Socket::handle_data_packet(
         }
         const auto& data = std::get<data_chunk_value>(chunk.chunk_value);
         if (data.user_data.empty()) {
-            std::cout << "Aborting association: DATA chunk with no user data" << std::endl;
             abort_association(key, packet.header, src, {error_cause{CAUSE_NO_USER_DATA, be32_bytes(data.tsn)}});
             return;
         }
@@ -1848,7 +1811,6 @@ void SCTP_Socket::handle_data_packet(
     }
 
     if (violation) {
-        std::cout << "Aborting association: DATA chunk out of place in its message or stream" << std::endl;
         abort_association(key, packet.header, src, {error_cause{CAUSE_PROTOCOL_VIOLATION, {}}});
         return;
     }

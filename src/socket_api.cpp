@@ -21,7 +21,7 @@
 
 SCTP_Socket::SCTP_Socket() : udp_socket(INVALID_SOCKET) {
     if (!sctp_platform_startup()) {
-        std::cout << "Socket subsystem initialization failed" << std::endl;
+        std::cerr << "Socket subsystem initialization failed" << std::endl;
         return;
     }
     platform_started = true;
@@ -29,25 +29,23 @@ SCTP_Socket::SCTP_Socket() : udp_socket(INVALID_SOCKET) {
     udp_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 
     if (udp_socket == INVALID_SOCKET) {
-        std::cout << "Error creating socket: " << sctp_error_string() << std::endl;
+        std::cerr << "Error creating socket: " << sctp_error_string() << std::endl;
         sctp_platform_cleanup();
         platform_started = false;
         return;
     }
-    std::cout << "Socket created successfully" << std::endl;
 }
 
 bool SCTP_Socket::sctp_bind(std::string_view ip_address, int port) {
     sockaddr_in service{};
     service.sin_family = AF_INET;
     if (!sctp_parse_ipv4(ip_address, service.sin_addr)) {
-        std::cout << "Invalid IPv4 address: " << ip_address << std::endl;
         return false;
     }
     service.sin_port = htons(port);
 
     if (bind(udp_socket, (const sockaddr *)&service, sizeof(service)) == SOCKET_ERROR) {
-        std::cout << "Error binding socket: " << sctp_error_string() << std::endl;
+        std::cerr << "Error binding socket: " << sctp_error_string() << std::endl;
         sctp_close_socket(udp_socket);
         udp_socket = INVALID_SOCKET;
         sctp_platform_cleanup();
@@ -55,7 +53,6 @@ bool SCTP_Socket::sctp_bind(std::string_view ip_address, int port) {
         return false;
     }
     local_address = service;
-    std::cout << "Socket bound successfully" << std::endl;
     return true;
 }
 
@@ -69,13 +66,12 @@ bool SCTP_Socket::sctp_run() {
     }
 
     if (!sctp_set_nonblocking(udp_socket)) {
-        std::cout << "Error setting non-blocking mode: " << sctp_error_string() << std::endl;
+        std::cerr << "Error setting non-blocking mode: " << sctp_error_string() << std::endl;
         return false;
     }
 
     if (!wakeup.open()) {
-        std::cout << "Error creating event-loop wakeup sockets: "
-                  << sctp_error_string() << std::endl;
+        std::cerr << "Error creating event-loop wakeup sockets: " << sctp_error_string() << std::endl;
         return false;
     }
 
@@ -111,7 +107,6 @@ void SCTP_Socket::sctp_close(int linger) {
     if (platform_started) {
         sctp_platform_cleanup();
         platform_started = false;
-        std::cout << "Socket closed successfully" << std::endl;
     }
 }
 
@@ -149,15 +144,15 @@ void SCTP_Socket::close_associations(std::chrono::milliseconds linger) {
     wait_until(std::chrono::steady_clock::now() + CLOSE_DRAIN_TIMEOUT, [this] { return sends.size() == 0; });
 }
 
-Association_Key SCTP_Socket::sctp_associate(std::string_view ip_address, int port, std::optional<int> udp_port) {
+Sctp_Status SCTP_Socket::sctp_associate(std::string_view ip_address, int port, Association_Key& out_association_id, std::optional<int> udp_port) {
     if (!running.load()) {
-        throw std::runtime_error("Socket is not running");
+        return Sctp_Status::NOT_RUNNING;
     }
 
     sockaddr_in to_location{};
     to_location.sin_family = AF_INET;
     if (!sctp_parse_ipv4(ip_address, to_location.sin_addr)) {
-        throw std::runtime_error("Invalid IPv4 address");
+        return Sctp_Status::INVALID_ADDRESS;
     }
     to_location.sin_port = htons(udp_port.value_or(port));
 
@@ -165,7 +160,10 @@ Association_Key SCTP_Socket::sctp_associate(std::string_view ip_address, int por
     Association assoc = init_new_association(to_location);
 
     std::unique_lock<std::mutex> assoc_lock(associations_mutex);
-    associations.insert_or_assign(key, assoc);
+    if (associations.count(association_key_for(key)) != 0) {
+        return Sctp_Status::ASSOCIATION_EXISTS;
+    }
+    associations.emplace(key, assoc);
     assoc_lock.unlock();
 
     // sin_port is already network order, so the builder's host-order ports need
@@ -176,7 +174,8 @@ Association_Key SCTP_Socket::sctp_associate(std::string_view ip_address, int por
         assoc.this_ver_tag,
         assoc.next_tsn
     )});
-    return key;
+    out_association_id = key;
+    return Sctp_Status::OK;
 }
 
 Association SCTP_Socket::init_new_association(const sockaddr_in& destination) {
@@ -297,12 +296,21 @@ void SCTP_Socket::notify_peer_addr_change(const Association_Key& key, const sock
     notifications.enqueue(Notification{Notification_Type::SCTP_PEER_ADDR_CHANGE, key, 0, Peer_Addr_Change{transport_address, state}});
 }
 
-bool SCTP_Socket::sctp_change_heartbeat(const Association_Key& association_id, const sockaddr_in& destination, bool enabled, std::optional<std::chrono::milliseconds> interval) {
+namespace {
+    Sctp_Status refusal_in(Association_State state) {
+        return state == COOKIE_WAIT || state == COOKIE_ECHOED ? Sctp_Status::NOT_ESTABLISHED : Sctp_Status::SHUTTING_DOWN;
+    }
+}
+
+Sctp_Status SCTP_Socket::sctp_change_heartbeat(const Association_Key& association_id, const sockaddr_in& destination, bool enabled, std::optional<std::chrono::milliseconds> interval) {
     std::lock_guard<std::mutex> assoc_lock(associations_mutex);
     auto it = associations.find(association_id);
-    Peer_Path* changed = it == associations.end() ? nullptr : find_path(it->second, destination);
+    if (it == associations.end()) {
+        return Sctp_Status::NO_ASSOCIATION;
+    }
+    Peer_Path* changed = find_path(it->second, destination);
     if (changed == nullptr) {
-        return false;
+        return Sctp_Status::UNKNOWN_DESTINATION;
     }
     Association& assoc = it->second;
     changed->hb_enabled = enabled;
@@ -310,7 +318,7 @@ bool SCTP_Socket::sctp_change_heartbeat(const Association_Key& association_id, c
         assoc.hb_interval = *interval;
     }
     if (!transmits_data(assoc.state)) {
-        return true;
+        return Sctp_Status::OK;
     }
 
     auto now = std::chrono::steady_clock::now();
@@ -327,34 +335,46 @@ bool SCTP_Socket::sctp_change_heartbeat(const Association_Key& association_id, c
         arm_heartbeat(association_id, assoc, path);
     }
     arm_confirmation_probes(association_id, assoc);
-    return true;
+    return Sctp_Status::OK;
 }
 
-bool SCTP_Socket::sctp_request_heartbeat(const Association_Key& association_id, const sockaddr_in& destination) {
+Sctp_Status SCTP_Socket::sctp_request_heartbeat(const Association_Key& association_id, const sockaddr_in& destination) {
     Deliverable probe;
     {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
         auto it = associations.find(association_id);
-        Peer_Path* path = it == associations.end() ? nullptr : find_path(it->second, destination);
-        if (path == nullptr || !transmits_data(it->second.state)) {
-            return false;
+        if (it == associations.end()) {
+            return Sctp_Status::NO_ASSOCIATION;
+        }
+        Peer_Path* path = find_path(it->second, destination);
+        if (path == nullptr) {
+            return Sctp_Status::UNKNOWN_DESTINATION;
+        }
+        if (!transmits_data(it->second.state)) {
+            return refusal_in(it->second.state);
         }
         probe = build_probe(association_id, it->second, *path);
         arm_heartbeat(association_id, it->second, *path);
     }
     enqueue_packet(std::move(probe));
-    return true;
+    return Sctp_Status::OK;
 }
 
-bool SCTP_Socket::sctp_set_primary(const Association_Key& association_id, const sockaddr_in& destination) {
+Sctp_Status SCTP_Socket::sctp_set_primary(const Association_Key& association_id, const sockaddr_in& destination) {
     std::lock_guard<std::mutex> assoc_lock(associations_mutex);
     auto it = associations.find(association_id);
-    const Peer_Path* path = it == associations.end() ? nullptr : find_path(it->second, destination);
-    if (path == nullptr || !path->confirmed) {
-        return false;
+    if (it == associations.end()) {
+        return Sctp_Status::NO_ASSOCIATION;
+    }
+    const Peer_Path* path = find_path(it->second, destination);
+    if (path == nullptr) {
+        return Sctp_Status::UNKNOWN_DESTINATION;
+    }
+    if (!path->confirmed) {
+        return Sctp_Status::UNCONFIRMED_DESTINATION;
     }
     it->second.primary_path = path->address;
-    return true;
+    return Sctp_Status::OK;
 }
 
 std::optional<Notification> SCTP_Socket::sctp_recv_notification(int timeout_ms) {
@@ -368,7 +388,7 @@ void SCTP_Socket::sctp_subscribe(Notification_Type type, bool on) {
     notifications.set_subscribed(type, on);
 }
 
-int SCTP_Socket::await_established_association(const Association_Key& association_id, int timeout_ms) {
+Sctp_Status SCTP_Socket::await_established_association(const Association_Key& association_id, int timeout_ms) {
     int waited_ms = 0;
     const int sleep_interval_ms = 10;
 
@@ -376,7 +396,7 @@ int SCTP_Socket::await_established_association(const Association_Key& associatio
         std::unique_lock<std::mutex> assoc_lock(associations_mutex);
         auto it = associations.find(association_id);
         if (it != associations.end() && it->second.state == ESTABLISHED) {
-            return 0;
+            return Sctp_Status::OK;
         }
         assoc_lock.unlock();
 
@@ -384,34 +404,44 @@ int SCTP_Socket::await_established_association(const Association_Key& associatio
         waited_ms += sleep_interval_ms;
     }
 
-    return -1;
+    return Sctp_Status::TIMED_OUT;
 }
 
-void SCTP_Socket::sctp_send_data(const sockaddr_in& association_id, const std::vector<uint8_t>& data, uint16_t stream, bool unordered) {
+Sctp_Status SCTP_Socket::sctp_send_data(const sockaddr_in& association_id, const std::vector<uint8_t>& data, uint16_t stream, bool unordered) {
     Association_Key key{association_id};
-    sctp_send_data(key, data, stream, unordered);
+    return sctp_send_data(key, data, stream, unordered);
 }
 
-void SCTP_Socket::sctp_send_data(const Association_Key& association_id, const std::vector<uint8_t>& data, uint16_t stream, bool unordered) {
+Sctp_Status SCTP_Socket::sctp_send_data(const Association_Key& association_id, const std::vector<uint8_t>& data, uint16_t stream, bool unordered) {
     {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
         auto it = associations.find(association_id);
-        if (data.empty() || it == associations.end() || it->second.state != ESTABLISHED || stream >= it->second.out_streams) {
-            return;
+        if (it == associations.end()) {
+            return Sctp_Status::NO_ASSOCIATION;
+        }
+        if (it->second.state != ESTABLISHED) {
+            return refusal_in(it->second.state);
+        }
+        if (data.empty()) {
+            return Sctp_Status::EMPTY_MESSAGE;
+        }
+        if (stream >= it->second.out_streams) {
+            return Sctp_Status::INVALID_STREAM;
         }
         Association& assoc = it->second;
         uint16_t ssn = unordered ? 0 : assoc.next_ssn[stream]++;
         assoc.outbound.push_back(Outbound_Message{stream, ssn, unordered, data});
     }
     wake_event_loop();
+    return Sctp_Status::OK;
 }
 
-void SCTP_Socket::sctp_abort(const sockaddr_in& association_id, const std::vector<uint8_t>& reason) {
+Sctp_Status SCTP_Socket::sctp_abort(const sockaddr_in& association_id, const std::vector<uint8_t>& reason) {
     Association_Key key{association_id};
-    sctp_abort(key, reason);
+    return sctp_abort(key, reason);
 }
 
-void SCTP_Socket::sctp_abort(const Association_Key& association_id, const std::vector<uint8_t>& reason) {
+Sctp_Status SCTP_Socket::sctp_abort(const Association_Key& association_id, const std::vector<uint8_t>& reason) {
     uint32_t peer_tag;
     size_t budget;
     sockaddr_in destination;
@@ -419,7 +449,7 @@ void SCTP_Socket::sctp_abort(const Association_Key& association_id, const std::v
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
         auto it = associations.find(association_id);
         if (it == associations.end()) {
-            return;
+            return Sctp_Status::NO_ASSOCIATION;
         }
         peer_tag = it->second.peer_ver_tag;
         budget = it->second.pmdcs;
@@ -431,7 +461,7 @@ void SCTP_Socket::sctp_abort(const Association_Key& association_id, const std::v
 
     // In COOKIE_WAIT there is no tag the peer would accept the ABORT under.
     if (peer_tag == 0) {
-        return;
+        return Sctp_Status::OK;
     }
 
     std::vector<uint8_t> abort_reason = reason;
@@ -448,6 +478,7 @@ void SCTP_Socket::sctp_abort(const Association_Key& association_id, const std::v
             {error_cause{CAUSE_USER_INITIATED_ABORT, std::move(abort_reason)}}
         )
     });
+    return Sctp_Status::OK;
 }
 
 
@@ -490,16 +521,16 @@ size_t SCTP_Socket::sctp_recv_data_from(const Association_Key& association_id, s
     return read->bytes;
 }
 
-void SCTP_Socket::sctp_shutdown(const sockaddr_in& association_id) {
+Sctp_Status SCTP_Socket::sctp_shutdown(const sockaddr_in& association_id) {
     Association_Key key{association_id};
-    sctp_shutdown(key);
+    return sctp_shutdown(key);
 }
 
-void SCTP_Socket::sctp_shutdown(const Association_Key& association_id) {
+Sctp_Status SCTP_Socket::sctp_shutdown(const Association_Key& association_id) {
     std::unique_lock<std::mutex> assoc_lock(associations_mutex);
     auto it = associations.find(association_id);
     if (it == associations.end()) {
-        return;
+        return Sctp_Status::NO_ASSOCIATION;
     }
 
     // Before COMMUNICATION UP there is nothing to close gracefully. As Linux does,
@@ -512,14 +543,15 @@ void SCTP_Socket::sctp_shutdown(const Association_Key& association_id) {
             assoc_lock.unlock();
             cancel_expirations(association_id);
             sends.purge(association_id);
-            return;
+            return Sctp_Status::OK;
         case ESTABLISHED:
             it->second.state = SHUTDOWN_PENDING;
             break;
         default:
-            return;
+            return Sctp_Status::SHUTTING_DOWN;
     }
     assoc_lock.unlock();
 
     do_next_shutdown_step(association_id);
+    return Sctp_Status::OK;
 }

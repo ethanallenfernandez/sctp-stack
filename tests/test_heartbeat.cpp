@@ -655,13 +655,13 @@ void test_change_heartbeat() {
     Access::establish(stack, key);
     SCTP_Socket& api = Access::api(stack);
 
-    check(!api.sctp_change_heartbeat(key, second_address(), false), "refused for an unknown destination");
-    check(api.sctp_change_heartbeat(key, key.address, false), "accepted for a known one");
+    check(api.sctp_change_heartbeat(key, second_address(), false) == Sctp_Status::UNKNOWN_DESTINATION, "refused for an unknown destination");
+    check(api.sctp_change_heartbeat(key, key.address, false) == Sctp_Status::OK, "accepted for a known one");
     check(!Access::timer_armed(stack, key), "disabling stops the path's timer");
     Access::fire_heartbeat_timer(stack, key);
     check(Access::drain_sends(stack).empty(), "and nothing is probed");
 
-    check(api.sctp_change_heartbeat(key, key.address, true, std::chrono::seconds(120)), "re-enabled with a new interval");
+    check(api.sctp_change_heartbeat(key, key.address, true, std::chrono::seconds(120)) == Sctp_Status::OK, "re-enabled with a new interval");
     check(Access::tcb(stack, key).hb_interval == std::chrono::seconds(120), "the interval is the association's");
     check(Access::timer_armed(stack, key)
           && !Access::due_within(stack, key, key.address, std::chrono::seconds(120)),
@@ -688,8 +688,8 @@ void test_request_heartbeat() {
     Association_Key key{peer_address()};
     Access::establish(stack, key);
 
-    check(!Access::api(stack).sctp_request_heartbeat(key, second_address()), "refused for an unknown destination");
-    check(Access::api(stack).sctp_request_heartbeat(key, key.address), "accepted for a known one");
+    check(Access::api(stack).sctp_request_heartbeat(key, second_address()) == Sctp_Status::UNKNOWN_DESTINATION, "refused for an unknown destination");
+    check(Access::api(stack).sctp_request_heartbeat(key, key.address) == Sctp_Status::OK, "accepted for a known one");
     auto sent = Access::drain_sends(stack);
     check(sent.size() == 1 && is_type(sent[0], HEARTBEAT), "a HEARTBEAT goes out at once");
     check(Access::primary_path(stack, key).hb_outstanding, "and is awaited like any other");
@@ -703,11 +703,11 @@ void test_set_primary() {
     Access::establish(stack, key);
     Access::add_paths(stack, key, {second_address()});
 
-    check(!Access::api(stack).sctp_set_primary(key, second_address()), "refused for an UNCONFIRMED destination");
+    check(Access::api(stack).sctp_set_primary(key, second_address()) == Sctp_Status::UNCONFIRMED_DESTINATION, "refused for an UNCONFIRMED destination");
     if (auto sent = probe(stack, key, second_address())) {
         acknowledge(stack, *sent);
     }
-    check(Access::api(stack).sctp_set_primary(key, second_address()), "accepted once it is CONFIRMED");
+    check(Access::api(stack).sctp_set_primary(key, second_address()) == Sctp_Status::OK, "accepted once it is CONFIRMED");
     check(same_transport_address(Access::tcb(stack, key).primary_path, second_address()), "and it is the primary");
 }
 

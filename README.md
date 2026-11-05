@@ -10,6 +10,7 @@ include/sctp/     public API — what a consumer of the library includes
   sctp.hpp          protocol types and wire constants (no platform deps)
   association.hpp   per-association state (the TCB)
   socket.hpp        SCTP_Socket, the entry point
+  status.hpp        Sctp_Status, what each API call returns
   platform.hpp      Winsock/POSIX socket compatibility layer
   send_queue.hpp    outbound scheduling and per-association send gating
   receive_queue.hpp messages delivered but not yet read by the application

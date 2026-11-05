@@ -470,8 +470,8 @@ bool await_empty(SCTP_Socket& stack, int timeout_ms = TIMEOUT_MS) {
 
 // We initiate; returns the kernel's accepted socket, or -1.
 int associate_to_kernel(SCTP_Socket& stack, int listener, Association_Key& key) {
-    key = stack.sctp_associate("127.0.0.1", KERNEL_PORT);
-    bool up = stack.await_established_association(key, TIMEOUT_MS) == 0;
+    stack.sctp_associate("127.0.0.1", KERNEL_PORT, key);
+    bool up = stack.await_established_association(key, TIMEOUT_MS) == Sctp_Status::OK;
     int fd = up ? ::accept(listener, nullptr, nullptr) : -1;
     if (fd >= 0) set_timeouts(fd, TIMEOUT_MS);
     auto change = next_assoc_change(stack);
@@ -791,8 +791,9 @@ void phase_distinct_ports(SCTP_Socket& stack) {
         if (listener >= 0) ::close(listener);
         return;
     }
-    Association_Key key = stack.sctp_associate("127.0.0.1", LISTEN_PORT, KERNEL_PORT);
-    bool up = stack.await_established_association(key, TIMEOUT_MS) == 0;
+    Association_Key key;
+    stack.sctp_associate("127.0.0.1", LISTEN_PORT, key, KERNEL_PORT);
+    bool up = stack.await_established_association(key, TIMEOUT_MS) == Sctp_Status::OK;
     int fd = up ? ::accept(listener, nullptr, nullptr) : -1;
     ::close(listener);
     check(up && fd >= 0, "we associate to SCTP port 5001 through UDP port 9899");

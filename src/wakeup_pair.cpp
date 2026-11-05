@@ -78,7 +78,7 @@ void Wakeup_Pair::wake() {
     const char byte = 1;
     int sent = send(writer, &byte, 1, 0);
     if (sent == SOCKET_ERROR && !sctp_error_would_block(sctp_last_error())) {
-        std::cout << "Error waking event loop: " << sctp_error_string() << std::endl;
+        std::cerr << "Error waking event loop: " << sctp_error_string() << std::endl;
     }
 }
 
@@ -87,6 +87,6 @@ void Wakeup_Pair::drain() {
     while (recv(reader, buffer, sizeof(buffer), 0) > 0) {}
     int err = sctp_last_error();
     if (!sctp_error_would_block(err)) {
-        std::cout << "Error draining event-loop wakeup: " << sctp_error_string(err) << std::endl;
+        std::cerr << "Error draining event-loop wakeup: " << sctp_error_string(err) << std::endl;
     }
 }

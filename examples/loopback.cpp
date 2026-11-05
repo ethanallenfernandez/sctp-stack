@@ -10,15 +10,13 @@ int main() {
     socket2.sctp_bind("127.0.0.1", 5000);
     socket2.sctp_run();
 
-    Association_Key assoc_key = socket1.sctp_associate("127.0.0.1", 5000);
-    
-    int await_result = socket1.await_established_association(assoc_key, 5000);
-    if (await_result != 0) {
+    Association_Key assoc_key;
+    if (socket1.sctp_associate("127.0.0.1", 5000, assoc_key) != Sctp_Status::OK
+            || socket1.await_established_association(assoc_key, 5000) != Sctp_Status::OK) {
         std::cout << "Failed to establish association within timeout." << std::endl;
         return -1;
-    } else {
-        std::cout << "Association established successfully." << std::endl;
     }
+    std::cout << "Association established successfully." << std::endl;
 
     std::string message = "Hello from socket1!";
     std::vector<uint8_t> data(message.begin(), message.end());

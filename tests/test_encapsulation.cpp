@@ -313,7 +313,8 @@ void test_associate_with_udp_port() {
     stack.sctp_set_linger(0);
     if (!stack.sctp_bind("127.0.0.1", STACK_PORT) || !stack.sctp_run()) { check(false, "stack started"); return; }
 
-    Association_Key key = stack.sctp_associate("127.0.0.1", PEER_SCTP_PORT, FIRST_UDP);
+    Association_Key key;
+    stack.sctp_associate("127.0.0.1", PEER_SCTP_PORT, key, FIRST_UDP);
     check(ntohs(key.address.sin_port) == PEER_SCTP_PORT, "the key names the SCTP port");
 
     SCTP_Packet init;
@@ -335,7 +336,7 @@ void test_associate_with_udp_port() {
           "under the SCTP port and the peer's tag");
 
     second.send(build_cookie_ack(PEER_SCTP_PORT, STACK_PORT, our_tag), STACK_PORT);
-    check(stack.await_established_association(key, 2000) == 0, "established");
+    check(stack.await_established_association(key, 2000) == Sctp_Status::OK, "established");
     stack.sctp_close(0);
 }
 

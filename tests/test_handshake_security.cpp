@@ -130,8 +130,9 @@ void test_init_flood_allocates_nothing() {
     if (!client.sctp_bind("127.0.0.1", 39503) || !client.sctp_run()) {
         check(false, "client started"); peer.close_it(); return;
     }
-    Association_Key key = client.sctp_associate("127.0.0.1", STACK_PORT);
-    check(client.await_established_association(key, 3000) == 0,
+    Association_Key key;
+    client.sctp_associate("127.0.0.1", STACK_PORT, key);
+    check(client.await_established_association(key, 3000) == Sctp_Status::OK,
           "a real handshake still completes after the flood");
     check(SCTP_Socket_Test_Access::association_count(stack) == 1,
           "and allocates exactly one association");

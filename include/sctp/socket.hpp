@@ -9,6 +9,7 @@
 #include <sctp/cookie_auth.hpp>
 #include <sctp/notification_queue.hpp>
 #include <sctp/receive_queue.hpp>
+#include <sctp/status.hpp>
 
 #include <optional>
 #include <string_view>
@@ -54,30 +55,31 @@ public:
     void sctp_set_linger(int linger_ms);
     // port is the peer's SCTP port. udp_port is the UDP encapsulation port to
     // reach it at, by default the same; once the peer answers, each of its
-    // addresses is sent to whatever UDP port it last sent from.
-    Association_Key sctp_associate(std::string_view ip_address, int port, std::optional<int> udp_port = std::nullopt);
-    int await_established_association(const Association_Key& association_id, int timeout_ms);
+    // addresses is sent to whatever UDP port it last sent from. out_association_id
+    // is set only on OK.
+    Sctp_Status sctp_associate(std::string_view ip_address, int port, Association_Key& out_association_id, std::optional<int> udp_port = std::nullopt);
+    Sctp_Status await_established_association(const Association_Key& association_id, int timeout_ms);
     // Refused if the stream is not one the association negotiated. An unordered
     // message takes no SSN and may be delivered ahead of others on its stream.
-    void sctp_send_data(const sockaddr_in& association_id, const std::vector<uint8_t>& data, uint16_t stream = 0, bool unordered = false);
-    void sctp_send_data(const Association_Key& association_id, const std::vector<uint8_t>& data, uint16_t stream = 0, bool unordered = false);
-    void sctp_abort(const sockaddr_in& association_id, const std::vector<uint8_t>& reason = {});
-    void sctp_abort(const Association_Key& association_id, const std::vector<uint8_t>& reason = {});
+    Sctp_Status sctp_send_data(const sockaddr_in& association_id, const std::vector<uint8_t>& data, uint16_t stream = 0, bool unordered = false);
+    Sctp_Status sctp_send_data(const Association_Key& association_id, const std::vector<uint8_t>& data, uint16_t stream = 0, bool unordered = false);
+    Sctp_Status sctp_abort(const sockaddr_in& association_id, const std::vector<uint8_t>& reason = {});
+    Sctp_Status sctp_abort(const Association_Key& association_id, const std::vector<uint8_t>& reason = {});
     // Reads at most one message. *out_partial is set when more of it remains: the
     // buffer was too small, or the message is being handed up before all of it
     // has arrived. The rest is returned by the following reads.
     size_t sctp_recv_data(std::vector<uint8_t>& buffer, Association_Key* out_association_id = nullptr, bool* out_partial = nullptr, uint16_t* out_stream = nullptr);
     size_t sctp_recv_data_from(const sockaddr_in& association_id, std::vector<uint8_t>& buffer, bool* out_partial = nullptr, uint16_t* out_stream = nullptr);
     size_t sctp_recv_data_from(const Association_Key& association_id, std::vector<uint8_t>& buffer, bool* out_partial = nullptr, uint16_t* out_stream = nullptr);
-    void sctp_shutdown(const sockaddr_in& association_id);
-    void sctp_shutdown(const Association_Key& association_id);
+    // SHUTTING_DOWN if a shutdown is already under way.
+    Sctp_Status sctp_shutdown(const sockaddr_in& association_id);
+    Sctp_Status sctp_shutdown(const Association_Key& association_id);
     std::optional<Notification> sctp_recv_notification(int timeout_ms = 0);
-    // Each fails if the association or the destination is unknown. A new
-    // interval applies to every destination of the association.
-    bool sctp_change_heartbeat(const Association_Key& association_id, const sockaddr_in& destination, bool enabled, std::optional<std::chrono::milliseconds> interval = std::nullopt);
-    bool sctp_request_heartbeat(const Association_Key& association_id, const sockaddr_in& destination);
+    // A new interval applies to every destination of the association.
+    Sctp_Status sctp_change_heartbeat(const Association_Key& association_id, const sockaddr_in& destination, bool enabled, std::optional<std::chrono::milliseconds> interval = std::nullopt);
+    Sctp_Status sctp_request_heartbeat(const Association_Key& association_id, const sockaddr_in& destination);
     // Refused for an UNCONFIRMED destination, which nothing may be sent to.
-    bool sctp_set_primary(const Association_Key& association_id, const sockaddr_in& destination);
+    Sctp_Status sctp_set_primary(const Association_Key& association_id, const sockaddr_in& destination);
     void sctp_subscribe(Notification_Type type, bool on);
     
     inline Association_Key get_this_association_key() {

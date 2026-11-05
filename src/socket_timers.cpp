@@ -10,7 +10,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <iostream>
 #include <mutex>
 #include <vector>
 
@@ -69,7 +68,6 @@ void SCTP_Socket::handle_expiration(const Expiration_Fallback& fallback) {
     if (exhausted) {
         cancel_expirations(fallback.key.location);
         sends.purge(fallback.key.location);
-        std::cout << "Association failed after handshake retransmissions" << std::endl;
     } else if (should_retry) {
         enqueue_packet(fallback.retry, Send_Priority::RETRANSMISSION);
     }
@@ -184,7 +182,6 @@ void SCTP_Socket::handle_t2_expiration(const Association_Key& location) {
     if (unreachable) {
         remove_association(location);
         notify_assoc_change(location, Assoc_Change_State::COMM_LOST);
-        std::cout << "Association failed: shutdown unanswered" << std::endl;
         return;
     }
     enqueue_packet(Deliverable{location, destination, std::move(packet)});
@@ -212,7 +209,6 @@ void SCTP_Socket::handle_t5_expiration(const Association_Key& location) {
     enqueue_packet(Deliverable{location, destination, build_abort(
         ntohs(local_address.sin_port), ntohs(location.address.sin_port), peer_tag, false, {})});
     notify_assoc_change(location, Assoc_Change_State::COMM_LOST);
-    std::cout << "Association aborted: shutdown did not complete in time" << std::endl;
 }
 
 // The timed-out chunks are moved to the path they will be retransmitted on,
@@ -260,7 +256,6 @@ void SCTP_Socket::handle_t3_expiration(const Association_Key& location, const so
     if (unreachable) {
         remove_association(location);
         notify_assoc_change(location, Assoc_Change_State::COMM_LOST);
-        std::cout << "Association failed: peer unreachable" << std::endl;
         return;
     }
 
@@ -316,7 +311,6 @@ void SCTP_Socket::handle_heartbeat_expiration(const Association_Key& location, c
     if (unreachable) {
         remove_association(location);
         notify_assoc_change(location, Assoc_Change_State::COMM_LOST);
-        std::cout << "Association failed: peer unreachable" << std::endl;
         return;
     }
     if (!probe.packet.chunks.empty()) {

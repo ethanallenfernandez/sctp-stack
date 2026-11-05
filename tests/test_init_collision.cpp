@@ -188,7 +188,8 @@ void test_init_in_cookie_wait() {
     RawPeer peer;
     if (!start(stack, STACK_PORT) || !peer.open(PEER_PORT, STACK_PORT)) { check(false, "setup"); return; }
 
-    Association_Key key = stack.sctp_associate("127.0.0.1", PEER_PORT);
+    Association_Key key;
+    stack.sctp_associate("127.0.0.1", PEER_PORT, key);
     SCTP_Packet init;
     if (!peer.recv_type(INIT, init)) { check(false, "stack sent INIT"); return; }
     const auto& our_init = std::get<init_chunk_value>(init.chunks[0].chunk_value);
@@ -209,7 +210,7 @@ void test_init_in_cookie_wait() {
     peer.send_echo(our_init.initiate_tag, ack.cookie);
     uint32_t vtag = 0;
     check(recv_cookie_ack(peer, vtag) && vtag == PEER_TAG, "COOKIE ACK sent under the peer's tag (B)");
-    check(stack.await_established_association(key, 1000) == 0, "association is ESTABLISHED");
+    check(stack.await_established_association(key, 1000) == Sctp_Status::OK, "association is ESTABLISHED");
     check(SCTP_Socket_Test_Access::snapshot(stack, PEER_PORT, tcb) && tcb.peer_ver_tag == PEER_TAG,
           "peer tag adopted from the cookie");
 
@@ -227,7 +228,8 @@ void test_init_in_cookie_echoed() {
     RawPeer peer;
     if (!start(stack, STACK_PORT) || !peer.open(PEER_PORT, STACK_PORT)) { check(false, "setup"); return; }
 
-    Association_Key key = stack.sctp_associate("127.0.0.1", PEER_PORT);
+    Association_Key key;
+    stack.sctp_associate("127.0.0.1", PEER_PORT, key);
     SCTP_Packet init;
     if (!peer.recv_type(INIT, init)) { check(false, "stack sent INIT"); return; }
     const auto& our_init = std::get<init_chunk_value>(init.chunks[0].chunk_value);
@@ -255,7 +257,7 @@ void test_init_in_cookie_echoed() {
     peer.send_echo(our_init.initiate_tag, ack.cookie);
     uint32_t vtag = 0;
     check(recv_cookie_ack(peer, vtag) && vtag == PEER_TAG_2, "COOKIE ACK sent under the new peer tag (B)");
-    check(stack.await_established_association(key, 1000) == 0, "association is ESTABLISHED");
+    check(stack.await_established_association(key, 1000) == Sctp_Status::OK, "association is ESTABLISHED");
     check(SCTP_Socket_Test_Access::snapshot(stack, PEER_PORT, tcb) && tcb.peer_ver_tag == PEER_TAG_2,
           "peer tag updated from the cookie");
 }
@@ -396,10 +398,12 @@ void test_simultaneous_open() {
     SCTP_Socket a, b;
     if (!start(a, PORT_A) || !start(b, PORT_B)) { check(false, "setup"); return; }
 
-    Association_Key to_b = a.sctp_associate("127.0.0.1", PORT_B);
-    Association_Key to_a = b.sctp_associate("127.0.0.1", PORT_A);
-    check(a.await_established_association(to_b, 3000) == 0, "A reached ESTABLISHED");
-    check(b.await_established_association(to_a, 3000) == 0, "B reached ESTABLISHED");
+    Association_Key to_b;
+    a.sctp_associate("127.0.0.1", PORT_B, to_b);
+    Association_Key to_a;
+    b.sctp_associate("127.0.0.1", PORT_A, to_a);
+    check(a.await_established_association(to_b, 3000) == Sctp_Status::OK, "A reached ESTABLISHED");
+    check(b.await_established_association(to_a, 3000) == Sctp_Status::OK, "B reached ESTABLISHED");
 
     Association at_a, at_b;
     SCTP_Socket_Test_Access::snapshot(a, PORT_B, at_a);

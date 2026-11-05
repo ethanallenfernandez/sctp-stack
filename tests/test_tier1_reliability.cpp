@@ -264,7 +264,7 @@ struct RawPeer {
     bool begin_initiator_handshake(
             SCTP_Socket& stack, Association_Key& key,
             SCTP_Packet& cookie_echo, std::vector<uint8_t>* raw = nullptr) {
-        key = stack.sctp_associate("127.0.0.1", PEER_PORT);
+        stack.sctp_associate("127.0.0.1", PEER_PORT, key);
         SCTP_Packet init;
         if (!receive_until(INIT, init, Clock::now() + std::chrono::seconds(1))) {
             return false;
@@ -300,7 +300,7 @@ struct RawPeer {
             return false;
         }
         send_cookie_ack();
-        return stack.await_established_association(key, 1000) == 0;
+        return stack.await_established_association(key, 1000) == Sctp_Status::OK;
     }
 
     bool establish_responder(SCTP_Socket& stack, Association_Key& key) {
@@ -344,7 +344,7 @@ struct RawPeer {
             return false;
         }
         key = Association_Key{self};
-        return stack.await_established_association(key, 1000) == 0;
+        return stack.await_established_association(key, 1000) == Sctp_Status::OK;
     }
 
     void send_data_packet(
@@ -413,7 +413,7 @@ void test_t1_cookie() {
           "COOKIE ECHO retransmission is byte-for-byte unchanged");
 
     peer.send_cookie_ack();
-    check(stack.await_established_association(key, 1000) == 0,
+    check(stack.await_established_association(key, 1000) == Sctp_Status::OK,
           "COOKIE ACK established the association");
     SCTP_Packet unexpected;
     check(!peer.receive_until(COOKIE_ECHO, unexpected,
