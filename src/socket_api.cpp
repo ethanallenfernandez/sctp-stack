@@ -271,6 +271,7 @@ void SCTP_Socket::remove_association(const Association_Key& key) {
             abandon_partial_delivery(key, it->second);
             associations.erase(it);
         }
+        receives.detach(key);
         forget_peer_addresses(key);
     }
     cancel_expirations(key);
@@ -428,9 +429,13 @@ Sctp_Status SCTP_Socket::sctp_send_data(const Association_Key& association_id, c
         if (stream >= it->second.out_streams) {
             return Sctp_Status::INVALID_STREAM;
         }
+        if (!it->second.outbound.empty() && it->second.outbound_bytes + data.size() > SEND_BUFFER) {
+            return Sctp_Status::QUEUE_FULL;
+        }
         Association& assoc = it->second;
         uint16_t ssn = unordered ? 0 : assoc.next_ssn[stream]++;
         assoc.outbound.push_back(Outbound_Message{stream, ssn, unordered, data});
+        assoc.outbound_bytes += data.size();
     }
     wake_event_loop();
     return Sctp_Status::OK;

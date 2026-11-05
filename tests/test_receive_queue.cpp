@@ -182,6 +182,23 @@ void test_read_any_finishes_a_message() {
 
 } // namespace
 
+void test_detach() {
+    std::printf("An ended association's messages:\n");
+    Receive_Queue queue;
+    Association_Key a = key(1000);
+    queue.push(a, message('1', 3));
+    queue.push(a, message('2', 5));
+    queue.detach(a);
+    check(queue.buffered_bytes(a) == 0, "no longer count against the window");
+    queue.push(a, message('3', 4));
+    check(queue.buffered_bytes(a) == 4, "the next association counts only its own");
+    auto first = pop_from(queue, a);
+    pop_from(queue, a);
+    check(first && *first == message('1', 3) && queue.buffered_bytes(a) == 4, "the old ones are still read first");
+    auto last = pop_from(queue, a);
+    check(last && *last == message('3', 4) && queue.buffered_bytes(a) == 0, "then the new");
+}
+
 int main() {
     test_order_and_accounting();
     test_isolation();
@@ -191,6 +208,7 @@ int main() {
     test_short_buffer();
     test_incomplete_message();
     test_read_any_finishes_a_message();
+    test_detach();
 
     if (failures) {
         std::printf("\n%d check(s) FAILED\n", failures);

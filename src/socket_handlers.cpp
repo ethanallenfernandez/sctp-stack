@@ -933,6 +933,7 @@ bool SCTP_Socket::handle_cookie_echo(
         sends.purge(key);
         forget_peer_addresses(key);
         abandon_partial_delivery(key, tcb);
+        receives.detach(key);
         tcb = init_new_association(cookie);
         add_peer_addresses(key, tcb, cookie_addresses(cookie));
         destination = reply_destination(tcb, src);

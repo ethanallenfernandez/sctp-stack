@@ -33,6 +33,10 @@ struct SCTP_Socket_Test_Access {
         return key;
     }
 
+    static Receive_Queue& receives(SCTP_Socket& stack) {
+        return stack.receives;
+    }
+
     static void set_state(SCTP_Socket& stack, const Association_Key& key, Association_State state) {
         stack.associations.at(key).state = state;
     }
@@ -102,6 +106,26 @@ void test_before_established() {
     sctp_close_socket(silent);
 }
 
+void test_oversized_message() {
+    std::printf("A message larger than the send buffer:\n");
+    SCTP_Socket stack;
+    Association_Key key = Access::insert(stack, ESTABLISHED);
+    expect(stack.sctp_send_data(key, std::vector<uint8_t>(2 * SEND_BUFFER)), Sctp_Status::OK, "is taken when nothing is queued");
+    expect(stack.sctp_send_data(key, {1}), Sctp_Status::QUEUE_FULL, "and fills it");
+}
+
+void test_unread_data_outlives_its_association() {
+    std::printf("Unread data from an ended association:\n");
+    SCTP_Socket stack;
+    Association_Key key = Access::insert(stack, ESTABLISHED);
+    Access::receives(stack).push(key, std::vector<uint8_t>(100, 7));
+    stack.sctp_abort(key);
+    check(Access::receives(stack).buffered_bytes(key) == 0, "no longer counts against the window under its key");
+    Access::insert(stack, ESTABLISHED);
+    std::vector<uint8_t> buffer(200);
+    check(stack.sctp_recv_data_from(key, buffer) == 100, "and is still read, ahead of the new association's");
+}
+
 void test_established() {
     std::printf("An ESTABLISHED association:\n");
     SCTP_Socket stack;
@@ -111,6 +135,10 @@ void test_established() {
     expect(stack.sctp_send_data(key, {}), Sctp_Status::EMPTY_MESSAGE, "send an empty message");
     expect(stack.sctp_send_data(key, {1}, LOCAL_OUT_STREAMS), Sctp_Status::INVALID_STREAM, "send on a stream not negotiated");
     expect(stack.sctp_send_data(key, {1}, LOCAL_OUT_STREAMS - 1), Sctp_Status::OK, "send on the last stream");
+    expect(stack.sctp_send_data(key, std::vector<uint8_t>(SEND_BUFFER)), Sctp_Status::QUEUE_FULL,
+           "send past the send buffer");
+    expect(stack.sctp_send_data(key, std::vector<uint8_t>(SEND_BUFFER - 1)), Sctp_Status::OK, "send up to it");
+    expect(stack.sctp_send_data(key, {1}), Sctp_Status::QUEUE_FULL, "send once it is full");
     expect(stack.sctp_change_heartbeat(key, stranger, false), Sctp_Status::UNKNOWN_DESTINATION, "change heartbeat of a stranger");
     expect(stack.sctp_request_heartbeat(key, stranger), Sctp_Status::UNKNOWN_DESTINATION, "request a heartbeat of a stranger");
     expect(stack.sctp_set_primary(key, stranger), Sctp_Status::UNKNOWN_DESTINATION, "make a stranger primary");
@@ -130,6 +158,8 @@ int main() {
     test_associate();
     test_before_established();
     test_established();
+    test_oversized_message();
+    test_unread_data_outlives_its_association();
 
     std::printf("\n%s (%d failure%s)\n",
                 failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",

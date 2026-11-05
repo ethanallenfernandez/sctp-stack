@@ -41,6 +41,10 @@ struct Send_Allowance {
     bool rwnd_blocked{false};
 };
 
+// Control packets pile up only while the socket refuses writes. Past this many,
+// new ones are dropped, as if lost on the wire.
+constexpr size_t MAX_QUEUED_CONTROL = 256;
+
 using Send_Allowances = std::unordered_map<Association_Key, Send_Allowance, Association_Hash>;
 
 class Send_Queue {

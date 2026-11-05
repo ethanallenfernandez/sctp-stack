@@ -141,6 +141,7 @@ namespace {
             });
             packet_bytes += wire_size(take);
             message.offset += take;
+            assoc.outbound_bytes -= take;
             if (message.offset == message.bytes.size()) {
                 assoc.outbound.pop_front();
             }

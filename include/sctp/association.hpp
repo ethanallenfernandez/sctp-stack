@@ -160,6 +160,7 @@ struct Association {
     uint16_t out_streams;
     std::vector<uint16_t> next_ssn; // Indexed into by stream number
     std::deque<Outbound_Message> outbound;
+    size_t outbound_bytes;
     Reassembly reassembly;
     std::unordered_map<uint16_t, Inbound_Stream> inbound_streams;
     // Messages completed while another is part way through partial delivery,

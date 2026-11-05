@@ -38,9 +38,12 @@ class Receive_Queue {
         std::optional<Read> read_from(const Association_Key& key, uint8_t* out, size_t capacity);
         // Drops a message whose end will never arrive, read or not.
         void abandon_open(const Association_Key& key);
+        // The association under key has ended: what it left stays readable, but
+        // no longer counts against the window of the next one under that key.
+        void detach(const Association_Key& key);
         void clear();
 
-        // Inspection, and the per-association occupancy a_rwnd will be built from.
+        // Inspection, and the per-association occupancy a_rwnd is built from.
         size_t messages(const Association_Key& key);
         size_t buffered_bytes(const Association_Key& key);
 
@@ -55,6 +58,8 @@ class Receive_Queue {
         struct Pending {
             std::deque<Message> messages;
             size_t bytes{0};
+            // Of bytes, those at the front left by an ended association.
+            size_t detached{0};
         };
 
         // Caller must hold `mutex`. Erases the entry once it is empty.

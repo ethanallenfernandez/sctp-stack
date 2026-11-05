@@ -40,6 +40,9 @@ constexpr size_t ACKED_RETRANSMISSION_MEMORY = 64;
 constexpr size_t MAX_RECEIVE_BATCH = 64;
 constexpr size_t MAX_UDP_DATAGRAM = 65535;
 constexpr size_t MAX_SEND_BATCH = 64;
+// Unsent bytes an association queues before refusing more. A message is taken
+// whatever its size when nothing is queued.
+constexpr size_t SEND_BUFFER = 256 * 1024;
 constexpr uint8_t DATA_IMMEDIATE_SACK_FLAG = 0x08;
 // Must exceed any cookie lifespan, so a cookie still inside it always has its
 // signing key retained.

@@ -46,6 +46,9 @@ std::deque<Send_Queue::Queued>& Send_Queue::queue_for(Send_Priority priority) {
 
 void Send_Queue::enqueue(Deliverable deliverable, Send_Priority priority) {
     std::lock_guard<std::mutex> lock(mutex);
+    if (priority == Send_Priority::CONTROL && control.size() >= MAX_QUEUED_CONTROL) {
+        return;
+    }
     queue_for(priority).push_back(Queued{next_id++, std::move(deliverable)});
     new_data_blocked = false;
 }

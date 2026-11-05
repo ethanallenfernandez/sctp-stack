@@ -417,6 +417,18 @@ static void test_stream_sequence_numbers() {
           "a new or restarted association starts every outbound stream at SSN 0");
 }
 
+static void test_control_is_bounded() {
+    std::printf("Control packets are bounded:\n");
+    Send_Queue queue;
+    Association_Key key{};
+    for (size_t i = 0; i < MAX_QUEUED_CONTROL + 5; ++i) {
+        queue.enqueue(Deliverable{key, key.address, SCTP_Packet{}}, Send_Priority::CONTROL);
+    }
+    check(queue.size() == MAX_QUEUED_CONTROL, "past the limit, new ones are dropped");
+    queue.enqueue(Deliverable{key, key.address, SCTP_Packet{}}, Send_Priority::RETRANSMISSION);
+    check(queue.size() == MAX_QUEUED_CONTROL + 1, "retransmissions are not");
+}
+
 int main() {
     test_failed_send_retains_reserved_tsn();
     std::printf("\n");
@@ -427,6 +439,8 @@ int main() {
     test_cookie_echo_takes_its_error();
     std::printf("\n");
     test_stream_sequence_numbers();
+    std::printf("\n");
+    test_control_is_bounded();
 
     std::printf(
         "\n%s (%d failure%s)\n",
