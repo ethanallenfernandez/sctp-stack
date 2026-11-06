@@ -332,6 +332,7 @@ void SCTP_Socket::refill_new_data(Send_Allowances& allowances) {
                 std::move(chunks)
             )};
         }
+        association_changed.notify_all();
         sends.enqueue(std::move(deliverable), Send_Priority::NEW_DATA);
     }
 }

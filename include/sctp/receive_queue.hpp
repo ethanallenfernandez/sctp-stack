@@ -15,6 +15,8 @@
 
 #include <sctp/association.hpp>
 
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -34,13 +36,15 @@ class Receive_Queue {
         };
 
         void push(const Association_Key& key, std::vector<uint8_t> bytes, bool complete = true, uint16_t stream = 0);
-        std::optional<Read> read_any(uint8_t* out, size_t capacity);
-        std::optional<Read> read_from(const Association_Key& key, uint8_t* out, size_t capacity);
+        // Each waits up to timeout for a message, or until close().
+        std::optional<Read> read_any(uint8_t* out, size_t capacity, std::chrono::milliseconds timeout = {});
+        std::optional<Read> read_from(const Association_Key& key, uint8_t* out, size_t capacity, std::chrono::milliseconds timeout = {});
         // Drops a message whose end will never arrive, read or not.
         void abandon_open(const Association_Key& key);
         // The association under key has ended: what it left stays readable, but
         // no longer counts against the window of the next one under that key.
         void detach(const Association_Key& key);
+        void close();
         void clear();
 
         // Inspection, and the per-association occupancy a_rwnd is built from.
@@ -67,7 +71,9 @@ class Receive_Queue {
 
         std::unordered_map<Association_Key, Pending, Association_Hash> pending;
         std::deque<Association_Key> ready;
+        bool closed{false};
         std::mutex mutex;
+        std::condition_variable available;
 };
 
 #endif

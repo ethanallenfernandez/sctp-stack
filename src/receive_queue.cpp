@@ -4,6 +4,7 @@
 
 void Receive_Queue::push(const Association_Key& key, std::vector<uint8_t> bytes, bool complete, uint16_t stream) {
     std::lock_guard<std::mutex> lock(mutex);
+    available.notify_all();
     Pending& entry = pending[key];
     if (entry.messages.empty()) {
         ready.push_back(key);
@@ -18,8 +19,9 @@ void Receive_Queue::push(const Association_Key& key, std::vector<uint8_t> bytes,
     }
 }
 
-std::optional<Receive_Queue::Read> Receive_Queue::read_any(uint8_t* out, size_t capacity) {
-    std::lock_guard<std::mutex> lock(mutex);
+std::optional<Receive_Queue::Read> Receive_Queue::read_any(uint8_t* out, size_t capacity, std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex);
+    available.wait_for(lock, timeout, [this] { return !ready.empty() || closed; });
     if (ready.empty()) {
         return std::nullopt;
     }
@@ -36,8 +38,9 @@ std::optional<Receive_Queue::Read> Receive_Queue::read_any(uint8_t* out, size_t 
     return read;
 }
 
-std::optional<Receive_Queue::Read> Receive_Queue::read_from(const Association_Key& key, uint8_t* out, size_t capacity) {
-    std::lock_guard<std::mutex> lock(mutex);
+std::optional<Receive_Queue::Read> Receive_Queue::read_from(const Association_Key& key, uint8_t* out, size_t capacity, std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex);
+    available.wait_for(lock, timeout, [&] { return pending.count(key) != 0 || closed; });
     auto it = pending.find(key);
     if (it == pending.end()) {
         return std::nullopt;
@@ -89,6 +92,14 @@ void Receive_Queue::detach(const Association_Key& key) {
     if (it != pending.end()) {
         it->second.detached = it->second.bytes;
     }
+}
+
+void Receive_Queue::close() {
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        closed = true;
+    }
+    available.notify_all();
 }
 
 void Receive_Queue::clear() {

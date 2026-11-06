@@ -25,14 +25,12 @@ int main() {
     socket1.sctp_send_data(assoc_key, data);
 
     std::vector<uint8_t> recv_buffer(2048);
-    
-    while (true) {
-        size_t received = socket2.sctp_recv_data_from(socket1.get_this_association_key(), recv_buffer);
-        if (received > 0) {
-            std::string received_message(recv_buffer.begin(), recv_buffer.begin() + received);
-            std::cout << "Socket2 Received: " << received_message << std::endl;
-            break;
-        }
+    size_t received = socket2.sctp_recv_data_from(socket1.get_this_association_key(), recv_buffer, nullptr, nullptr, 5000);
+    if (received == 0) {
+        std::cout << "Nothing received within timeout." << std::endl;
+        return -1;
     }
+    std::string received_message(recv_buffer.begin(), recv_buffer.begin() + received);
+    std::cout << "Socket2 Received: " << received_message << std::endl;
 
 }
