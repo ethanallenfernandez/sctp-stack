@@ -55,6 +55,7 @@ int main() {
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <thread>
 
 using Clock = std::chrono::steady_clock;
@@ -63,6 +64,20 @@ struct SCTP_Socket_Test_Access {
     static size_t association_count(SCTP_Socket& stack) {
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
         return stack.associations.size();
+    }
+
+    static std::optional<Plpmtud> plpmtud(SCTP_Socket& stack, const Association_Key& key) {
+        std::lock_guard<std::mutex> lock(stack.associations_mutex);
+        auto it = stack.associations.find(key);
+        if (it == stack.associations.end()) {
+            return std::nullopt;
+        }
+        for (const Peer_Path& path : it->second.peer_address_list) {
+            if (path.address.sin_addr.s_addr == it->second.primary_path.sin_addr.s_addr) {
+                return path.plpmtud;
+            }
+        }
+        return std::nullopt;
     }
 };
 
@@ -531,6 +546,20 @@ void phase_handshake(SCTP_Socket& stack, int fd, Wire_Tap& tap) {
     (void)stack;
 }
 
+// RFC 8899 6.2.1.2: the kernel answers a HEARTBEAT padded out with a PAD chunk,
+// so the search runs from BASE_PLPMTU straight to MAX_PLPMTU on lo.
+void phase_pmtu(SCTP_Socket& stack, const Association_Key& key) {
+    section("PMTU discovery");
+    auto deadline = Clock::now() + std::chrono::milliseconds(TIMEOUT_MS);
+    std::optional<Plpmtud> state = Access::plpmtud(stack, key);
+    while (state && state->state != Plpmtud_State::SEARCH_COMPLETE && Clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        state = Access::plpmtud(stack, key);
+    }
+    check(state && state->state == Plpmtud_State::SEARCH_COMPLETE, "the kernel acknowledges HEARTBEAT + PAD probes");
+    check(state && state->plpmtu == plpmtud_parameters::MAX_PLPMTU, "the search ends at MAX_PLPMTU (1480)");
+}
+
 void phase_small_data(SCTP_Socket& stack, const Association_Key& key, int fd) {
     section("Small DATA");
     auto out = text("hello kernel");
@@ -889,6 +918,7 @@ int main() {
         if (fd >= 0) phase_handshake(stack, fd, tap);
     }
     if (fd >= 0) {
+        phase_pmtu(stack, key);
         phase_small_data(stack, key, fd);
         phase_streams(stack, key, fd);
         phase_fragmentation(stack, key, fd);

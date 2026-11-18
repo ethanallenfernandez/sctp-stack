@@ -343,7 +343,7 @@ namespace {
         bool cwnd_full = flight_before >= path.cwnd;
         if (path.cwnd <= path.ssthresh) {
             if (cwnd_full && !assoc.in_fast_recovery) {
-                path.cwnd += std::min(bytes_acked, SLOW_START_INCREASE_PMDCS * assoc.pmdcs);
+                path.cwnd += std::min(bytes_acked, SLOW_START_INCREASE_PMDCS * pmdcs(path));
             }
             return;
         }
@@ -351,7 +351,7 @@ namespace {
         path.partial_bytes_acked += bytes_acked + duplicate_bytes;
         if (path.partial_bytes_acked >= path.cwnd && cwnd_full) {
             path.partial_bytes_acked -= path.cwnd;
-            path.cwnd += assoc.pmdcs;
+            path.cwnd += pmdcs(path);
         } else if (path.partial_bytes_acked > path.cwnd) {
             path.partial_bytes_acked = path.cwnd;
         }
@@ -628,7 +628,7 @@ void SCTP_Socket::report_unrecognized_chunks(const SCTP_Common_Header& header, c
             return;
         }
         peer_tag = it->second.peer_ver_tag;
-        budget = it->second.pmdcs;
+        budget = amdcs(it->second);
         destination = reply_destination(it->second, src);
     }
 
@@ -737,7 +737,7 @@ void SCTP_Socket::handle_init(const SCTP_Common_Header& header, const SCTP_Chunk
     );
 
     size_t init_ack_size = SCTP_CHUNK_HEADER_SIZE + 16 + SCTP_CHUNK_HEADER_SIZE + ((cookie.size() + 3) & ~size_t{3});
-    trim_reports(params.reported, DEFAULT_PMDCS - std::min<size_t>(DEFAULT_PMDCS, init_ack_size), SCTP_CHUNK_HEADER_SIZE);
+    trim_reports(params.reported, BASE_PMDCS - std::min<size_t>(BASE_PMDCS, init_ack_size), SCTP_CHUNK_HEADER_SIZE);
 
     enqueue_packet(Deliverable{key, destination, build_init_ack(
         header.des_port,
@@ -807,7 +807,7 @@ void SCTP_Socket::handle_init_ack(const SCTP_Common_Header& header, const SCTP_C
     assoc.state = COOKIE_ECHOED;
     uint32_t peer_tag = assoc.peer_ver_tag;
     // COOKIE ECHO, then the ERROR chunk and cause headers.
-    size_t room = assoc.pmdcs - std::min<size_t>(assoc.pmdcs,
+    size_t room = amdcs(assoc) - std::min<size_t>(amdcs(assoc),
         3 * SCTP_CHUNK_HEADER_SIZE + ((cookie.size() + 3) & ~size_t{3}));
     assoc_lock.unlock();
     cancel_expiration(Expiration_Key{key, Expiration_Timer_Type::T1_INIT});
@@ -1171,7 +1171,7 @@ void SCTP_Socket::handle_heartbeat(const SCTP_Common_Header& header, const SCTP_
         // The Info is echoed verbatim and the peer chooses its length, so an
         // oversized one would build a reply we cannot put on the wire.
         if (it == associations.end() || it->second.state == SHUTDOWN_SENT || it->second.state == SHUTDOWN_ACK_SENT
-                || 2 * SCTP_CHUNK_HEADER_SIZE + info.size() > it->second.pmdcs) {
+                || 2 * SCTP_CHUNK_HEADER_SIZE + info.size() > amdcs(it->second)) {
             return;
         }
         peer_tag = it->second.peer_ver_tag;
@@ -1198,6 +1198,10 @@ void SCTP_Socket::handle_heartbeat_ack(const SCTP_Common_Header&, const SCTP_Chu
     // back, which would otherwise clear the error count of a failing path.
     Association& assoc = it->second;
     Peer_Path* path = find_path(assoc, heartbeat_info_destination(info));
+    if (path != nullptr && path->plpmtud.probe_outstanding && heartbeat_info_nonce(info) == path->plpmtud.probe_nonce) {
+        handle_plpmtu_probe_ack(key, assoc, *path);
+        return;
+    }
     if (path == nullptr || !path->hb_outstanding || heartbeat_info_nonce(info) != path->hb_nonce) {
         return;
     }
@@ -1214,6 +1218,9 @@ void SCTP_Socket::handle_heartbeat_ack(const SCTP_Common_Header&, const SCTP_Chu
     if (!path->confirmed) {
         path->confirmed = true;
         notify_peer_addr_change(key, path->address, Peer_Addr_State::ADDR_CONFIRMED);
+        if (transmits_data(assoc.state)) {
+            start_plpmtud(key, *path);
+        }
         plan_next_probe(assoc, *path, now);
     }
     if (transmits_data(assoc.state)) {
@@ -1530,7 +1537,7 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
         if (schedule_fast_retransmission && !assoc.in_fast_recovery) {
             for (size_t i = 0; i < paths.size(); ++i) {
                 if (acks[i].fast_retransmitted) {
-                    paths[i].ssthresh = std::max(paths[i].cwnd / 2, 4U * assoc.pmdcs);
+                    paths[i].ssthresh = std::max(paths[i].cwnd / 2, 4U * pmdcs(paths[i]));
                     paths[i].cwnd = paths[i].ssthresh;
                     paths[i].partial_bytes_acked = 0;
                 }
@@ -1660,7 +1667,7 @@ SCTP_Packet SCTP_Socket::make_sack(const Association_Key& key, Association& asso
     // back until it grows. A shrinking window is always advertised as it is.
     uint32_t window = receive_window(key, assoc);
     uint32_t believed = peer_view_of_window(assoc);
-    if (window > believed && window - believed < std::min<uint32_t>(RWND / 2, assoc.pmdcs)) {
+    if (window > believed && window - believed < std::min<uint32_t>(RWND / 2, amdcs(assoc))) {
         window = believed;
     }
     assoc.our_rwnd = window;
@@ -1784,7 +1791,7 @@ void SCTP_Socket::handle_data_packet(
         // Only the message next in its stream can go up early: the ULP sees it
         // through to its end before anything else.
         Reassembly& message = assoc.reassembly;
-        if (message.open && !message.bytes.empty() && used + assoc.pmdcs > RWND
+        if (message.open && !message.bytes.empty() && used + amdcs(assoc) > RWND
                 && (message.unordered || message.ssn == assoc.inbound_streams[message.stream].next_ssn)) {
             delivered.push_back(Delivery{std::move(message.bytes), false, message.stream});
             message.bytes.clear();

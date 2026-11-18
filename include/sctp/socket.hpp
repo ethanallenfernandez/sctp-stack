@@ -154,6 +154,11 @@ private:
     void handle_delayed_sack_expiration(const Association_Key& location);
     void handle_heartbeat_expiration(const Association_Key& location, const sockaddr_in& destination);
     void handle_zero_window_probe_expiration(const Association_Key& location);
+    void handle_plpmtu_probe_expiration(const Association_Key& location, const sockaddr_in& destination);
+    void handle_pmtu_raise_expiration(const Association_Key& location, const sockaddr_in& destination);
+    void run_icmp_errors();
+    // ptb_size is the next-hop MTU the PTB reports, an IP packet size.
+    void handle_icmp_ptb(const sockaddr_in& destination, const uint8_t* quoted, size_t length, uint32_t ptb_size);
     // These take associations_mutex as held.
     void start_heartbeats(const Association_Key& key, Association& assoc);
     void arm_heartbeat(const Association_Key& key, const Association& assoc, const Peer_Path& path);
@@ -161,8 +166,15 @@ private:
     void plan_next_probe(const Association& assoc, Peer_Path& path, std::chrono::steady_clock::time_point now);
     Deliverable build_probe(const Association_Key& key, const Association& assoc, Peer_Path& path);
     void count_path_error(const Association_Key& key, Peer_Path& path);
+    void start_plpmtud(const Association_Key& key, Peer_Path& path);
+    void stop_plpmtud(const Association_Key& key, Peer_Path& path);
+    void schedule_plpmtu_probe(const Association_Key& key, Peer_Path& path, std::chrono::microseconds delay = std::chrono::microseconds{0});
+    void complete_plpmtu_search(const Association_Key& key, Peer_Path& path);
+    void check_for_black_hole(const Association_Key& key, Peer_Path& path);
+    Deliverable make_plpmtu_probe(const Association_Key& key, const Association& assoc, Peer_Path& path);
+    void handle_plpmtu_probe_ack(const Association_Key& key, Association& assoc, Peer_Path& path);
     void clear_path_errors(const Association_Key& key, Peer_Path& path);
-    void record_heartbeat_sent(const Association_Key& location, const sockaddr_in& destination, std::chrono::steady_clock::time_point sent_at);
+    void record_heartbeat_sent(const Association_Key& location, const sockaddr_in& destination, const std::vector<uint8_t>& info, std::chrono::steady_clock::time_point sent_at);
     void record_data_sent(const Association_Key& location, const sockaddr_in& destination, const data_chunk_value& data, std::chrono::steady_clock::time_point sent_at);
     void start_t3_if_stopped(const Association_Key& location, const sockaddr_in& destination);
     void restart_t3(const Association_Key& location, const sockaddr_in& destination);

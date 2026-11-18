@@ -233,7 +233,7 @@ void test_init_report_size() {
     check(init_ack != nullptr, "INIT ACK sent");
     if (!init_ack) return;
     check(unrecognized_in(*init_ack).size() == 2, "trimmed to the reports that fit");
-    check(serialize_sctp_packet(*init_ack).size() <= SCTP_COMMON_HEADER_SIZE + 1200, "INIT ACK fits in PMDCS");
+    check(serialize_sctp_packet(*init_ack).size() <= SCTP_COMMON_HEADER_SIZE + 1180, "INIT ACK fits in PMDCS");
 }
 
 void test_init_host_name() {

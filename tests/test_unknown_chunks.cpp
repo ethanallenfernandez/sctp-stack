@@ -170,7 +170,7 @@ void test_report_fits_path() {
     std::printf("Report size:\n");
 
     // Each cause is 4 + (4 + 396) = 404 bytes. With a 4-byte chunk header,
-    // two fit in 1200 (812) and a third does not (1216).
+    // two fit in 1180 (812) and a third does not (1216).
     std::vector<SCTP_Chunk> chunks;
     for (int i = 0; i < 5; ++i) chunks.push_back(unknown(0xC0, std::vector<uint8_t>(396, 0x55)));
     auto r = Access::deliver(&ESTABLISHED_STATE, std::move(chunks));

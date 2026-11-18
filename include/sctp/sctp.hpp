@@ -12,6 +12,8 @@ constexpr size_t SCTP_COMMON_HEADER_SIZE = 12;
 constexpr size_t SCTP_CHUNK_HEADER_SIZE  = 4;
 constexpr size_t DATA_CHUNK_HEADER_SIZE  = 16;
 constexpr size_t SCTP_CHECKSUM_OFFSET    = 8;
+constexpr size_t UDP_HEADER_SIZE         = 8;
+constexpr size_t IPV4_HEADER_SIZE        = 20;
 
 // RFC 9260 section 16 recommended values. Names match the RFC's.
 namespace sctp_parameters {
@@ -29,6 +31,17 @@ namespace sctp_parameters {
     inline constexpr uint32_t HB_MAX_BURST = 1;
     inline constexpr std::chrono::milliseconds SACK_DELAY{200};
 } // namespace sctp_parameters
+
+// RFC 8899 5.1. Sizes are of the UDP datagram, the PL packet for SCTP/UDP
+// (6.2.2.2). MAX_PLPMTU is an Ethernet MTU less the IPv4 header.
+namespace plpmtud_parameters {
+    inline constexpr uint32_t MIN_PLPMTU = 68 - IPV4_HEADER_SIZE;
+    inline constexpr uint32_t BASE_PLPMTU = 1200;
+    inline constexpr uint32_t MAX_PLPMTU = 1500 - IPV4_HEADER_SIZE;
+    inline constexpr uint8_t MAX_PROBES = 3;
+    inline constexpr std::chrono::milliseconds PROBE_TIMER = std::chrono::seconds{15};
+    inline constexpr std::chrono::milliseconds PMTU_RAISE_TIMER = std::chrono::seconds{600};
+} // namespace plpmtud_parameters
 
 // All multi-byte fields below are in HOST byte order.
 struct SCTP_Common_Header {
@@ -54,6 +67,7 @@ enum Chunk_Type : uint8_t {
     ECNE = 12,
     CWR = 13, 
     SHUTDOWN_COMPLETE = 14,
+    PAD = 0x84, // RFC 4820
 };
 
 constexpr uint8_t CHUNK_FLAG_T_BIT = 0x01;   // ABORT, SHUTDOWN COMPLETE: tag is reflected

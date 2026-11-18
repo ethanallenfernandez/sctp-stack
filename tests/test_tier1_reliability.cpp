@@ -555,7 +555,7 @@ void test_fast_retransmit(uint32_t first_tsn, const std::string& label) {
     Association during = SCTP_Socket_Test_Access::association(stack, key);
     check(during.in_fast_recovery, "sender entered Fast Recovery");
     check(primary(during).cwnd == primary(during).ssthresh
-              && primary(during).ssthresh >= 4 * during.pmdcs,
+              && primary(during).ssthresh >= 4 * pmdcs(primary(during)),
           "Fast Recovery applied the RFC congestion reduction");
     check(during.fast_recovery_exit_tsn == first_tsn + 4,
           "Fast Recovery recorded the highest outstanding TSN");

@@ -85,6 +85,28 @@ struct Reassembly {
     std::vector<uint8_t> bytes;
 };
 
+enum class Plpmtud_State {
+    DISABLED,
+    BASE,
+    SEARCHING,
+    SEARCH_COMPLETE,
+    ERROR,
+};
+
+// RFC 8899 5.1.3 for one destination. search_high is the smallest size known
+// not to get through, above MAX_PLPMTU until one is found. confirming marks a
+// probe at the PLPMTU itself, sent in SEARCH_COMPLETE on suspicion of a black hole.
+struct Plpmtud {
+    Plpmtud_State state{Plpmtud_State::DISABLED};
+    uint32_t plpmtu{plpmtud_parameters::BASE_PLPMTU};
+    uint32_t probed_size{plpmtud_parameters::BASE_PLPMTU};
+    uint32_t search_high{plpmtud_parameters::MAX_PLPMTU + 1};
+    uint8_t probe_count{0};
+    bool probe_outstanding{false};
+    bool confirming{false};
+    uint64_t probe_nonce{0};
+};
+
 // A destination of the peer. sin_port holds not the SCTP port, which is the
 // association's, but the UDP encapsulation port this address last sent from.
 struct Peer_Path {
@@ -113,6 +135,7 @@ struct Peer_Path {
     // Last DATA transmission, moved forward by each idle cwnd decay.
     std::chrono::steady_clock::time_point data_sent_at{};
     bool idle_decaying{false};
+    Plpmtud plpmtud{};
 };
 
 struct Association {
@@ -143,7 +166,6 @@ struct Association {
     std::map<uint32_t, Outstanding_Data, Tsn_Less> outstanding_data;
     bool has_rtt_measurement_tsn;
     uint32_t rtt_measurement_tsn;
-    uint32_t pmdcs;
     std::chrono::milliseconds hb_interval;
     // New-DATA packets sent in the current transmission opportunity.
     uint32_t burst_count;

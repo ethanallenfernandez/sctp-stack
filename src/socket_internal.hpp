@@ -34,7 +34,6 @@ constexpr std::chrono::milliseconds SEND_RETRY_DELAY{10};
 constexpr std::chrono::milliseconds CLOSE_POLL_INTERVAL{10};
 // Time given to the last SHUTDOWN COMPLETE or ABORT to reach the wire.
 constexpr std::chrono::milliseconds CLOSE_DRAIN_TIMEOUT{100};
-constexpr uint32_t DEFAULT_PMDCS = 1200;
 constexpr uint32_t SLOW_START_INCREASE_PMDCS = 1;
 constexpr size_t ACKED_RETRANSMISSION_MEMORY = 64;
 constexpr size_t MAX_RECEIVE_BATCH = 64;
@@ -55,6 +54,16 @@ constexpr uint8_t MAX_STALE_COOKIE_RETRIES = 2;
 // What we advertise as OS and MIS in INIT and INIT ACK.
 constexpr uint16_t LOCAL_OUT_STREAMS = 10;
 constexpr uint16_t LOCAL_MAX_IN_STREAMS = 65535;
+
+inline constexpr uint32_t pmdcs_of(uint32_t plpmtu) {
+    return plpmtu - static_cast<uint32_t>(UDP_HEADER_SIZE + SCTP_COMMON_HEADER_SIZE);
+}
+
+constexpr uint32_t BASE_PMDCS = pmdcs_of(plpmtud_parameters::BASE_PLPMTU);
+
+inline uint32_t pmdcs(const Peer_Path& path) {
+    return pmdcs_of(path.plpmtud.plpmtu);
+}
 
 inline uint32_t initial_cwnd(uint32_t pmdcs) {
     return std::min(4U * pmdcs, std::max(2U * pmdcs, 4404U));
@@ -100,11 +109,23 @@ inline const Peer_Path& primary(const Association& assoc) {
     return primary(const_cast<Association&>(assoc));
 }
 
-inline Peer_Path make_path(const sockaddr_in& address, bool confirmed, uint32_t pmdcs) {
+inline Peer_Path make_path(const sockaddr_in& address, bool confirmed) {
     Peer_Path path{address, confirmed};
-    path.cwnd = initial_cwnd(pmdcs);
+    path.cwnd = initial_cwnd(pmdcs(path));
     path.ssthresh = RWND;
     return path;
+}
+
+// 7.3: the smallest PMDCS over the destinations DATA can go to, so a chunk
+// retransmitted to an alternate still fits.
+inline uint32_t amdcs(const Association& assoc) {
+    uint32_t smallest = 0;
+    for (const Peer_Path& path : assoc.peer_address_list) {
+        if (path.confirmed && path.active && (smallest == 0 || pmdcs(path) < smallest)) {
+            smallest = pmdcs(path);
+        }
+    }
+    return smallest == 0 ? BASE_PMDCS : smallest;
 }
 
 // New DATA goes to the primary while it is active, and otherwise to one

@@ -176,7 +176,7 @@ void test_t3_moves_timed_out_data_to_an_alternate() {
 
     Access::fire_t3(stack, key, PRIMARY);
     const Peer_Path& primary_path = Access::path(stack, key, PRIMARY);
-    check(primary_path.cwnd == DEFAULT_PMDCS && primary_path.single_packet_in_flight, "E1: the primary's cwnd drops to one PMDCS");
+    check(primary_path.cwnd == BASE_PMDCS && primary_path.single_packet_in_flight, "E1: the primary's cwnd drops to one PMDCS");
     check(primary_path.rto == 2 * std::chrono::microseconds(sctp_parameters::RTO_INITIAL), "E2: its RTO backs off");
     check(primary_path.error_count == 1 && Access::tcb(stack, key).error_count == 1,
           "the expiry counts against the path and the association");
@@ -255,7 +255,7 @@ void test_fast_retransmit_stays_on_its_path() {
     }
 
     const Peer_Path& alternate = Access::path(stack, key, ALTERNATE);
-    check(alternate.ssthresh == std::max(initial_cwnd(DEFAULT_PMDCS) / 2, 4U * DEFAULT_PMDCS),
+    check(alternate.ssthresh == std::max(initial_cwnd(BASE_PMDCS) / 2, 4U * BASE_PMDCS),
           "the alternate, where the lost chunk went, adjusts ssthresh");
     check(Access::path(stack, key, PRIMARY).ssthresh == primary_ssthresh, "the primary does not");
     check(goes_to(Access::transmit(stack), ALTERNATE), "the chunk is resent to the address it was first sent to");

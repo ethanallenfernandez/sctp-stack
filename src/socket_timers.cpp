@@ -38,6 +38,14 @@ void SCTP_Socket::handle_expiration(const Expiration_Fallback& fallback) {
         handle_zero_window_probe_expiration(fallback.key.location);
         return;
     }
+    if (fallback.key.type == Expiration_Timer_Type::PLPMTU_PROBE) {
+        handle_plpmtu_probe_expiration(fallback.key.location, fallback.key.path.address);
+        return;
+    }
+    if (fallback.key.type == Expiration_Timer_Type::PMTU_RAISE) {
+        handle_pmtu_raise_expiration(fallback.key.location, fallback.key.path.address);
+        return;
+    }
     if (fallback.key.type != Expiration_Timer_Type::T1_INIT && fallback.key.type != Expiration_Timer_Type::T1_COOKIE) {
         return;
     }
@@ -229,14 +237,15 @@ void SCTP_Socket::handle_t3_expiration(const Association_Key& location, const so
 
         Peer_Path& path = *expired;
         if (!assoc.zero_window_probing) {
-            path.ssthresh = std::max(path.cwnd / 2, 4U * assoc.pmdcs);
-            path.cwnd = assoc.pmdcs;
+            path.ssthresh = std::max(path.cwnd / 2, 4U * pmdcs(path));
+            path.cwnd = pmdcs(path);
             path.partial_bytes_acked = 0;
             path.single_packet_in_flight = true;
         }
         path.rto = std::min(path.rto * 2, std::chrono::duration_cast<std::chrono::microseconds>(sctp_parameters::RTO_MAX));
         if (!assoc.zero_window_probing || !assoc.sack_since_t3) {
             count_path_error(location, path);
+            check_for_black_hole(location, path);
             unreachable = ++assoc.error_count > assoc.error_threshold;
         }
         assoc.sack_since_t3 = false;
@@ -334,6 +343,7 @@ void SCTP_Socket::start_heartbeats(const Association_Key& key, Association& asso
             path.hb_next = now;
         }
         arm_heartbeat(key, assoc, path);
+        start_plpmtud(key, path);
     }
 }
 
@@ -392,6 +402,7 @@ void SCTP_Socket::arm_confirmation_probes(const Association_Key& key, Associatio
 void SCTP_Socket::count_path_error(const Association_Key& key, Peer_Path& path) {
     if (path.active && ++path.error_count > sctp_parameters::PATH_MAX_RETRANS) {
         path.active = false;
+        stop_plpmtud(key, path);
         notify_peer_addr_change(key, path.address, Peer_Addr_State::ADDR_UNREACHABLE);
     }
 }
@@ -400,18 +411,19 @@ void SCTP_Socket::clear_path_errors(const Association_Key& key, Peer_Path& path)
     path.error_count = 0;
     if (!path.active) {
         path.active = true;
+        start_plpmtud(key, path);
         notify_peer_addr_change(key, path.address, Peer_Addr_State::ADDR_AVAILABLE);
     }
 }
 
-void SCTP_Socket::record_heartbeat_sent(const Association_Key& location, const sockaddr_in& destination, std::chrono::steady_clock::time_point sent_at) {
+void SCTP_Socket::record_heartbeat_sent(const Association_Key& location, const sockaddr_in& destination, const std::vector<uint8_t>& info, std::chrono::steady_clock::time_point sent_at) {
     std::lock_guard<std::mutex> assoc_lock(associations_mutex);
     auto association = associations.find(location);
     if (association == associations.end()) {
         return;
     }
     Peer_Path* path = find_path(association->second, destination);
-    if (path != nullptr && path->hb_outstanding) {
+    if (path != nullptr && path->hb_outstanding && info.size() == HEARTBEAT_INFO_SIZE && heartbeat_info_nonce(info) == path->hb_nonce) {
         path->hb_sent_at = sent_at;
     }
 }
@@ -474,25 +486,29 @@ void SCTP_Socket::schedule_pending_retransmission(const Association_Key& key, bo
         }
         std::vector<data_chunk_value> bundle;
         size_t packet_size = SCTP_COMMON_HEADER_SIZE;
+        size_t limit = SCTP_COMMON_HEADER_SIZE + pmdcs(to);
         for (const auto& [tsn, outstanding] : ordered) {
             size_t chunk_size = data_chunk_wire_size(outstanding->data);
             if (&destination_of(assoc, *outstanding) != &to) {
                 continue;
             }
-            if (!bundle.empty() && packet_size + chunk_size > SCTP_COMMON_HEADER_SIZE + assoc.pmdcs) {
+            if (!bundle.empty() && packet_size + chunk_size > limit) {
                 break;
             }
             bundle.push_back(outstanding->data);
             outstanding->pending_retransmission = false;
             packet_size += chunk_size;
             (void)tsn;
+            if (packet_size > limit) {
+                break;
+            }
         }
         retransmission = Deliverable{key, to.address, build_data(
             ntohs(local_address.sin_port),
             ntohs(key.address.sin_port),
             assoc.peer_ver_tag,
             std::move(bundle)
-        )};
+        ), packet_size > limit};
     }
     enqueue_packet(std::move(retransmission), Send_Priority::RETRANSMISSION);
 }

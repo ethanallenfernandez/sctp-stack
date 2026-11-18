@@ -25,6 +25,12 @@
   #include <cstring>
   #include <sys/random.h>
 #endif
+#ifdef __linux__
+  #include <linux/errqueue.h>
+  #include <netinet/ip.h>
+  #include <netinet/ip_icmp.h>
+  #include <sys/uio.h>
+#endif
 
 #include <cstddef>
 #include <string>
@@ -108,6 +114,15 @@ inline bool sctp_error_would_block(int err) {
 #endif
 }
 
+// The datagram exceeds what the socket will send with DF set.
+inline bool sctp_error_too_big(int err) {
+#ifdef _WIN32
+    return err == WSAEMSGSIZE;
+#else
+    return err == EMSGSIZE;
+#endif
+}
+
 inline bool sctp_error_interrupted(int err) {
 #ifdef _WIN32
     return err == WSAEINTR;
@@ -124,6 +139,33 @@ inline int sctp_poll(
 #else
     return ::poll(
         descriptors, static_cast<nfds_t>(count), timeout_ms);
+#endif
+}
+
+// With DF set, Linux is also told to ignore its own PMTU cache, which RFC 8899
+// 4.5 requires of a sender doing DPLPMTUD.
+inline bool sctp_set_dont_fragment(sctp_socket_t s, bool on) {
+#ifdef _WIN32
+    DWORD value = on ? 1 : 0;
+    return setsockopt(s, IPPROTO_IP, IP_DONTFRAGMENT, reinterpret_cast<const char*>(&value), sizeof(value)) != SOCKET_ERROR;
+#elif defined(__linux__)
+    int value = on ? IP_PMTUDISC_PROBE : IP_PMTUDISC_DONT;
+    return setsockopt(s, IPPROTO_IP, IP_MTU_DISCOVER, &value, sizeof(value)) == 0;
+#else
+    (void)s;
+    (void)on;
+    return false;
+#endif
+}
+
+// Queues ICMP errors for the socket, PTB among them, to be read with MSG_ERRQUEUE.
+inline bool sctp_enable_icmp_errors(sctp_socket_t s) {
+#ifdef __linux__
+    int on = 1;
+    return setsockopt(s, IPPROTO_IP, IP_RECVERR, &on, sizeof(on)) == 0;
+#else
+    (void)s;
+    return false;
 #endif
 }
 

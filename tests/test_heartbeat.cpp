@@ -227,7 +227,7 @@ void test_oversized_info_is_not_echoed() {
     Association_Key key{peer_address()};
     Access::establish(stack, key);
 
-    std::vector<uint8_t> info(DEFAULT_PMDCS, 0x5A);
+    std::vector<uint8_t> info(BASE_PMDCS, 0x5A);
     Access::deliver(stack, inbound(OUR_TAG, HEARTBEAT, info));
 
     check(Access::drain_sends(stack).empty(), "no reply: echoing it would exceed PMDCS");

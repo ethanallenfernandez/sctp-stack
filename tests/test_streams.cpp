@@ -24,7 +24,8 @@ static void check(bool condition, const std::string& description) {
     }
 }
 
-constexpr uint32_t PMDCS = 1200;
+// RFC 8899 BASE_PLPMTU less the UDP and SCTP common headers.
+constexpr uint32_t PMDCS = 1200 - 8 - 12;
 constexpr size_t FRAGMENT_SIZE = PMDCS - DATA_CHUNK_HEADER_SIZE;
 constexpr uint32_t OUR_TAG = 0x0A0B0C0D;
 constexpr uint32_t PEER_TAG = 0x10203040;
@@ -64,7 +65,6 @@ struct SCTP_Socket_Test_Access {
         association.out_streams = 3;
         association.next_ssn.assign(3, 0);
         association.in_streams = 4;
-        association.pmdcs = PMDCS;
         association.peer_rwnd = 65535;
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
         association.primary_path = key.address;

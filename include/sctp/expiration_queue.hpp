@@ -30,10 +30,12 @@ enum class Expiration_Timer_Type {
     T2_SHUTDOWN,
     T5_SHUTDOWN_GUARD,
     ZERO_WINDOW_PROBE,
+    PLPMTU_PROBE,
+    PMTU_RAISE,
 };
 
-// `path` names the destination for timers kept per destination (HEARTBEAT),
-// and is left zero for those kept per association.
+// `path` names the destination for timers kept per destination, and is left
+// zero for those kept per association.
 struct Expiration_Key {
     Association_Key location;
     Expiration_Timer_Type type;

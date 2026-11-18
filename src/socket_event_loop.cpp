@@ -46,6 +46,9 @@ void SCTP_Socket::event_loop() {
             break;
         }
 
+        if ((descriptors[0].revents & SCTP_POLL_ERROR) != 0) {
+            run_icmp_errors();
+        }
         if ((descriptors[0].revents & (SCTP_POLL_READ | SCTP_POLL_ERROR)) != 0) {
             run_receiving();
         }
@@ -78,13 +81,13 @@ void SCTP_Socket::run_expire() {
 namespace {
     // A no-op unless cwnd is above 4 * PMDCS: the decay is never allowed to
     // raise cwnd, as it would after a T3-rtx expiry left cwnd at one PMDCS.
-    void decay_idle_cwnd(Peer_Path& path, uint32_t pmdcs, std::chrono::steady_clock::time_point now) {
+    void decay_idle_cwnd(Peer_Path& path, std::chrono::steady_clock::time_point now) {
         if (path.rto.count() <= 0 || now - path.data_sent_at < path.rto) {
             return;
         }
         auto periods = (now - path.data_sent_at) / path.rto;
         path.data_sent_at += periods * path.rto;
-        uint32_t floor = 4 * pmdcs;
+        uint32_t floor = 4 * pmdcs(path);
         if (path.cwnd <= floor) {
             return;
         }
@@ -104,13 +107,14 @@ namespace {
     // window the peer has offered.
     std::vector<data_chunk_value> cut_new_data(Association& assoc, Send_Allowance& allowance) {
         std::vector<data_chunk_value> chunks;
-        size_t full_fragment = (assoc.pmdcs - DATA_CHUNK_HEADER_SIZE) & ~size_t{3};
+        size_t chunk_limit = amdcs(assoc);
+        size_t full_fragment = (chunk_limit - DATA_CHUNK_HEADER_SIZE) & ~size_t{3};
         size_t packet_bytes = 0;
         while (!assoc.outbound.empty()) {
             Outbound_Message& message = assoc.outbound.front();
             size_t remaining = message.bytes.size() - message.offset;
             size_t take = std::min(remaining, full_fragment);
-            size_t space = assoc.pmdcs - packet_bytes;
+            size_t space = chunk_limit - packet_bytes;
             bool probe = allowance.zero_window_probe && chunks.empty();
             size_t window = probe ? space : std::min<size_t>(space, allowance.rwnd > packet_bytes ? allowance.rwnd - packet_bytes : 0);
             auto wire_size = [](size_t payload) { return DATA_CHUNK_HEADER_SIZE + ((payload + 3) & ~size_t{3}); };
@@ -227,7 +231,7 @@ Send_Allowances SCTP_Socket::send_allowances() {
             continue;
         }
         for (Peer_Path& path : assoc.peer_address_list) {
-            decay_idle_cwnd(path, assoc.pmdcs, now);
+            decay_idle_cwnd(path, now);
         }
         size_t flight_size = bytes_in_flight(assoc);
         allowances.emplace(key, Send_Allowance{
@@ -257,7 +261,7 @@ void SCTP_Socket::prepare_data_packet(Deliverable& deliverable, bool new_data) {
     Expiration_Key delayed_sack{deliverable.location, Expiration_Timer_Type::DELAYED_SACK};
     bool sack_pending = expirations.is_active(delayed_sack);
     SCTP_Packet sack;
-    uint32_t pmdcs;
+    uint32_t limit;
     {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
         auto association = associations.find(deliverable.location);
@@ -281,12 +285,12 @@ void SCTP_Socket::prepare_data_packet(Deliverable& deliverable, bool new_data) {
             return;
         }
         sack = make_sack(deliverable.location, assoc);
-        pmdcs = assoc.pmdcs;
+        limit = pmdcs(sent_on);
     }
 
     cancel_expiration(delayed_sack);
     size_t sack_size = serialize_sctp_packet(sack).size() - SCTP_COMMON_HEADER_SIZE;
-    if (serialize_sctp_packet(deliverable.packet).size() + sack_size <= SCTP_COMMON_HEADER_SIZE + pmdcs) {
+    if (serialize_sctp_packet(deliverable.packet).size() + sack_size <= SCTP_COMMON_HEADER_SIZE + limit) {
         chunks.insert(chunks.begin(), std::move(sack.chunks.front()));
     } else {
         enqueue_packet(Deliverable{deliverable.location, deliverable.destination, std::move(sack)});
@@ -436,13 +440,26 @@ int SCTP_Socket::next_poll_timeout() {
     return static_cast<int>(milliseconds.count());
 }
 
+// A packet too big to leave with DF set counts as sent and lost: retrying
+// cannot help, and a probe's loss is what the search learns from.
 bool SCTP_Socket::handle_send_packet(const Deliverable& deliverable) {
     std::vector<uint8_t> serialized_packet = serialize_sctp_packet(deliverable.packet);
     const char* data = reinterpret_cast<const char*>(serialized_packet.data());
     const sockaddr* to = reinterpret_cast<const sockaddr*>(&deliverable.destination);
+    if (deliverable.ip_fragment) {
+        sctp_set_dont_fragment(udp_socket, false);
+    }
     int sent = sendto(udp_socket, data, serialized_packet.size(), 0, to, sizeof(deliverable.destination));
+    int err = sctp_last_error();
+    if (deliverable.ip_fragment) {
+        sctp_set_dont_fragment(udp_socket, true);
+    }
 
+    if (sent == SOCKET_ERROR && sctp_error_too_big(err)) {
+        return true;
+    }
     if (sent == SOCKET_ERROR || static_cast<size_t>(sent) != serialized_packet.size()) {
+        sctp_set_last_error(err);
         std::cerr << "Error sending packet: " << sctp_error_string() << std::endl;
         return false;
     }
@@ -456,7 +473,8 @@ void SCTP_Socket::schedule_expirations_after_send( const Deliverable& deliverabl
         // running. It is timestamped here rather than at build time so the RTT
         // it measures excludes however long the packet sat in the send queue.
         if (chunk.chunk_header.type == HEARTBEAT) {
-            record_heartbeat_sent(deliverable.location, deliverable.destination, sent_at);
+            record_heartbeat_sent(deliverable.location, deliverable.destination,
+                std::get<heartbeat_chunk_value>(chunk.chunk_value).info, sent_at);
             continue;
         }
 

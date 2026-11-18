@@ -382,7 +382,7 @@ void test_initial_cwnd() {
 
     SCTP_Socket stack;
     Association fresh = Access::new_association(stack, Association_Key{peer_address(40000)});
-    check(fresh.pmdcs == 1200 && primary(fresh).cwnd == 4404, "min(4 * PMDCS, max(2 * PMDCS, 4404)) with a 1200-byte PMDCS");
+    check(amdcs(fresh) == 1180 && primary(fresh).cwnd == 4404, "min(4 * PMDCS, max(2 * PMDCS, 4404)) with a 1180-byte PMDCS");
 }
 
 void test_slow_start_grows_a_full_window() {
@@ -413,7 +413,7 @@ void test_slow_start_increase_is_capped() {
     send_all(stack);
 
     Access::deliver_sack(stack, 40000, INITIAL_TSN + 2, 65535);
-    check(primary(Access::tcb(stack, key)).cwnd == 2400 + DEFAULT_PMDCS, "3 chunks acked, but cwnd grows by one PMDCS");
+    check(primary(Access::tcb(stack, key)).cwnd == 2400 + BASE_PMDCS, "3 chunks acked, but cwnd grows by one PMDCS");
 }
 
 void test_slow_start_needs_a_full_window() {
@@ -468,7 +468,7 @@ void test_congestion_avoidance() {
 
     check(send_all(stack) == 1, "and again");
     Access::deliver_sack(stack, 40000, INITIAL_TSN + 2, 65535);
-    check(primary(assoc).cwnd == 2400 + DEFAULT_PMDCS, "a full cwnd acknowledged adds one PMDCS");
+    check(primary(assoc).cwnd == 2400 + BASE_PMDCS, "a full cwnd acknowledged adds one PMDCS");
     check(primary(assoc).partial_bytes_acked == 3 * CHUNK - 2400, "and cwnd is taken off partial_bytes_acked");
 }
 
@@ -535,7 +535,7 @@ void test_idle_cwnd_decay() {
 
     primary(assoc).data_sent_at = Clock::now() - std::chrono::milliseconds(1100);
     Access::refresh_allowances(stack);
-    check(primary(assoc).cwnd == 4 * DEFAULT_PMDCS, "cwnd stops at 4 * PMDCS");
+    check(primary(assoc).cwnd == 4 * BASE_PMDCS, "cwnd stops at 4 * PMDCS");
     check(primary(assoc).ssthresh == 20000, "ssthresh is kept through later decays");
 
     stack.sctp_send_data(key, MESSAGE);
@@ -549,13 +549,13 @@ void test_idle_decay_never_raises_cwnd() {
 
     SCTP_Socket stack;
     Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, DEFAULT_PMDCS, 65535);
+    Access::establish(stack, key, BASE_PMDCS, 65535);
     Association& assoc = Access::tcb(stack, key);
     uint32_t ssthresh = primary(assoc).ssthresh;
     primary(assoc).data_sent_at = Clock::now() - std::chrono::seconds(10);
 
     Access::refresh_allowances(stack);
-    check(primary(assoc).cwnd == DEFAULT_PMDCS, "cwnd stays at one PMDCS rather than rising to 4 * PMDCS");
+    check(primary(assoc).cwnd == BASE_PMDCS, "cwnd stays at one PMDCS rather than rising to 4 * PMDCS");
     check(primary(assoc).ssthresh == ssthresh, "and ssthresh is untouched");
 }
 
@@ -572,7 +572,7 @@ void test_t3_marks_everything_outstanding() {
 
     Access::fire(stack, key, Expiration_Timer_Type::T3_RTX);
     Association& assoc = Access::tcb(stack, key);
-    check(primary(assoc).cwnd == DEFAULT_PMDCS, "cwnd drops to one PMDCS");
+    check(primary(assoc).cwnd == BASE_PMDCS, "cwnd drops to one PMDCS");
     check(Access::retransmission_queued(stack, key), "the first retransmission is queued at once");
     check(assoc.outstanding_data.at(INITIAL_TSN + 2).pending_retransmission,
           "what did not fit is marked for retransmission");
@@ -905,7 +905,7 @@ void test_sack_that_does_not_fit_goes_alone() {
     Access::establish(stack, key, 65535, 65535);
     Access::deliver_data(stack, 40000, PEER_TSN, 100, false);
 
-    stack.sctp_send_data(key, std::vector<uint8_t>(DEFAULT_PMDCS - 16, 'x'));
+    stack.sctp_send_data(key, std::vector<uint8_t>(BASE_PMDCS - 16, 'x'));
     auto packet = Access::transmit(stack);
     check(packet && packet->chunks.size() == 1 && packet->chunks[0].chunk_header.type == DATA,
           "a full-size DATA packet is sent unchanged");

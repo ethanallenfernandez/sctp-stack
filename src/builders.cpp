@@ -210,6 +210,20 @@ SCTP_Packet build_heartbeat_ack(
     return packet;
 }
 
+SCTP_Packet build_plpmtu_probe(
+    uint16_t src_port,
+    uint16_t des_port,
+    uint32_t peer_tag,
+    std::vector<uint8_t> info,
+    uint32_t plpmtu
+) {
+    size_t heartbeat_size = SCTP_CHUNK_HEADER_SIZE + ((SCTP_CHUNK_HEADER_SIZE + info.size() + 3) & ~size_t{3});
+    size_t used = UDP_HEADER_SIZE + SCTP_COMMON_HEADER_SIZE + heartbeat_size + SCTP_CHUNK_HEADER_SIZE;
+    SCTP_Packet packet = build_heartbeat(src_port, des_port, peer_tag, std::move(info));
+    append_chunk(packet, PAD, unknown_chunk_value{std::vector<uint8_t>(plpmtu > used ? plpmtu - used : 0, 0)});
+    return packet;
+}
+
 size_t data_chunk_wire_size(const data_chunk_value& data) {
     return (DATA_CHUNK_HEADER_SIZE + data.user_data.size() + 3) & ~size_t{3};
 }

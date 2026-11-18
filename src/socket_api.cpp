@@ -34,6 +34,14 @@ SCTP_Socket::SCTP_Socket() : udp_socket(INVALID_SOCKET) {
         platform_started = false;
         return;
     }
+    if (!sctp_set_dont_fragment(udp_socket, true)) {
+        std::cerr << "Error setting DF: " << sctp_error_string() << std::endl;
+    }
+#ifdef __linux__
+    if (!sctp_enable_icmp_errors(udp_socket)) {
+        std::cerr << "Error enabling ICMP errors: " << sctp_error_string() << std::endl;
+    }
+#endif
 }
 
 bool SCTP_Socket::sctp_bind(std::string_view ip_address, int port) {
@@ -184,8 +192,7 @@ Sctp_Status SCTP_Socket::sctp_associate(std::string_view ip_address, int port, A
 Association SCTP_Socket::init_new_association(const sockaddr_in& destination) {
     Association result{};
 
-    result.pmdcs = DEFAULT_PMDCS;
-    result.peer_address_list = {make_path(destination, true, result.pmdcs)};
+    result.peer_address_list = {make_path(destination, true)};
     result.primary_path = destination;
     result.state = COOKIE_WAIT;
 
@@ -207,8 +214,7 @@ Association SCTP_Socket::init_new_association(const sockaddr_in& destination) {
 Association SCTP_Socket::init_new_association(const State_Cookie& cookie) {
     Association result{};
 
-    result.pmdcs = DEFAULT_PMDCS;
-    result.peer_address_list = {make_path(cookie_source(cookie), true, result.pmdcs)};
+    result.peer_address_list = {make_path(cookie_source(cookie), true)};
     result.primary_path = cookie_source(cookie);
     result.state = ESTABLISHED;
 
@@ -242,7 +248,7 @@ Association_Key SCTP_Socket::association_key_for(const Association_Key& peer) {
 void SCTP_Socket::add_peer_addresses(const Association_Key& key, Association& assoc, const std::vector<sockaddr_in>& addresses) {
     for (const sockaddr_in& address : addresses) {
         if (find_path(assoc, address) == nullptr) {
-            assoc.peer_address_list.push_back(make_path(address, false, assoc.pmdcs));
+            assoc.peer_address_list.push_back(make_path(address, false));
         }
         if (!same_destination(address, key.address)) {
             peer_addresses.emplace(peer_key(address, ntohs(key.address.sin_port)), key);
@@ -469,7 +475,7 @@ Sctp_Status SCTP_Socket::sctp_abort(const Association_Key& association_id, const
             return Sctp_Status::NO_ASSOCIATION;
         }
         peer_tag = it->second.peer_ver_tag;
-        budget = it->second.pmdcs;
+        budget = amdcs(it->second);
         destination = data_path(it->second).address;
     }
 

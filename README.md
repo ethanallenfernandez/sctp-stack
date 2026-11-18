@@ -21,6 +21,7 @@ src/              implementation + internal headers (not installed)
   socket_event_loop.cpp poll loop, send path, flow and congestion gating
   socket_handlers.cpp   inbound chunks: handshake, DATA, SACK, shutdown, ...
   socket_timers.cpp     T1/T2/T3/T5, heartbeat, zero window probe, RTO
+  socket_plpmtud.cpp    PMTU discovery (RFC 8899) and ICMP Packet Too Big
   builders.{hpp,cpp}    outbound packet construction
   serialize.{hpp,cpp}   wire codec — byte order lives here
   checksum.{hpp,cpp}    CRC-32C
@@ -76,8 +77,11 @@ Implemented:
 - Fragmentation and reassembly (§6.9): messages larger than the PMDCS are split
   on send and reassembled on receive, with partial delivery when a message
   outgrows the receive buffer. Receive calls report a partial flag (§11.1.7).
+- PMTU discovery (§7.3) by DPLPMTUD (RFC 8899), per destination. Probes are a
+  HEARTBEAT with a PAD chunk. DATA is fragmented to the AMDCS. Black holes
+  are detected, and ICMP Packet Too Big is used on Linux.
 - Streams (§6.5, §6.6): ordered delivery per stream, with a gap blocking only
   its own stream, and unordered delivery. Messages are chunked at send time and
   bundled (§6.10), with sender SWS avoidance (§6.1).
 
-Not yet implemented: multiple local addresses, PMTU discovery (§7.3), and IPv6.
+Not yet implemented: multiple local addresses and IPv6.

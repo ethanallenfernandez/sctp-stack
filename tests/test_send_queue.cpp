@@ -36,7 +36,6 @@ struct SCTP_Socket_Test_Access {
         association.peer_ver_tag = 0x10203040;
         association.next_tsn = initial_tsn;
         association.peer_address_list = {Peer_Path{peer, true}};
-        association.pmdcs = 1200;
         primary(association).cwnd = 4380;
         association.peer_rwnd = 65535;
         association.out_streams = 1;
