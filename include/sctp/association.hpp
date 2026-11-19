@@ -112,6 +112,9 @@ struct Plpmtud {
 struct Peer_Path {
     sockaddr_in address;
     bool confirmed;
+    // Our address its packets last arrived at, and so the one we send to it
+    // from. INADDR_ANY until then: the first address bound.
+    in_addr source{};
     bool active{true};
     uint16_t error_count{0};
     bool hb_enabled{true};

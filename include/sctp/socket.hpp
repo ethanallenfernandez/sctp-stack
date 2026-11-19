@@ -50,6 +50,10 @@ public:
 
 public:
     bool sctp_bind(std::string_view ip_address, int port);
+    // Every address at the one port, each on its own UDP socket. When there is
+    // more than one, all are listed in INIT and INIT ACK. A wildcard address
+    // must be bound alone. Port 0 takes an ephemeral port for all of them.
+    bool sctp_bindx(const std::vector<std::string>& ip_addresses, int port);
     bool sctp_run();
     // linger_ms defaults to the socket's own, as sctp_set_linger left it.
     void sctp_close(int linger_ms = USE_SOCKET_LINGER);
@@ -95,8 +99,14 @@ private:
     std::atomic<int> linger_ms{DEFAULT_CLOSE_LINGER_MS};
     bool platform_started{false};
     int receive_buffer_size;
+    struct Local_Address {
+        sockaddr_in address;
+        sctp_socket_t socket;
+    };
     sockaddr_in local_address;
     sctp_socket_t udp_socket;
+    // Bound beside local_address, at its port.
+    std::vector<Local_Address> other_local_addresses;
     Wakeup_Pair wakeup;
     std::unordered_map<Association_Key, Association, Association_Hash> associations;
     // A peer's transport addresses other than the one its association is keyed
@@ -117,8 +127,12 @@ private:
     Association init_new_association(const sockaddr_in& destination);
     Association init_new_association(const State_Cookie& cookie);
     void remove_association(const Association_Key& key);
-    // src is where a packet that passed the tag check came from.
-    void record_encapsulation_port(const Association_Key& key, const sockaddr_in& src);
+    // src is where a packet that passed the tag check came from, local the
+    // address of ours it arrived at.
+    void record_arrival(const Association_Key& key, const sockaddr_in& src, in_addr local);
+    // Empty when only one address is bound.
+    std::vector<in_addr> advertised_addresses() const;
+    sctp_socket_t sending_socket(const Deliverable& deliverable);
     // These take associations_mutex as held.
     Association_Key association_key_for(const Association_Key& peer);
     // Appends the addresses the association lacks, as UNCONFIRMED, and maps each to key.
@@ -140,7 +154,7 @@ private:
     void refill_retransmissions(const Send_Allowances& allowances);
     void refill_new_data(Send_Allowances& allowances);
     void prepare_data_packet(Deliverable& deliverable, bool new_data);
-    void run_receiving();
+    void run_receiving(sctp_socket_t socket, in_addr local);
     void enqueue_packet(Deliverable deliverable, Send_Priority priority = Send_Priority::CONTROL);
     void wake_event_loop();
     int next_poll_timeout();
@@ -156,7 +170,7 @@ private:
     void handle_zero_window_probe_expiration(const Association_Key& location);
     void handle_plpmtu_probe_expiration(const Association_Key& location, const sockaddr_in& destination);
     void handle_pmtu_raise_expiration(const Association_Key& location, const sockaddr_in& destination);
-    void run_icmp_errors();
+    void run_icmp_errors(sctp_socket_t socket);
     // ptb_size is the next-hop MTU the PTB reports, an IP packet size.
     void handle_icmp_ptb(const sockaddr_in& destination, const uint8_t* quoted, size_t length, uint32_t ptb_size);
     // These take associations_mutex as held.
@@ -184,7 +198,7 @@ private:
     // Gated, it waits for the destination's cwnd; T3-rtx and Fast Retransmit send their first packet regardless.
     void schedule_pending_retransmission(const Association_Key& key, bool gated = false);
     void update_rto(Peer_Path& path, std::chrono::microseconds measurement);
-    void handle_recv_packet(const uint8_t* data, size_t n, const sockaddr_in& src);
+    void handle_recv_packet(const uint8_t* data, size_t n, const sockaddr_in& src, in_addr local = {});
     Packet_Validation validate_verification_tag(const SCTP_Packet& pkt, const Association_Key& key);
     Packet_Validation ootb_response(const SCTP_Packet& pkt);
     bool read_ooo_buffer(Association& assoc, std::vector<Delivery>& delivered);

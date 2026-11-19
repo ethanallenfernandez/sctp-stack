@@ -15,6 +15,9 @@ struct Deliverable {
     // Sent without DF: it holds a chunk cut before its path's PMTU fell, and
     // a DATA chunk is never re-fragmented (RFC 9260 6.9).
     bool ip_fragment{false};
+    // Our address to send from. INADDR_ANY: wherever the destination's
+    // packets last arrived.
+    in_addr source{};
 };
 
 #endif

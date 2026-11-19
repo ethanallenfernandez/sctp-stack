@@ -4,13 +4,15 @@
 #include <stdint.h>
 #include <vector>
 #include <sctp/sctp.hpp>
+#include <sctp/platform.hpp>
 
 SCTP_Packet build_init(
     uint16_t src_port,
     uint16_t des_port,
     uint32_t initiate_tag,
     uint32_t initial_tsn,
-    uint32_t cookie_preservative_ms = 0);
+    uint32_t cookie_preservative_ms = 0,
+    const std::vector<in_addr>& addresses = {});
 
 SCTP_Packet build_init_ack(
     uint16_t src_port,
@@ -19,7 +21,8 @@ SCTP_Packet build_init_ack(
     uint32_t initiate_tag,
     uint32_t initial_tsn,
     const std::vector<uint8_t>& cookie,
-    const std::vector<std::vector<uint8_t>>& unrecognized = {});
+    const std::vector<std::vector<uint8_t>>& unrecognized = {},
+    const std::vector<in_addr>& addresses = {});
 
 SCTP_Packet build_cookie_echo(
     uint16_t src_port,

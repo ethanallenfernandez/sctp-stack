@@ -19,6 +19,30 @@
 #include <thread>
 #include <vector>
 
+namespace {
+    sctp_socket_t open_udp_socket() {
+        sctp_socket_t udp = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (udp == INVALID_SOCKET) {
+            std::cerr << "Error creating socket: " << sctp_error_string() << std::endl;
+            return udp;
+        }
+        if (!sctp_set_nonblocking(udp)) {
+            std::cerr << "Error setting non-blocking mode: " << sctp_error_string() << std::endl;
+            sctp_close_socket(udp);
+            return INVALID_SOCKET;
+        }
+        if (!sctp_set_dont_fragment(udp, true)) {
+            std::cerr << "Error setting DF: " << sctp_error_string() << std::endl;
+        }
+#ifdef __linux__
+        if (!sctp_enable_icmp_errors(udp)) {
+            std::cerr << "Error enabling ICMP errors: " << sctp_error_string() << std::endl;
+        }
+#endif
+        return udp;
+    }
+}
+
 SCTP_Socket::SCTP_Socket() : udp_socket(INVALID_SOCKET) {
     if (!sctp_platform_startup()) {
         std::cerr << "Socket subsystem initialization failed" << std::endl;
@@ -26,42 +50,78 @@ SCTP_Socket::SCTP_Socket() : udp_socket(INVALID_SOCKET) {
     }
     platform_started = true;
 
-    udp_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-
+    udp_socket = open_udp_socket();
     if (udp_socket == INVALID_SOCKET) {
-        std::cerr << "Error creating socket: " << sctp_error_string() << std::endl;
         sctp_platform_cleanup();
         platform_started = false;
-        return;
     }
-    if (!sctp_set_dont_fragment(udp_socket, true)) {
-        std::cerr << "Error setting DF: " << sctp_error_string() << std::endl;
-    }
-#ifdef __linux__
-    if (!sctp_enable_icmp_errors(udp_socket)) {
-        std::cerr << "Error enabling ICMP errors: " << sctp_error_string() << std::endl;
-    }
-#endif
 }
 
 bool SCTP_Socket::sctp_bind(std::string_view ip_address, int port) {
-    sockaddr_in service{};
-    service.sin_family = AF_INET;
-    if (!sctp_parse_ipv4(ip_address, service.sin_addr)) {
+    return sctp_bindx({std::string(ip_address)}, port);
+}
+
+bool SCTP_Socket::sctp_bindx(const std::vector<std::string>& ip_addresses, int port) {
+    if (udp_socket == INVALID_SOCKET || ip_addresses.empty() || running.load()) {
         return false;
     }
-    service.sin_port = htons(port);
+    std::vector<sockaddr_in> addresses;
+    for (const std::string& ip_address : ip_addresses) {
+        sockaddr_in service{};
+        service.sin_family = AF_INET;
+        service.sin_port = htons(port);
+        if (!sctp_parse_ipv4(ip_address, service.sin_addr)) {
+            return false;
+        }
+        if (service.sin_addr.s_addr == INADDR_ANY && ip_addresses.size() > 1) {
+            return false;
+        }
+        addresses.push_back(service);
+    }
 
-    if (bind(udp_socket, (const sockaddr *)&service, sizeof(service)) == SOCKET_ERROR) {
-        std::cerr << "Error binding socket: " << sctp_error_string() << std::endl;
+    auto fail = [&](const char* what) {
+        std::cerr << what << sctp_error_string() << std::endl;
+        for (const Local_Address& other : other_local_addresses) {
+            sctp_close_socket(other.socket);
+        }
+        other_local_addresses.clear();
         sctp_close_socket(udp_socket);
         udp_socket = INVALID_SOCKET;
         sctp_platform_cleanup();
         platform_started = false;
         return false;
+    };
+
+    if (bind(udp_socket, reinterpret_cast<const sockaddr*>(&addresses[0]), sizeof(addresses[0])) == SOCKET_ERROR) {
+        return fail("Error binding socket: ");
     }
-    local_address = service;
+    socklen_t length = sizeof(local_address);
+    if (getsockname(udp_socket, reinterpret_cast<sockaddr*>(&local_address), &length) == SOCKET_ERROR) {
+        return fail("Error reading bound address: ");
+    }
+    for (auto address = addresses.begin() + 1; address != addresses.end(); ++address) {
+        address->sin_port = local_address.sin_port;
+        sctp_socket_t other = open_udp_socket();
+        if (other == INVALID_SOCKET) {
+            return fail("Error creating socket: ");
+        }
+        other_local_addresses.push_back(Local_Address{*address, other});
+        if (bind(other, reinterpret_cast<const sockaddr*>(&*address), sizeof(*address)) == SOCKET_ERROR) {
+            return fail("Error binding socket: ");
+        }
+    }
     return true;
+}
+
+std::vector<in_addr> SCTP_Socket::advertised_addresses() const {
+    if (other_local_addresses.empty()) {
+        return {};
+    }
+    std::vector<in_addr> addresses{local_address.sin_addr};
+    for (const Local_Address& other : other_local_addresses) {
+        addresses.push_back(other.address.sin_addr);
+    }
+    return addresses;
 }
 
 SCTP_Socket::~SCTP_Socket() {
@@ -70,11 +130,6 @@ SCTP_Socket::~SCTP_Socket() {
 
 bool SCTP_Socket::sctp_run() {
     if (running.load() || udp_socket == INVALID_SOCKET) {
-        return false;
-    }
-
-    if (!sctp_set_nonblocking(udp_socket)) {
-        std::cerr << "Error setting non-blocking mode: " << sctp_error_string() << std::endl;
         return false;
     }
 
@@ -117,6 +172,10 @@ void SCTP_Socket::sctp_close(int linger) {
         sctp_close_socket(udp_socket);
         udp_socket = INVALID_SOCKET;
     }
+    for (const Local_Address& other : other_local_addresses) {
+        sctp_close_socket(other.socket);
+    }
+    other_local_addresses.clear();
     if (platform_started) {
         sctp_platform_cleanup();
         platform_started = false;
@@ -183,7 +242,9 @@ Sctp_Status SCTP_Socket::sctp_associate(std::string_view ip_address, int port, A
         ntohs(local_address.sin_port),
         ntohs(key.address.sin_port),
         assoc.this_ver_tag,
-        assoc.next_tsn
+        assoc.next_tsn,
+        0,
+        advertised_addresses()
     )});
     out_association_id = key;
     return Sctp_Status::OK;
@@ -256,7 +317,7 @@ void SCTP_Socket::add_peer_addresses(const Association_Key& key, Association& as
     }
 }
 
-void SCTP_Socket::record_encapsulation_port(const Association_Key& key, const sockaddr_in& src) {
+void SCTP_Socket::record_arrival(const Association_Key& key, const sockaddr_in& src, in_addr local) {
     std::lock_guard<std::mutex> assoc_lock(associations_mutex);
     auto it = associations.find(key);
     Peer_Path* path = it == associations.end() ? nullptr : find_path(it->second, src);
@@ -264,6 +325,7 @@ void SCTP_Socket::record_encapsulation_port(const Association_Key& key, const so
         return;
     }
     path->address.sin_port = src.sin_port;
+    path->source = local;
 }
 
 void SCTP_Socket::forget_peer_addresses(const Association_Key& key) {

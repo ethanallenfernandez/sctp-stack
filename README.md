@@ -72,6 +72,9 @@ Implemented:
   over to an alternate when the primary is inactive, and timed-out DATA is
   retransmitted to a different destination. Heartbeats can be disabled,
   re-timed or requested per destination, and the primary can be changed.
+- Multiple local addresses (§3.3.2.1): `sctp_bindx` binds several IPv4
+  addresses at one port, all listed in INIT and INIT ACK. Replies leave from
+  the address the packet arrived at.
 - Path heartbeats and failure detection (§8.1, §8.3), ABORT and ERROR handling,
   graceful shutdown (§9), verification tag rules (§8.5), CRC-32C.
 - Fragmentation and reassembly (§6.9): messages larger than the PMDCS are split
@@ -84,4 +87,4 @@ Implemented:
   its own stream, and unordered delivery. Messages are chunked at send time and
   bundled (§6.10), with sender SWS avoidance (§6.1).
 
-Not yet implemented: multiple local addresses and IPv6.
+Not yet implemented: IPv6.

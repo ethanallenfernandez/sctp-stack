@@ -249,7 +249,7 @@ void SCTP_Socket::handle_icmp_ptb(const sockaddr_in& destination, const uint8_t*
     schedule_plpmtu_probe(key, *path);
 }
 
-void SCTP_Socket::run_icmp_errors() {
+void SCTP_Socket::run_icmp_errors(sctp_socket_t socket) {
 #ifdef __linux__
     for (size_t received = 0; received < MAX_RECEIVE_BATCH; ++received) {
         uint8_t quoted[64];
@@ -263,7 +263,7 @@ void SCTP_Socket::run_icmp_errors() {
         message.msg_iovlen = 1;
         message.msg_control = control;
         message.msg_controllen = sizeof(control);
-        ssize_t length = recvmsg(udp_socket, &message, MSG_ERRQUEUE | MSG_DONTWAIT);
+        ssize_t length = recvmsg(socket, &message, MSG_ERRQUEUE | MSG_DONTWAIT);
         if (length < 0) {
             return;
         }

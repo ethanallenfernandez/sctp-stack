@@ -16,6 +16,12 @@ SCTP_Packet packet_with_header(uint16_t src_port, uint16_t des_port, uint32_t ta
     return packet;
 }
 
+void append_addresses(std::vector<uint8_t>& parameters, const std::vector<in_addr>& addresses) {
+    for (const in_addr& address : addresses) {
+        append_parameter(parameters, PARAM_IPV4_ADDRESS, reinterpret_cast<const uint8_t*>(&address.s_addr), 4);
+    }
+}
+
 void append_chunk(SCTP_Packet& packet, Chunk_Type type, Chunk_Value_Type value, uint8_t flag = 0) {
     packet.chunks.push_back(SCTP_Chunk{
         .chunk_header = {.type = type, .flag = flag, .length = 0},
@@ -30,12 +36,14 @@ SCTP_Packet build_init(
     uint16_t des_port,
     uint32_t initiate_tag,
     uint32_t initial_tsn,
-    uint32_t cookie_preservative_ms
+    uint32_t cookie_preservative_ms,
+    const std::vector<in_addr>& addresses
 ) {
     // RFC 9260 8.5: a packet carrying INIT has a zero verification tag.
     SCTP_Packet packet = packet_with_header(src_port, des_port, 0);
 
     std::vector<uint8_t> parameters;
+    append_addresses(parameters, addresses);
     if (cookie_preservative_ms != 0) {
         std::vector<uint8_t> increment = be32_bytes(cookie_preservative_ms);
         append_parameter(parameters, PARAM_COOKIE_PRESERVATIVE, increment.data(), increment.size());
@@ -59,12 +67,14 @@ SCTP_Packet build_init_ack(
     uint32_t initiate_tag,
     uint32_t initial_tsn,
     const std::vector<uint8_t>& cookie,
-    const std::vector<std::vector<uint8_t>>& unrecognized
+    const std::vector<std::vector<uint8_t>>& unrecognized,
+    const std::vector<in_addr>& addresses
 ) {
     SCTP_Packet packet = packet_with_header(src_port, des_port, peer_tag);
 
     std::vector<uint8_t> parameters;
     append_parameter(parameters, PARAM_STATE_COOKIE, cookie.data(), cookie.size());
+    append_addresses(parameters, addresses);
     for (const auto& parameter : unrecognized) {
         append_parameter(parameters, PARAM_UNRECOGNIZED, parameter.data(), parameter.size());
     }

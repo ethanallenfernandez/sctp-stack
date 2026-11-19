@@ -389,10 +389,15 @@ namespace {
     }
 }
 
-void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockaddr_in& src) {
+void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockaddr_in& src, in_addr local) {
     if (n < SCTP_COMMON_HEADER_SIZE) {
         return;
     }
+    Inbound_Datagram datagram{src, local};
+    struct Handling {
+        explicit Handling(const Inbound_Datagram* datagram) { inbound_datagram = datagram; }
+        ~Handling() { inbound_datagram = nullptr; }
+    } handling{&datagram};
 
     uint32_t received_checksum = sctp_read_wire_checksum(data);
 
@@ -469,7 +474,7 @@ void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockad
 
     // An INIT carries no proof that it came from the peer.
     if (in_pkt.chunks.empty() || in_pkt.chunks[0].chunk_header.type != INIT) {
-        record_encapsulation_port(key, src);
+        record_arrival(key, src, local);
     }
 
     // 9.2: any packet from the peer in SHUTDOWN-SENT gives it more time.
@@ -736,7 +741,9 @@ void SCTP_Socket::handle_init(const SCTP_Common_Header& header, const SCTP_Chunk
         other_addresses
     );
 
-    size_t init_ack_size = SCTP_CHUNK_HEADER_SIZE + 16 + SCTP_CHUNK_HEADER_SIZE + ((cookie.size() + 3) & ~size_t{3});
+    std::vector<in_addr> advertised = advertised_addresses();
+    size_t init_ack_size = SCTP_CHUNK_HEADER_SIZE + 16 + SCTP_CHUNK_HEADER_SIZE + ((cookie.size() + 3) & ~size_t{3})
+        + advertised.size() * (SCTP_CHUNK_HEADER_SIZE + 4);
     trim_reports(params.reported, BASE_PMDCS - std::min<size_t>(BASE_PMDCS, init_ack_size), SCTP_CHUNK_HEADER_SIZE);
 
     enqueue_packet(Deliverable{key, destination, build_init_ack(
@@ -746,7 +753,8 @@ void SCTP_Socket::handle_init(const SCTP_Common_Header& header, const SCTP_Chunk
         local_tag,
         local_tsn,
         cookie,
-        params.reported
+        params.reported,
+        advertised
     )});
 }
 
@@ -1014,7 +1022,8 @@ void SCTP_Socket::handle_error(const SCTP_Common_Header&, const SCTP_Chunk& chun
                         ntohs(key.address.sin_port),
                         assoc.this_ver_tag,
                         assoc.next_tsn,
-                        staleness_ms + std::min(staleness_ms, 1000U));
+                        staleness_ms + std::min(staleness_ms, 1000U),
+                        advertised_addresses());
                     break;
                 }
                 case CAUSE_COOKIE_WHILE_SHUTTING_DOWN: // TODO

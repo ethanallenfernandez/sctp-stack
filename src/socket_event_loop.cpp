@@ -1,4 +1,4 @@
-// The event loop thread: poll() over the UDP socket and the wakeup pair, drain
+// The event loop thread: poll() over the UDP sockets and the wakeup pair, drain
 // expired timers, send one queued packet per pass, receive in batches. Also the
 // wrappers that wake the loop after touching the send or expiration queues.
 
@@ -16,14 +16,20 @@
 #include <vector>
 
 void SCTP_Socket::event_loop() {
+    std::vector<Local_Address> locals{Local_Address{local_address, udp_socket}};
+    locals.insert(locals.end(), other_local_addresses.begin(), other_local_addresses.end());
+    std::vector<sctp_pollfd> descriptors(1 + locals.size());
     while (running.load()) {
-        sctp_pollfd descriptors[2]{};
-        descriptors[0].fd = udp_socket;
+        descriptors[0] = sctp_pollfd{};
+        descriptors[0].fd = wakeup.poll_handle();
         descriptors[0].events = SCTP_POLL_READ;
-        descriptors[1].fd = wakeup.poll_handle();
-        descriptors[1].events = SCTP_POLL_READ;
+        for (size_t i = 0; i < locals.size(); ++i) {
+            descriptors[i + 1] = sctp_pollfd{};
+            descriptors[i + 1].fd = locals[i].socket;
+            descriptors[i + 1].events = SCTP_POLL_READ;
+        }
 
-        int ready = sctp_poll(descriptors, 2, next_poll_timeout());
+        int ready = sctp_poll(descriptors.data(), descriptors.size(), next_poll_timeout());
         if (ready == SOCKET_ERROR) {
             int err = sctp_last_error();
             if (sctp_error_interrupted(err)) {
@@ -34,10 +40,10 @@ void SCTP_Socket::event_loop() {
             break;
         }
 
-        if ((descriptors[1].revents & SCTP_POLL_READ) != 0) {
+        if ((descriptors[0].revents & SCTP_POLL_READ) != 0) {
             wakeup.drain();
         }
-        if ((descriptors[1].revents & (SCTP_POLL_ERROR | SCTP_POLL_FATAL)) != 0) {
+        if ((descriptors[0].revents & (SCTP_POLL_ERROR | SCTP_POLL_FATAL)) != 0) {
             std::cerr << "Event-loop wakeup poll reported an error" << std::endl;
             running.store(false);
             break;
@@ -46,13 +52,18 @@ void SCTP_Socket::event_loop() {
             break;
         }
 
-        if ((descriptors[0].revents & SCTP_POLL_ERROR) != 0) {
-            run_icmp_errors();
+        bool fatal = false;
+        for (size_t i = 0; i < locals.size(); ++i) {
+            short revents = descriptors[i + 1].revents;
+            if ((revents & SCTP_POLL_ERROR) != 0) {
+                run_icmp_errors(locals[i].socket);
+            }
+            if ((revents & (SCTP_POLL_READ | SCTP_POLL_ERROR)) != 0) {
+                run_receiving(locals[i].socket, locals[i].address.sin_addr);
+            }
+            fatal = fatal || (revents & SCTP_POLL_FATAL) != 0;
         }
-        if ((descriptors[0].revents & (SCTP_POLL_READ | SCTP_POLL_ERROR)) != 0) {
-            run_receiving();
-        }
-        if ((descriptors[0].revents & SCTP_POLL_FATAL) != 0) {
+        if (fatal) {
             std::cerr << "Socket poll reported a fatal error" << std::endl;
             running.store(false);
             break;
@@ -365,12 +376,12 @@ void SCTP_Socket::arm_zero_window_probes(const Send_Allowances& allowances) {
     }
 }
 
-void SCTP_Socket::run_receiving() {
+void SCTP_Socket::run_receiving(sctp_socket_t socket, in_addr local) {
     for (size_t received_packets = 0; received_packets < MAX_RECEIVE_BATCH; ++received_packets) {
         uint8_t buffer[MAX_UDP_DATAGRAM];
         sockaddr_in src{};
         socklen_t src_len = sizeof(src);
-        int n = recvfrom(udp_socket, reinterpret_cast<char*>(buffer), sizeof(buffer), 0, reinterpret_cast<sockaddr*>(&src), &src_len);
+        int n = recvfrom(socket, reinterpret_cast<char*>(buffer), sizeof(buffer), 0, reinterpret_cast<sockaddr*>(&src), &src_len);
         if (n == SOCKET_ERROR) {
             int err = sctp_last_error();
             if (!sctp_error_would_block(err)) {
@@ -382,7 +393,7 @@ void SCTP_Socket::run_receiving() {
             return;
         }
         try {
-            handle_recv_packet(buffer, static_cast<size_t>(n), src);
+            handle_recv_packet(buffer, static_cast<size_t>(n), src, local);
         } catch (const std::exception& e) {
             std::cerr << "Error handling packet: " << e.what() << std::endl;
         }
@@ -392,6 +403,10 @@ void SCTP_Socket::run_receiving() {
 // Wraps enqueue only to wake the loop, which may be in poll() with no deadline.
 
 void SCTP_Socket::enqueue_packet(Deliverable deliverable, Send_Priority priority) {
+    if (deliverable.source.s_addr == INADDR_ANY && inbound_datagram != nullptr
+            && same_destination(deliverable.destination, inbound_datagram->src)) {
+        deliverable.source = inbound_datagram->local;
+    }
     sends.enqueue(std::move(deliverable), priority);
     wake_event_loop();
 }
@@ -440,19 +455,41 @@ int SCTP_Socket::next_poll_timeout() {
     return static_cast<int>(milliseconds.count());
 }
 
+sctp_socket_t SCTP_Socket::sending_socket(const Deliverable& deliverable) {
+    if (other_local_addresses.empty()) {
+        return udp_socket;
+    }
+    in_addr source = deliverable.source;
+    if (source.s_addr == INADDR_ANY) {
+        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+        auto association = associations.find(deliverable.location);
+        const Peer_Path* path = association == associations.end() ? nullptr : find_path(association->second, deliverable.destination);
+        if (path != nullptr) {
+            source = path->source;
+        }
+    }
+    for (const Local_Address& other : other_local_addresses) {
+        if (other.address.sin_addr.s_addr == source.s_addr) {
+            return other.socket;
+        }
+    }
+    return udp_socket;
+}
+
 // A packet too big to leave with DF set counts as sent and lost: retrying
 // cannot help, and a probe's loss is what the search learns from.
 bool SCTP_Socket::handle_send_packet(const Deliverable& deliverable) {
     std::vector<uint8_t> serialized_packet = serialize_sctp_packet(deliverable.packet);
     const char* data = reinterpret_cast<const char*>(serialized_packet.data());
     const sockaddr* to = reinterpret_cast<const sockaddr*>(&deliverable.destination);
+    sctp_socket_t socket = sending_socket(deliverable);
     if (deliverable.ip_fragment) {
-        sctp_set_dont_fragment(udp_socket, false);
+        sctp_set_dont_fragment(socket, false);
     }
-    int sent = sendto(udp_socket, data, serialized_packet.size(), 0, to, sizeof(deliverable.destination));
+    int sent = sendto(socket, data, serialized_packet.size(), 0, to, sizeof(deliverable.destination));
     int err = sctp_last_error();
     if (deliverable.ip_fragment) {
-        sctp_set_dont_fragment(udp_socket, true);
+        sctp_set_dont_fragment(socket, true);
     }
 
     if (sent == SOCKET_ERROR && sctp_error_too_big(err)) {

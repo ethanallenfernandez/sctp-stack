@@ -89,6 +89,14 @@ inline Association_Key peer_key(const sockaddr_in& address, uint16_t sctp_port) 
     return key;
 }
 
+// The datagram this thread is handling. A reply to it leaves from the address
+// it arrived at, which is the one its sender knows, TCB or not.
+struct Inbound_Datagram {
+    sockaddr_in src;
+    in_addr local;
+};
+inline thread_local const Inbound_Datagram* inbound_datagram = nullptr;
+
 inline Peer_Path* find_path(Association& assoc, const sockaddr_in& address) {
     auto path = std::find_if(assoc.peer_address_list.begin(), assoc.peer_address_list.end(), [&](const Peer_Path& candidate) {
         return same_destination(candidate.address, address);
