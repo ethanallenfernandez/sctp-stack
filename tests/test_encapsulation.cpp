@@ -13,6 +13,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "test_support.hpp"
 
 namespace {
 
@@ -310,7 +311,6 @@ void test_associate_with_udp_port() {
     Raw_Peer first, second;
     if (!first.open(FIRST_UDP) || !second.open(SECOND_UDP)) { check(false, "peer sockets"); return; }
     SCTP_Socket stack;
-    stack.sctp_set_linger(0);
     if (!stack.sctp_bind("127.0.0.1", STACK_PORT) || !stack.sctp_run()) { check(false, "stack started"); return; }
 
     Association_Key key;
@@ -336,8 +336,8 @@ void test_associate_with_udp_port() {
           "under the SCTP port and the peer's tag");
 
     second.send(build_cookie_ack(PEER_SCTP_PORT, STACK_PORT, our_tag), STACK_PORT);
-    check(stack.await_established_association(key, 2000) == Sctp_Status::OK, "established");
-    stack.sctp_close(0);
+    check(await_established(stack, key, 2000) == Sctp_Status::OK, "established");
+    stack.sctp_close();
 }
 
 } // namespace

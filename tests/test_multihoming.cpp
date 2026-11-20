@@ -197,9 +197,9 @@ void test_cookie_codec() {
     uint32_t staleness = 0;
     check(auth.verify(signed_cookie, echo, A, decoded, staleness) == Cookie_Result::VALID, "a signed cookie with addresses verifies");
     check(auth.verify(signed_cookie, echo, B, decoded, staleness) == Cookie_Result::VALID, "and is accepted from an address it lists");
-    check(auth.verify(signed_cookie, echo, C, decoded, staleness) == Cookie_Result::WRONG_ENDPOINT, "but not from one it does not");
+    check(auth.verify(signed_cookie, echo, C, decoded, staleness) == Cookie_Result::INVALID, "but not from one it does not");
     signed_cookie[STATE_COOKIE_BODY_SIZE + 3] ^= 0x01;
-    check(auth.verify(signed_cookie, echo, A, decoded, staleness) == Cookie_Result::BAD_MAC, "the MAC covers the addresses");
+    check(auth.verify(signed_cookie, echo, A, decoded, staleness) == Cookie_Result::INVALID, "the MAC covers the addresses");
 }
 
 /*-------------------------------- Responder ---------------------------------*/

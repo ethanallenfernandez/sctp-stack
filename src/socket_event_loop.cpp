@@ -347,7 +347,6 @@ void SCTP_Socket::refill_new_data(Send_Allowances& allowances) {
                 std::move(chunks)
             )};
         }
-        association_changed.notify_all();
         sends.enqueue(std::move(deliverable), Send_Priority::NEW_DATA);
     }
 }
@@ -503,46 +502,43 @@ bool SCTP_Socket::handle_send_packet(const Deliverable& deliverable) {
     return true;
 }
 
-void SCTP_Socket::schedule_expirations_after_send( const Deliverable& deliverable, std::chrono::steady_clock::time_point sent_at) {
+void SCTP_Socket::schedule_expirations_after_send(const Deliverable& deliverable, std::chrono::steady_clock::time_point sent_at) {
     bool sent_data = false;
     for (const auto& chunk : deliverable.packet.chunks) {
-        // A heartbeat arms no timer of its own: its path's is already
-        // running. It is timestamped here rather than at build time so the RTT
-        // it measures excludes however long the packet sat in the send queue.
-        if (chunk.chunk_header.type == HEARTBEAT) {
-            record_heartbeat_sent(deliverable.location, deliverable.destination,
-                std::get<heartbeat_chunk_value>(chunk.chunk_value).info, sent_at);
-            continue;
-        }
-
-        auto handlers = EXPIRE_HANDLERS.find(chunk.chunk_header.type);
-        if (handlers == EXPIRE_HANDLERS.end()) {
-            continue;
-        }
-
-        for (const auto& policy : handlers->second) {
-            if (policy.timer_type == Expiration_Timer_Type::T3_RTX) {
+        Chunk_Type type = chunk.chunk_header.type;
+        switch (type) {
+            // A heartbeat arms no timer of its own: its path's is already
+            // running. It is timestamped here rather than at build time so the RTT
+            // it measures excludes however long the packet sat in the send queue.
+            case HEARTBEAT:
+                record_heartbeat_sent(deliverable.location, deliverable.destination,
+                    std::get<heartbeat_chunk_value>(chunk.chunk_value).info, sent_at);
+                break;
+            case DATA:
                 record_data_sent(deliverable.location, deliverable.destination, std::get<data_chunk_value>(chunk.chunk_value), sent_at);
                 sent_data = true;
-                continue;
-            }
-
-            auto delay = policy.initial_timeout;
-            if (policy.timer_type == Expiration_Timer_Type::T1_INIT || policy.timer_type == Expiration_Timer_Type::T1_COOKIE) {
-                std::lock_guard<std::mutex> assoc_lock(associations_mutex);
-                auto association = associations.find(deliverable.location);
-                Association_State expected_state = policy.timer_type == Expiration_Timer_Type::T1_INIT ? COOKIE_WAIT : COOKIE_ECHOED;
-                if (association == associations.end() || association->second.state != expected_state) {
-                    continue;
+                break;
+            case INIT:
+            case COOKIE_ECHO: {
+                bool is_init = type == INIT;
+                std::chrono::milliseconds delay = sctp_parameters::RTO_INITIAL;
+                {
+                    std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+                    auto association = associations.find(deliverable.location);
+                    if (association == associations.end() || association->second.state != (is_init ? COOKIE_WAIT : COOKIE_ECHOED)) {
+                        break;
+                    }
+                    uint16_t retransmits = is_init ? association->second.init_retransmits : association->second.cookie_retransmits;
+                    for (uint16_t i = 0; i < retransmits && delay < sctp_parameters::RTO_MAX; ++i) {
+                        delay = std::min(delay * 2, sctp_parameters::RTO_MAX);
+                    }
                 }
-
-                uint16_t retransmits = policy.timer_type == Expiration_Timer_Type::T1_INIT ? association->second.init_retransmits : association->second.cookie_retransmits;
-                for (uint16_t i = 0; i < retransmits && delay < sctp_parameters::RTO_MAX; ++i) {
-                    delay = std::min(delay * 2, sctp_parameters::RTO_MAX);
-                }
+                schedule_expiration(Expiration_Key{deliverable.location, is_init ? Expiration_Timer_Type::T1_INIT : Expiration_Timer_Type::T1_COOKIE},
+                    sent_at + delay, deliverable);
+                break;
             }
-
-            schedule_expiration(Expiration_Key{deliverable.location, policy.timer_type}, sent_at + delay, deliverable);
+            default:
+                break;
         }
     }
 

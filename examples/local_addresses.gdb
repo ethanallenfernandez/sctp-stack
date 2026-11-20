@@ -196,7 +196,7 @@ end
 
 # ---- steps 3/4: traffic reaches 127.0.0.2 ----------------------------------
 
-tbreak socket_api.cpp:328 if this == demo_multihomed && local.s_addr == 0x0200007f
+tbreak socket_api.cpp:308 if this == demo_multihomed && local.s_addr == 0x0200007f
 commands
 echo \n[CHANGED] SCTP_Socket::record_arrival   (src/socket_api.cpp) - was record_encapsulation_port\n
 echo | Called once a packet has passed the tag check. It already moved the path's UDP port\n

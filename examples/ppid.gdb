@@ -21,10 +21,10 @@ set confirm off
 
 # ---- sending -----------------------------------------------------------------
 
-tbreak socket_api.cpp:517
+tbreak socket_api.cpp:458
 commands
 echo \n[CHANGED] SCTP_Socket::sctp_send_data   (src/socket_api.cpp) - step 2, "hello" with PPID 51\n
-echo | The ULP's SEND. New trailing parameter `ppid` (default 0), after timeout_ms so no\n
+echo | The ULP's SEND. New trailing parameter `ppid` (default 0), after `unordered` so no\n
 echo | existing call changes meaning. It is stored on the queued Outbound_Message beside\n
 echo | the stream, SSN and bytes (Outbound_Message gained `ppid`). Nothing is cut yet:\n
 echo | the event loop turns queued messages into DATA chunks when a packet can carry them.\n
@@ -98,7 +98,7 @@ echo | stored on the queued Message; handle_data_packet passes delivery.ppid.\n
 echo | Watch: p ppid   p stream\n
 end
 
-tbreak receive_queue.cpp:63
+tbreak receive_queue.cpp:42
 commands
 echo \n[CHANGED] Receive_Queue::read_locked   (src/receive_queue.cpp) - the application reads\n
 echo | Copies as much of the front message as fits; the Read it returns now includes the\n
@@ -106,10 +106,10 @@ echo | message's ppid alongside key, byte count, partial flag and stream.\n
 echo | Watch: next, then p read\n
 end
 
-tbreak socket_api.cpp:609 if this == demo_receiver
+tbreak socket_api.cpp:550 if this == demo_receiver
 commands
 echo \n[CHANGED] SCTP_Socket::sctp_recv_data_from   (src/socket_api.cpp) - back to the application\n
-echo | New trailing out-parameter `out_ppid` (default nullptr), after timeout_ms like\n
+echo | New trailing out-parameter `out_ppid` (default nullptr), last, like\n
 echo | the send side. sctp_recv_data has the same. Each read of a message part way\n
 echo | through returns the same PPID.\n
 echo | Watch: p read._M_payload._M_payload._M_value   then continue: the demo prints "ppid 51"\n
@@ -141,7 +141,7 @@ end
 #   - assemble_early (socket_handlers.cpp:217) takes the PPID from the B fragment of
 #     a message completed above the Cumulative TSN Ack;
 #   - advance_stream (socket_handlers.cpp:117) releases a held Delivery, PPID and all;
-#   - partial delivery (socket_handlers.cpp:163, :1807) hands up pieces of a message
+#   - partial delivery (socket_handlers.cpp:163, :1784) hands up pieces of a message
 #     before its end, each with the PPID of its B fragment.
 
 run

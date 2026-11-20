@@ -10,6 +10,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "test_support.hpp"
 
 using Clock = std::chrono::steady_clock;
 
@@ -42,10 +43,19 @@ struct SCTP_Socket_Test_Access {
                 return false;
             }
         }
-        if (stack.expirations.has_any_for(key)) {
-            return false;
+        for (const auto& entry : stack.expirations.active) {
+            if (entry.first.location == key) {
+                return false;
+            }
         }
-        return !stack.sends.has_packets_for(key);
+        for (auto priority : {Send_Priority::CONTROL, Send_Priority::RETRANSMISSION, Send_Priority::NEW_DATA}) {
+            for (const auto& queued : stack.sends.queue_for(priority)) {
+                if (queued.deliverable.location == key) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     static Association association(
@@ -136,8 +146,8 @@ struct SCTP_Socket_Test_Access {
     }
 
     static size_t queued_fast_chunks(SCTP_Socket& stack) {
-        return stack.sends.front_chunk_count(
-            Send_Priority::RETRANSMISSION);
+        auto& queue = stack.sends.queue_for(Send_Priority::RETRANSMISSION);
+        return queue.empty() ? 0 : queue.front().deliverable.packet.chunks.size();
     }
 
     static size_t pending_fast_chunks(
@@ -152,8 +162,8 @@ struct SCTP_Socket_Test_Access {
 
     static uint64_t t3_generation(
             SCTP_Socket& stack, const Association_Key& key) {
-        return stack.expirations.generation_of(
-            Expiration_Key{key, Expiration_Timer_Type::T3_RTX, path_key(key.address)});
+        auto live = stack.expirations.active.find(Expiration_Key{key, Expiration_Timer_Type::T3_RTX, path_key(key.address)});
+        return live == stack.expirations.active.end() ? 0 : live->second;
     }
 };
 
@@ -300,7 +310,7 @@ struct RawPeer {
             return false;
         }
         send_cookie_ack();
-        return stack.await_established_association(key, 1000) == Sctp_Status::OK;
+        return await_established(stack, key, 1000) == Sctp_Status::OK;
     }
 
     bool establish_responder(SCTP_Socket& stack, Association_Key& key) {
@@ -344,7 +354,7 @@ struct RawPeer {
             return false;
         }
         key = Association_Key{self};
-        return stack.await_established_association(key, 1000) == Sctp_Status::OK;
+        return await_established(stack, key, 1000) == Sctp_Status::OK;
     }
 
     void send_data_packet(
@@ -381,7 +391,6 @@ struct RawPeer {
 };
 
 bool start(SCTP_Socket& stack, RawPeer& peer) {
-    stack.sctp_set_linger(0); // the raw peer never answers a SHUTDOWN
     return peer.open() && stack.sctp_bind("127.0.0.1", STACK_PORT)
         && stack.sctp_run();
 }
@@ -413,7 +422,7 @@ void test_t1_cookie() {
           "COOKIE ECHO retransmission is byte-for-byte unchanged");
 
     peer.send_cookie_ack();
-    check(stack.await_established_association(key, 1000) == Sctp_Status::OK,
+    check(await_established(stack, key, 1000) == Sctp_Status::OK,
           "COOKIE ACK established the association");
     SCTP_Packet unexpected;
     check(!peer.receive_until(COOKIE_ECHO, unexpected,

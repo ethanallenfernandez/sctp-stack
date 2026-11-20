@@ -265,7 +265,6 @@ void test_failover_reaches_the_peer_through_inactive_primary() {
     std::printf("Primary failure end to end (8.2, 6.4.1):\n");
 
     SCTP_Socket stack;
-    stack.sctp_subscribe(Notification_Type::SCTP_PEER_ADDR_CHANGE, true);
     Association_Key key{PRIMARY};
     Access::establish(stack, key);
     stack.sctp_send_data(key, MESSAGE);

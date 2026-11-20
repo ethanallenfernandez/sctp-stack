@@ -1,5 +1,5 @@
 // Receive_Queue: per-association delivery that outlives the TCB, byte
-// accounting per association, and round-robin service across associations.
+// accounting per association.
 
 #include <sctp/receive_queue.hpp>
 #include <sctp/platform.hpp>
@@ -54,13 +54,13 @@ void test_order_and_accounting() {
     Association_Key a = key(1000);
     queue.push(a, message('1', 3));
     queue.push(a, message('2', 5));
-    check(queue.messages(a) == 2 && queue.buffered_bytes(a) == 8, "two messages, eight bytes buffered");
+    check(queue.buffered_bytes(a) == 8, "two messages, eight bytes buffered");
 
     auto first = pop_from(queue, a);
     check(first && *first == message('1', 3), "messages come out in delivery order");
     check(queue.buffered_bytes(a) == 5, "bytes are released as they are read");
     pop_from(queue, a);
-    check(queue.messages(a) == 0 && queue.buffered_bytes(a) == 0 && !pop_from(queue, a), "empty once drained");
+    check(queue.buffered_bytes(a) == 0 && !pop_from(queue, a), "empty once drained");
     check(!pop_any(queue), "and nothing left for read_any");
 }
 
@@ -74,34 +74,7 @@ void test_isolation() {
     check(queue.buffered_bytes(a) == 100 && queue.buffered_bytes(b) == 7, "each association counts only its own bytes");
     check(!pop_from(queue, key(3000)), "an unknown association has nothing");
     auto from_b = pop_from(queue, b);
-    check(from_b && *from_b == message('b', 7) && queue.messages(a) == 1, "reading one leaves the other untouched");
-}
-
-void test_round_robin() {
-    std::printf("read_any is round-robin:\n");
-    Receive_Queue queue;
-    Association_Key a = key(1000);
-    Association_Key b = key(2000);
-    Association_Key c = key(3000);
-    for (int i = 0; i < 3; ++i) queue.push(a, message('a'));
-    queue.push(b, message('b'));
-    queue.push(c, message('c'));
-
-    std::string order;
-    while (auto next = pop_any(queue)) {
-        order += static_cast<char>(next->second[0]);
-    }
-    check(order == "abcaa", "a busy association does not starve the others (" + order + ")");
-
-    queue.push(a, message('a'));
-    queue.push(b, message('b'));
-    pop_from(queue, a);
-    queue.push(a, message('a'));
-    order.clear();
-    while (auto next = pop_any(queue)) {
-        order += static_cast<char>(next->second[0]);
-    }
-    check(order == "ba", "an association drained by read_from rejoins at the back (" + order + ")");
+    check(from_b && *from_b == message('b', 7) && queue.buffered_bytes(a) == 100, "reading one leaves the other untouched");
 }
 
 void test_pop_any_reports_key() {
@@ -119,7 +92,7 @@ void test_clear() {
     queue.push(key(1000), message('a'));
     queue.push(key(2000), message('b'));
     queue.clear();
-    check(!pop_any(queue) && queue.messages(key(1000)) == 0, "everything is gone");
+    check(!pop_any(queue) && queue.buffered_bytes(key(1000)) == 0, "everything is gone");
     queue.push(key(1000), message('a'));
     check(pop_any(queue).has_value(), "and the queue still works afterwards");
 }
@@ -136,7 +109,7 @@ void test_short_buffer() {
     auto first = queue.read_from(a, buffer, sizeof(buffer));
     check(first && first->bytes == 2 && first->partial && buffer[0] == '0' && buffer[1] == '1',
           "the first read fills the buffer and is marked partial");
-    check(queue.buffered_bytes(a) == 4 && queue.messages(a) == 2, "the rest stays queued and counted");
+    check(queue.buffered_bytes(a) == 4, "the rest stays queued and counted");
     auto second = queue.read_from(a, buffer, sizeof(buffer));
     auto third = queue.read_from(a, buffer, sizeof(buffer));
     check(second && second->partial && third && third->bytes == 1 && !third->partial && buffer[0] == '4',
@@ -153,62 +126,27 @@ void test_incomplete_message() {
     uint8_t buffer[16];
     auto read = queue.read_from(a, buffer, sizeof(buffer));
     check(read && read->bytes == 3 && read->partial, "what arrived is readable, marked partial");
-    check(queue.messages(a) == 0 && !queue.read_from(a, buffer, sizeof(buffer)), "nothing more until the rest arrives");
+    check(queue.buffered_bytes(a) == 0 && !queue.read_from(a, buffer, sizeof(buffer)), "nothing more until the rest arrives");
 
     queue.push(a, message('b', 2), false);
     queue.push(a, message('c', 1), true);
     queue.push(a, message('d', 1));
-    check(queue.messages(a) == 2 && queue.buffered_bytes(a) == 4, "later pieces continue the open message");
+    check(queue.buffered_bytes(a) == 4, "later pieces continue the open message");
     read = queue.read_from(a, buffer, sizeof(buffer));
     check(read && read->bytes == 3 && !read->partial && buffer[0] == 'b' && buffer[2] == 'c',
           "and are read as one, ending the message");
     check(pop_from(queue, a) == message('d'), "the message after it is separate");
 }
 
-void test_read_any_finishes_a_message() {
-    std::printf("read_any stays on a part-read message:\n");
-    Receive_Queue queue;
-    Association_Key a = key(1000);
-    Association_Key b = key(2000);
-    queue.push(a, message('a', 4));
-    queue.push(b, message('b', 1));
-    uint8_t buffer[2];
-    std::string order;
-    while (auto read = queue.read_any(buffer, sizeof(buffer))) {
-        order += static_cast<char>(buffer[0]);
-    }
-    check(order == "aab", "the rest of a's message comes before b's (" + order + ")");
-}
-
 } // namespace
-
-void test_detach() {
-    std::printf("An ended association's messages:\n");
-    Receive_Queue queue;
-    Association_Key a = key(1000);
-    queue.push(a, message('1', 3));
-    queue.push(a, message('2', 5));
-    queue.detach(a);
-    check(queue.buffered_bytes(a) == 0, "no longer count against the window");
-    queue.push(a, message('3', 4));
-    check(queue.buffered_bytes(a) == 4, "the next association counts only its own");
-    auto first = pop_from(queue, a);
-    pop_from(queue, a);
-    check(first && *first == message('1', 3) && queue.buffered_bytes(a) == 4, "the old ones are still read first");
-    auto last = pop_from(queue, a);
-    check(last && *last == message('3', 4) && queue.buffered_bytes(a) == 0, "then the new");
-}
 
 int main() {
     test_order_and_accounting();
     test_isolation();
-    test_round_robin();
     test_pop_any_reports_key();
     test_clear();
     test_short_buffer();
     test_incomplete_message();
-    test_read_any_finishes_a_message();
-    test_detach();
 
     if (failures) {
         std::printf("\n%d check(s) FAILED\n", failures);

@@ -15,19 +15,6 @@
 #include <unordered_map>
 #include <vector>
 
-// Which timer to arm after a chunk of a given type reaches the wire, and the
-// un-backed-off timeout to arm it with.
-struct Expiration_Policy {
-    Expiration_Timer_Type timer_type;
-    std::chrono::milliseconds initial_timeout;
-};
-
-inline const std::unordered_map<Chunk_Type, std::vector<Expiration_Policy>> EXPIRE_HANDLERS{
-    {INIT, {{Expiration_Timer_Type::T1_INIT, std::chrono::seconds(1)}}},
-    {COOKIE_ECHO, {{Expiration_Timer_Type::T1_COOKIE, std::chrono::seconds(1)}}},
-    {DATA, {{Expiration_Timer_Type::T3_RTX, std::chrono::milliseconds(0)}}},
-};
-
 constexpr std::chrono::microseconds CLOCK_GRANULARITY{1000};
 constexpr std::chrono::milliseconds T5_SHUTDOWN_GUARD = 5 * sctp_parameters::RTO_MAX;
 constexpr std::chrono::milliseconds SEND_RETRY_DELAY{10};

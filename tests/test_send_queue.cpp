@@ -79,8 +79,21 @@ struct SCTP_Socket_Test_Access {
         return stack.sends.size();
     }
 
+    static std::vector<uint32_t> front_data_tsns(SCTP_Socket& stack, Send_Priority priority) {
+        std::vector<uint32_t> tsns;
+        auto& queue = stack.sends.queue_for(priority);
+        if (!queue.empty()) {
+            for (const auto& chunk : queue.front().deliverable.packet.chunks) {
+                if (chunk.chunk_header.type == DATA) {
+                    tsns.push_back(std::get<data_chunk_value>(chunk.chunk_value).tsn);
+                }
+            }
+        }
+        return tsns;
+    }
+
     static uint32_t pending_data_tsn(SCTP_Socket& stack) {
-        return stack.sends.front_data_tsns(Send_Priority::NEW_DATA).front();
+        return front_data_tsns(stack, Send_Priority::NEW_DATA).front();
     }
 
     static void enqueue(
@@ -91,8 +104,7 @@ struct SCTP_Socket_Test_Access {
 
     static std::vector<uint32_t> retransmission_tsns(
             SCTP_Socket& stack) {
-        return stack.sends.front_data_tsns(
-            Send_Priority::RETRANSMISSION);
+        return front_data_tsns(stack, Send_Priority::RETRANSMISSION);
     }
 
     static std::vector<uint16_t> drain_new_data_ssns(SCTP_Socket& stack) {

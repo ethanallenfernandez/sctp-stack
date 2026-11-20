@@ -209,18 +209,6 @@ size_t Send_Queue::size() {
     return control.size() + retransmission.size() + new_data.size();
 }
 
-bool Send_Queue::has_packets_for(const Association_Key& location) {
-    std::lock_guard<std::mutex> lock(mutex);
-    auto contains = [&](const std::deque<Queued>& queue) {
-        return std::any_of(queue.begin(), queue.end(), [&](const Queued& queued) {
-            return queued.deliverable.location == location;
-        });
-    };
-    return contains(control)
-        || contains(retransmission)
-        || contains(new_data);
-}
-
 bool Send_Queue::has_retransmission_for(const Association_Key& location) {
     std::lock_guard<std::mutex> lock(mutex);
     return std::any_of(retransmission.begin(), retransmission.end(), [&](const Queued& queued) {
@@ -233,26 +221,4 @@ bool Send_Queue::has_new_data_for(const Association_Key& location) {
     return std::any_of(new_data.begin(), new_data.end(), [&](const Queued& queued) {
         return queued.deliverable.location == location;
     });
-}
-
-std::vector<uint32_t> Send_Queue::front_data_tsns(Send_Priority priority) {
-    std::lock_guard<std::mutex> lock(mutex);
-    std::vector<uint32_t> result;
-    std::deque<Queued>& queue = queue_for(priority);
-    if (queue.empty()) {
-        return result;
-    }
-    for (const auto& chunk : queue.front().deliverable.packet.chunks) {
-        if (chunk.chunk_header.type == DATA) {
-            result.push_back(
-                std::get<data_chunk_value>(chunk.chunk_value).tsn);
-        }
-    }
-    return result;
-}
-
-size_t Send_Queue::front_chunk_count(Send_Priority priority) {
-    std::lock_guard<std::mutex> lock(mutex);
-    std::deque<Queued>& queue = queue_for(priority);
-    return queue.empty() ? 0 : queue.front().deliverable.packet.chunks.size();
 }

@@ -17,7 +17,6 @@
 #include <vector>
 #include <thread>
 #include <mutex>
-#include <condition_variable>
 #include <queue>
 #include <atomic>
 #include <unordered_map>
@@ -36,11 +35,6 @@ enum class Packet_Validation {
     SHUTDOWN_COMPLETE_OOTB,
 };
 
-// How long sctp_close waits for associations to shut down gracefully before
-// aborting the rest. 0 aborts everything at once.
-constexpr int DEFAULT_CLOSE_LINGER_MS = 5000;
-constexpr int USE_SOCKET_LINGER = -1;
-
 class SCTP_Socket {
 friend struct SCTP_Socket_Test_Access;
 
@@ -55,42 +49,36 @@ public:
     // must be bound alone. Port 0 takes an ephemeral port for all of them.
     bool sctp_bindx(const std::vector<std::string>& ip_addresses, int port);
     bool sctp_run();
-    // linger_ms defaults to the socket's own, as sctp_set_linger left it.
-    void sctp_close(int linger_ms = USE_SOCKET_LINGER);
-    void sctp_set_linger(int linger_ms);
+    // Aborts every association still open.
+    void sctp_close();
     // port is the peer's SCTP port. udp_port is the UDP encapsulation port to
     // reach it at, by default the same; once the peer answers, each of its
     // addresses is sent to whatever UDP port it last sent from. out_association_id
     // is set only on OK.
     Sctp_Status sctp_associate(std::string_view ip_address, int port, Association_Key& out_association_id, std::optional<int> udp_port = std::nullopt);
-    // NO_ASSOCIATION if the association was there and is gone.
-    Sctp_Status await_established_association(const Association_Key& association_id, int timeout_ms);
     // Refused if the stream is not one the association negotiated. An unordered
     // message takes no SSN and may be delivered ahead of others on its stream.
-    // With a timeout, waits that long for room rather than returning QUEUE_FULL.
     // ppid goes on every DATA chunk of the message, unchanged.
-    Sctp_Status sctp_send_data(const sockaddr_in& association_id, const std::vector<uint8_t>& data, uint16_t stream = 0, bool unordered = false, int timeout_ms = 0, uint32_t ppid = 0);
-    Sctp_Status sctp_send_data(const Association_Key& association_id, const std::vector<uint8_t>& data, uint16_t stream = 0, bool unordered = false, int timeout_ms = 0, uint32_t ppid = 0);
+    Sctp_Status sctp_send_data(const sockaddr_in& association_id, const std::vector<uint8_t>& data, uint16_t stream = 0, bool unordered = false, uint32_t ppid = 0);
+    Sctp_Status sctp_send_data(const Association_Key& association_id, const std::vector<uint8_t>& data, uint16_t stream = 0, bool unordered = false, uint32_t ppid = 0);
     Sctp_Status sctp_abort(const sockaddr_in& association_id, const std::vector<uint8_t>& reason = {});
     Sctp_Status sctp_abort(const Association_Key& association_id, const std::vector<uint8_t>& reason = {});
     // Reads at most one message. *out_partial is set when more of it remains: the
     // buffer was too small, or the message is being handed up before all of it
-    // has arrived. The rest is returned by the following reads. With a timeout,
-    // waits that long for a message. *out_ppid is the message's Payload
-    // Protocol Identifier, as the peer sent it.
-    size_t sctp_recv_data(std::vector<uint8_t>& buffer, Association_Key* out_association_id = nullptr, bool* out_partial = nullptr, uint16_t* out_stream = nullptr, int timeout_ms = 0, uint32_t* out_ppid = nullptr);
-    size_t sctp_recv_data_from(const sockaddr_in& association_id, std::vector<uint8_t>& buffer, bool* out_partial = nullptr, uint16_t* out_stream = nullptr, int timeout_ms = 0, uint32_t* out_ppid = nullptr);
-    size_t sctp_recv_data_from(const Association_Key& association_id, std::vector<uint8_t>& buffer, bool* out_partial = nullptr, uint16_t* out_stream = nullptr, int timeout_ms = 0, uint32_t* out_ppid = nullptr);
+    // has arrived. The rest is returned by the following reads. *out_ppid is
+    // the message's Payload Protocol Identifier, as the peer sent it.
+    size_t sctp_recv_data(std::vector<uint8_t>& buffer, Association_Key* out_association_id = nullptr, bool* out_partial = nullptr, uint16_t* out_stream = nullptr, uint32_t* out_ppid = nullptr);
+    size_t sctp_recv_data_from(const sockaddr_in& association_id, std::vector<uint8_t>& buffer, bool* out_partial = nullptr, uint16_t* out_stream = nullptr, uint32_t* out_ppid = nullptr);
+    size_t sctp_recv_data_from(const Association_Key& association_id, std::vector<uint8_t>& buffer, bool* out_partial = nullptr, uint16_t* out_stream = nullptr, uint32_t* out_ppid = nullptr);
     // SHUTTING_DOWN if a shutdown is already under way.
     Sctp_Status sctp_shutdown(const sockaddr_in& association_id);
     Sctp_Status sctp_shutdown(const Association_Key& association_id);
-    std::optional<Notification> sctp_recv_notification(int timeout_ms = 0);
+    std::optional<Notification> sctp_recv_notification();
     // A new interval applies to every destination of the association.
     Sctp_Status sctp_change_heartbeat(const Association_Key& association_id, const sockaddr_in& destination, bool enabled, std::optional<std::chrono::milliseconds> interval = std::nullopt);
     Sctp_Status sctp_request_heartbeat(const Association_Key& association_id, const sockaddr_in& destination);
     // Refused for an UNCONFIRMED destination, which nothing may be sent to.
     Sctp_Status sctp_set_primary(const Association_Key& association_id, const sockaddr_in& destination);
-    void sctp_subscribe(Notification_Type type, bool on);
     
     inline Association_Key get_this_association_key() {
         return Association_Key{local_address};
@@ -98,7 +86,6 @@ public:
 
 private:
     std::atomic<bool> running{false};
-    std::atomic<int> linger_ms{DEFAULT_CLOSE_LINGER_MS};
     bool platform_started{false};
     int receive_buffer_size;
     struct Local_Address {
@@ -115,8 +102,6 @@ private:
     // on. Keys, here and in associations, carry the peer's SCTP port.
     std::unordered_map<Association_Key, Association_Key, Association_Hash> peer_addresses;
     std::mutex associations_mutex;
-    // On associations_mutex: an association came up, ended, or freed send room.
-    std::condition_variable association_changed;
     Send_Queue sends;
     Receive_Queue receives;
     Expiration_Queue expirations;
@@ -140,7 +125,7 @@ private:
     // Appends the addresses the association lacks, as UNCONFIRMED, and maps each to key.
     void add_peer_addresses(const Association_Key& key, Association& assoc, const std::vector<sockaddr_in>& addresses);
     void forget_peer_addresses(const Association_Key& key);
-    void close_associations(std::chrono::milliseconds linger);
+    void close_associations();
     void notify_assoc_change(const Association_Key& key, Assoc_Change_State state);
     // For a TCB being discarded or reset. Takes associations_mutex as held.
     void abandon_partial_delivery(const Association_Key& key, const Association& assoc);

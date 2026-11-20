@@ -12,6 +12,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "test_support.hpp"
 
 static int failures = 0;
 
@@ -346,9 +347,8 @@ static void test_partial_delivery() {
 }
 
 static void test_partial_delivery_aborted() {
-    std::printf("An association ending part way through partial delivery (RFC 6458 6.1.7):\n");
+    std::printf("An association ending part way through partial delivery:\n");
     SCTP_Socket stack;
-    stack.sctp_subscribe(Notification_Type::SCTP_PARTIAL_DELIVERY_EVENT, true);
     Association_Key key = SCTP_Socket_Test_Access::add_receiving_association(stack);
     constexpr uint32_t FILLING = (RWND - PMDCS) / FRAGMENT_SIZE + 1;
     for (uint32_t i = 0; i < FILLING; ++i) {
@@ -360,12 +360,8 @@ static void test_partial_delivery_aborted() {
 
     SCTP_Socket_Test_Access::deliver_abort(stack);
     auto first = stack.sctp_recv_notification();
-    const auto* event = first ? std::get_if<Partial_Delivery_Event>(&first->payload) : nullptr;
-    check(event && first->type == Notification_Type::SCTP_PARTIAL_DELIVERY_EVENT && event->stream == 2 && event->ssn == 0,
-          "SCTP_PARTIAL_DELIVERY_EVENT names its stream and SSN");
-    auto second = stack.sctp_recv_notification();
-    const auto* change = second ? std::get_if<Assoc_Change>(&second->payload) : nullptr;
-    check(change && change->state == Assoc_Change_State::COMM_LOST, "followed by COMM_LOST");
+    const auto* change = first ? std::get_if<Assoc_Change>(&first->payload) : nullptr;
+    check(change && change->state == Assoc_Change_State::COMM_LOST, "COMM_LOST is reported");
     check(stack.sctp_recv_data_from(key, buffer, &partial) == 0, "what was left unread is dropped");
 
     key = SCTP_Socket_Test_Access::add_receiving_association(stack);
@@ -447,8 +443,8 @@ static void test_end_to_end() {
     Association_Key a_to_b;
     a.sctp_associate("127.0.0.1", B_PORT, a_to_b);
     Association_Key b_to_a = a.get_this_association_key();
-    bool established = started && a.await_established_association(a_to_b, 3000) == Sctp_Status::OK
-        && b.await_established_association(b_to_a, 3000) == Sctp_Status::OK;
+    bool established = started && await_established(a, a_to_b, 3000) == Sctp_Status::OK
+        && await_established(b, b_to_a, 3000) == Sctp_Status::OK;
     check(established, "association established");
     if (!established) {
         return;
@@ -480,8 +476,8 @@ static void test_end_to_end() {
     }
     check(n == 10 && !partial && std::equal(buffer.begin(), buffer.begin() + 10, message(10).begin()),
           "the message after it arrives separately");
-    a.sctp_close(0);
-    b.sctp_close(0);
+    a.sctp_close();
+    b.sctp_close();
 }
 
 int main() {

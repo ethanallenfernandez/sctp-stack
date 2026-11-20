@@ -45,22 +45,6 @@ bool Expiration_Queue::is_active(const Expiration_Key& key) {
     return active.find(key) != active.end();
 }
 
-bool Expiration_Queue::has_any_for(const Association_Key& location) {
-    std::lock_guard<std::mutex> lock(mutex);
-    for (const auto& entry : active) {
-        if (entry.first.location == location) {
-            return true;
-        }
-    }
-    return false;
-}
-
-uint64_t Expiration_Queue::generation_of(const Expiration_Key& key) {
-    std::lock_guard<std::mutex> lock(mutex);
-    auto live = active.find(key);
-    return live == active.end() ? 0 : live->second;
-}
-
 void Expiration_Queue::clear() {
     std::lock_guard<std::mutex> lock(mutex);
     while (!queue.empty()) {

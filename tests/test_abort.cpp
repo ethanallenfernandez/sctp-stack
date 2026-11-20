@@ -61,7 +61,6 @@ struct SCTP_Socket_Test_Access {
     // state == nullptr means no TCB at all.
     static Result deliver_to(const Association_State* state, SCTP_Packet packet) {
         SCTP_Socket stack;
-        stack.sctp_subscribe(Notification_Type::SCTP_REMOTE_ERROR, true);
         sockaddr_in src = peer_address();
         Association_Key key{src};
         if (state) {
@@ -291,14 +290,6 @@ void test_abort_while_forming() {
                                 inbound(OUR_TAG, {abort_chunk(false, {error_cause{CAUSE_PROTOCOL_VIOLATION, {'n', 'o'}}})}));
     check(!r.has_association, "association gone");
     check(!lost(r), "reported as never started, not as a lost association");
-
-    bool reported = false;
-    for (const auto& notification : r.notifications) {
-        const auto* error = std::get_if<Remote_Error>(&notification.payload);
-        reported = reported || (error && error->causes.size() == 1
-                                && error->causes[0].code == CAUSE_PROTOCOL_VIOLATION);
-    }
-    check(reported, "the peer's causes are passed up as SCTP_REMOTE_ERROR");
 }
 
 void test_abort_suppresses_replies() {

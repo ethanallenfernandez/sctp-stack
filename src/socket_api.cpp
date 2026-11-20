@@ -149,17 +149,11 @@ bool SCTP_Socket::sctp_run() {
     return true;
 }
 
-void SCTP_Socket::sctp_close(int linger) {
+void SCTP_Socket::sctp_close() {
     if (running.load()) {
-        close_associations(std::chrono::milliseconds(std::max(linger == USE_SOCKET_LINGER ? linger_ms.load() : linger, 0)));
+        close_associations();
     }
-    {
-        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
-        running.store(false);
-    }
-    association_changed.notify_all();
-    notifications.close();
-    receives.close();
+    running.store(false);
     if (event_loop_thread.joinable()) {
         wake_event_loop();
         event_loop_thread.join();
@@ -182,30 +176,16 @@ void SCTP_Socket::sctp_close(int linger) {
     }
 }
 
-void SCTP_Socket::sctp_set_linger(int linger) {
-    linger_ms.store(std::max(linger, 0));
-}
-
-// Graceful where the linger allows, abortive for whatever it does not. The event
-// loop keeps running throughout: it is what completes the shutdowns and puts the
-// final chunks on the wire.
-void SCTP_Socket::close_associations(std::chrono::milliseconds linger) {
-    auto keys = [this] {
+// The event loop keeps running until the ABORTs are on the wire.
+void SCTP_Socket::close_associations() {
+    std::vector<Association_Key> keys;
+    {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
-        std::vector<Association_Key> result;
         for (const auto& entry : associations) {
-            result.push_back(entry.first);
+            keys.push_back(entry.first);
         }
-        return result;
-    };
-    if (linger.count() > 0) {
-        for (const auto& key : keys()) {
-            sctp_shutdown(key);
-        }
-        std::unique_lock<std::mutex> assoc_lock(associations_mutex);
-        association_changed.wait_for(assoc_lock, linger, [this] { return associations.empty(); });
     }
-    for (const auto& key : keys()) {
+    for (const auto& key : keys) {
         sctp_abort(key);
     }
     auto drain_deadline = std::chrono::steady_clock::now() + CLOSE_DRAIN_TIMEOUT;
@@ -342,8 +322,6 @@ void SCTP_Socket::remove_association(const Association_Key& key) {
             abandon_partial_delivery(key, it->second);
             associations.erase(it);
         }
-        receives.detach(key);
-        association_changed.notify_all();
         forget_peer_addresses(key);
     }
     cancel_expirations(key);
@@ -351,23 +329,19 @@ void SCTP_Socket::remove_association(const Association_Key& key) {
 }
 
 void SCTP_Socket::notify_assoc_change(const Association_Key& key, Assoc_Change_State state) {
-    notifications.enqueue(Notification{Notification_Type::SCTP_ASSOC_CHANGE, key, 0, Assoc_Change{state}});
-    association_changed.notify_all();
+    notifications.enqueue(Notification{Notification_Type::SCTP_ASSOC_CHANGE, key, Assoc_Change{state}});
 }
 
 void SCTP_Socket::abandon_partial_delivery(const Association_Key& key, const Association& assoc) {
-    if (!assoc.reassembly.open || !assoc.reassembly.partially_delivered) {
-        return;
+    if (assoc.reassembly.open && assoc.reassembly.partially_delivered) {
+        receives.abandon_open(key);
     }
-    receives.abandon_open(key);
-    notifications.enqueue(Notification{Notification_Type::SCTP_PARTIAL_DELIVERY_EVENT, key, 0,
-        Partial_Delivery_Event{assoc.reassembly.stream, assoc.reassembly.ssn}});
 }
 
 void SCTP_Socket::notify_peer_addr_change(const Association_Key& key, const sockaddr_in& address, Peer_Addr_State state) {
     sockaddr_in transport_address = address;
     transport_address.sin_port = key.address.sin_port;
-    notifications.enqueue(Notification{Notification_Type::SCTP_PEER_ADDR_CHANGE, key, 0, Peer_Addr_Change{transport_address, state}});
+    notifications.enqueue(Notification{Notification_Type::SCTP_PEER_ADDR_CHANGE, key, Peer_Addr_Change{transport_address, state}});
 }
 
 namespace {
@@ -451,68 +425,35 @@ Sctp_Status SCTP_Socket::sctp_set_primary(const Association_Key& association_id,
     return Sctp_Status::OK;
 }
 
-std::optional<Notification> SCTP_Socket::sctp_recv_notification(int timeout_ms) {
-    if (timeout_ms <= 0) {
-        return notifications.dequeue();
-    }
-    return notifications.wait_dequeue(std::chrono::milliseconds(timeout_ms));
+std::optional<Notification> SCTP_Socket::sctp_recv_notification() {
+    return notifications.dequeue();
 }
 
-void SCTP_Socket::sctp_subscribe(Notification_Type type, bool on) {
-    notifications.set_subscribed(type, on);
-}
-
-Sctp_Status SCTP_Socket::await_established_association(const Association_Key& association_id, int timeout_ms) {
-    std::unique_lock<std::mutex> assoc_lock(associations_mutex);
-    Sctp_Status status = Sctp_Status::TIMED_OUT;
-    bool seen = false;
-    association_changed.wait_for(assoc_lock, std::chrono::milliseconds(std::max(timeout_ms, 0)), [&] {
-        auto it = associations.find(association_id);
-        if (it != associations.end()) {
-            seen = true;
-            if (it->second.state == ESTABLISHED) {
-                status = Sctp_Status::OK;
-            }
-        } else if (seen) {
-            status = Sctp_Status::NO_ASSOCIATION;
-        } else if (!running.load()) {
-            status = Sctp_Status::NOT_RUNNING;
-        }
-        return status != Sctp_Status::TIMED_OUT;
-    });
-    return status;
-}
-
-Sctp_Status SCTP_Socket::sctp_send_data(const sockaddr_in& association_id, const std::vector<uint8_t>& data, uint16_t stream, bool unordered, int timeout_ms, uint32_t ppid) {
+Sctp_Status SCTP_Socket::sctp_send_data(const sockaddr_in& association_id, const std::vector<uint8_t>& data, uint16_t stream, bool unordered, uint32_t ppid) {
     Association_Key key{association_id};
-    return sctp_send_data(key, data, stream, unordered, timeout_ms, ppid);
+    return sctp_send_data(key, data, stream, unordered, ppid);
 }
 
-Sctp_Status SCTP_Socket::sctp_send_data(const Association_Key& association_id, const std::vector<uint8_t>& data, uint16_t stream, bool unordered, int timeout_ms, uint32_t ppid) {
+Sctp_Status SCTP_Socket::sctp_send_data(const Association_Key& association_id, const std::vector<uint8_t>& data, uint16_t stream, bool unordered, uint32_t ppid) {
     {
-        std::unique_lock<std::mutex> assoc_lock(associations_mutex);
-        Sctp_Status status = Sctp_Status::OK;
-        association_changed.wait_for(assoc_lock, std::chrono::milliseconds(std::max(timeout_ms, 0)), [&] {
-            auto it = associations.find(association_id);
-            if (it == associations.end()) {
-                status = Sctp_Status::NO_ASSOCIATION;
-            } else if (it->second.state != ESTABLISHED) {
-                status = refusal_in(it->second.state);
-            } else if (data.empty()) {
-                status = Sctp_Status::EMPTY_MESSAGE;
-            } else if (stream >= it->second.out_streams) {
-                status = Sctp_Status::INVALID_STREAM;
-            } else if (!it->second.outbound.empty() && it->second.outbound_bytes + data.size() > SEND_BUFFER) {
-                status = Sctp_Status::QUEUE_FULL;
-            } else {
-                status = Sctp_Status::OK;
-            }
-            return status != Sctp_Status::QUEUE_FULL || !running.load();
-        });
-        if (status != Sctp_Status::OK) {
-            return status;
+        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+        auto it = associations.find(association_id);
+        if (it == associations.end()) {
+            return Sctp_Status::NO_ASSOCIATION;
         }
-        Association& assoc = associations.at(association_id);
+        Association& assoc = it->second;
+        if (assoc.state != ESTABLISHED) {
+            return refusal_in(assoc.state);
+        }
+        if (data.empty()) {
+            return Sctp_Status::EMPTY_MESSAGE;
+        }
+        if (stream >= assoc.out_streams) {
+            return Sctp_Status::INVALID_STREAM;
+        }
+        if (!assoc.outbound.empty() && assoc.outbound_bytes + data.size() > SEND_BUFFER) {
+            return Sctp_Status::QUEUE_FULL;
+        }
         uint16_t ssn = unordered ? 0 : assoc.next_ssn[stream]++;
         assoc.outbound.push_back(Outbound_Message{stream, ssn, unordered, data, 0, ppid});
         assoc.outbound_bytes += data.size();
@@ -568,8 +509,8 @@ Sctp_Status SCTP_Socket::sctp_abort(const Association_Key& association_id, const
 
 
 
-size_t SCTP_Socket::sctp_recv_data(std::vector<uint8_t>& buffer, Association_Key* out_association_id, bool* out_partial, uint16_t* out_stream, int timeout_ms, uint32_t* out_ppid) {
-    auto read = receives.read_any(buffer.data(), buffer.size(), std::chrono::milliseconds(std::max(timeout_ms, 0)));
+size_t SCTP_Socket::sctp_recv_data(std::vector<uint8_t>& buffer, Association_Key* out_association_id, bool* out_partial, uint16_t* out_stream, uint32_t* out_ppid) {
+    auto read = receives.read_any(buffer.data(), buffer.size());
     if (!read) {
         return 0;
     }
@@ -589,13 +530,13 @@ size_t SCTP_Socket::sctp_recv_data(std::vector<uint8_t>& buffer, Association_Key
     return read->bytes;
 }
 
-size_t SCTP_Socket::sctp_recv_data_from(const sockaddr_in& association_id, std::vector<uint8_t>& buffer, bool* out_partial, uint16_t* out_stream, int timeout_ms, uint32_t* out_ppid) {
+size_t SCTP_Socket::sctp_recv_data_from(const sockaddr_in& association_id, std::vector<uint8_t>& buffer, bool* out_partial, uint16_t* out_stream, uint32_t* out_ppid) {
     Association_Key key{association_id};
-    return sctp_recv_data_from(key, buffer, out_partial, out_stream, timeout_ms, out_ppid);
+    return sctp_recv_data_from(key, buffer, out_partial, out_stream, out_ppid);
 }
 
-size_t SCTP_Socket::sctp_recv_data_from(const Association_Key& association_id, std::vector<uint8_t>& buffer, bool* out_partial, uint16_t* out_stream, int timeout_ms, uint32_t* out_ppid) {
-    auto read = receives.read_from(association_id, buffer.data(), buffer.size(), std::chrono::milliseconds(std::max(timeout_ms, 0)));
+size_t SCTP_Socket::sctp_recv_data_from(const Association_Key& association_id, std::vector<uint8_t>& buffer, bool* out_partial, uint16_t* out_stream, uint32_t* out_ppid) {
+    auto read = receives.read_from(association_id, buffer.data(), buffer.size());
     if (!read) {
         return 0;
     }
@@ -634,7 +575,6 @@ Sctp_Status SCTP_Socket::sctp_shutdown(const Association_Key& association_id) {
             assoc_lock.unlock();
             cancel_expirations(association_id);
             sends.purge(association_id);
-            association_changed.notify_all();
             return Sctp_Status::OK;
         case ESTABLISHED:
             it->second.state = SHUTDOWN_PENDING;

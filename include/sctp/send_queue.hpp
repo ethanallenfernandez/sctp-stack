@@ -48,6 +48,8 @@ constexpr size_t MAX_QUEUED_CONTROL = 256;
 using Send_Allowances = std::unordered_map<Association_Key, Send_Allowance, Association_Hash>;
 
 class Send_Queue {
+    friend struct SCTP_Socket_Test_Access;
+
     public:
         struct Pending {
             Send_Priority priority;
@@ -84,11 +86,7 @@ class Send_Queue {
         // timer) wakes the event loop by itself.
         std::optional<std::chrono::steady_clock::time_point> next_deadline();
 
-        // Inspection, for tests and diagnostics.
         size_t size();
-        bool has_packets_for(const Association_Key& location);
-        std::vector<uint32_t> front_data_tsns(Send_Priority priority);
-        size_t front_chunk_count(Send_Priority priority);
 
     private:
         struct Queued {

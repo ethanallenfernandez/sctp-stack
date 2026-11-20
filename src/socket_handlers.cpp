@@ -885,7 +885,7 @@ bool SCTP_Socket::handle_cookie_echo(
     State_Cookie cookie{};
     uint32_t staleness_us = 0;
     Cookie_Result result = cookie_authorizer.verify(echo.cookie_data, header, src, cookie, staleness_us);
-    if (result != Cookie_Result::VALID && result != Cookie_Result::STALE) {
+    if (result == Cookie_Result::INVALID) {
         return false;
     }
 
@@ -943,7 +943,6 @@ bool SCTP_Socket::handle_cookie_echo(
         sends.purge(key);
         forget_peer_addresses(key);
         abandon_partial_delivery(key, tcb);
-        receives.detach(key);
         tcb = init_new_association(cookie);
         add_peer_addresses(key, tcb, cookie_addresses(cookie));
         destination = reply_destination(tcb, src);
@@ -1001,46 +1000,34 @@ void SCTP_Socket::handle_error(const SCTP_Common_Header&, const SCTP_Chunk& chun
         Association& assoc = it->second;
 
         for (const auto& cause : error.causes) {
-            switch (cause.code) {
-                case CAUSE_STALE_COOKIE: {
-                    bool handled = !retry_init.chunks.empty() || handshake_failed;
-                    if (handled || assoc.state != COOKIE_ECHOED || cause.info.size() != 4) {
-                        break;
-                    }
-                    if (assoc.stale_cookie_retries >= MAX_STALE_COOKIE_RETRIES) {
-                        handshake_failed = true;
-                        break;
-                    }
-                    
-                    uint32_t staleness_ms = read_be32(cause.info.data()) / 1000 + 1;
-                    ++assoc.stale_cookie_retries;
-                    assoc.state = COOKIE_WAIT;
-                    assoc.peer_ver_tag = 0;
-                    assoc.init_retransmits = 0;
-                    assoc.cookie_retransmits = 0;
-                    destination = primary(assoc).address;
-                    retry_init = build_init(
-                        ntohs(local_address.sin_port),
-                        ntohs(key.address.sin_port),
-                        assoc.this_ver_tag,
-                        assoc.next_tsn,
-                        staleness_ms + std::min(staleness_ms, 1000U),
-                        advertised_addresses());
-                    break;
-                }
-                case CAUSE_COOKIE_WHILE_SHUTTING_DOWN: // TODO
-                    break;
-                case CAUSE_UNRECOGNIZED_CHUNK: // TODO
-                    break;
-                default:
-                    break;
+            if (cause.code != CAUSE_STALE_COOKIE || !retry_init.chunks.empty() || handshake_failed
+                    || assoc.state != COOKIE_ECHOED || cause.info.size() != 4) {
+                continue;
             }
+            if (assoc.stale_cookie_retries >= MAX_STALE_COOKIE_RETRIES) {
+                handshake_failed = true;
+                continue;
+            }
+            uint32_t staleness_ms = read_be32(cause.info.data()) / 1000 + 1;
+            ++assoc.stale_cookie_retries;
+            assoc.state = COOKIE_WAIT;
+            assoc.peer_ver_tag = 0;
+            assoc.init_retransmits = 0;
+            assoc.cookie_retransmits = 0;
+            destination = primary(assoc).address;
+            retry_init = build_init(
+                ntohs(local_address.sin_port),
+                ntohs(key.address.sin_port),
+                assoc.this_ver_tag,
+                assoc.next_tsn,
+                staleness_ms + std::min(staleness_ms, 1000U),
+                advertised_addresses());
         }
 
         // Every cause is passed up raw, unknown codes included, unless the
         // ERROR was consumed by handshake recovery.
         if (retry_init.chunks.empty() && !handshake_failed) {
-            notifications.enqueue(Notification{Notification_Type::SCTP_REMOTE_ERROR, key, 0, Remote_Error{error.causes}});
+            notifications.enqueue(Notification{Notification_Type::SCTP_REMOTE_ERROR, key, Remote_Error{error.causes}});
             return;
         }
     }
@@ -1056,9 +1043,7 @@ void SCTP_Socket::handle_error(const SCTP_Common_Header&, const SCTP_Chunk& chun
     notify_assoc_change(key, Assoc_Change_State::CANT_STR_ASSOC);
 }
 
-void SCTP_Socket::handle_abort(const SCTP_Common_Header&, const SCTP_Chunk& chunk, const Association_Key& key, const sockaddr_in&) {
-    const auto& abort = std::get<error_chunk_value>(chunk.chunk_value);
-
+void SCTP_Socket::handle_abort(const SCTP_Common_Header&, const SCTP_Chunk&, const Association_Key& key, const sockaddr_in&) {
     bool forming;
     {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
@@ -1069,9 +1054,6 @@ void SCTP_Socket::handle_abort(const SCTP_Common_Header&, const SCTP_Chunk& chun
         forming = it->second.state == COOKIE_WAIT || it->second.state == COOKIE_ECHOED;
     }
 
-    if (!abort.causes.empty()) {
-        notifications.enqueue(Notification{Notification_Type::SCTP_REMOTE_ERROR, key, 0, Remote_Error{abort.causes}});
-    }
     remove_association(key);
     notify_assoc_change(key, forming ? Assoc_Change_State::CANT_STR_ASSOC : Assoc_Change_State::COMM_LOST);
 }
@@ -1246,7 +1228,6 @@ void SCTP_Socket::handle_shutdown(const SCTP_Common_Header& header, const SCTP_C
     uint32_t cumulative_tsn_ack = std::get<shutdown_chunk_value>(chunk.chunk_value).cumulative_tsn_ack;
     bool reply_ack = false;
     bool violation = false;
-    bool first_shutdown = false;
     bool advanced = false;
     std::vector<sockaddr_in> t3_restarts;
     uint32_t peer_tag;
@@ -1309,7 +1290,6 @@ void SCTP_Socket::handle_shutdown(const SCTP_Common_Header& header, const SCTP_C
                         assoc.error_count = 0;
                     }
                 }
-                first_shutdown = assoc.state != SHUTDOWN_RECEIVED;
                 assoc.state = SHUTDOWN_RECEIVED;
         }
     }
@@ -1324,9 +1304,6 @@ void SCTP_Socket::handle_shutdown(const SCTP_Common_Header& header, const SCTP_C
         return;
     }
 
-    if (first_shutdown) {
-        notifications.enqueue(Notification{Notification_Type::SCTP_SHUTDOWN_EVENT, key, 0, Shutdown_Event{}});
-    }
     if (advanced) {
         sends.remove_acked_retransmissions(key, sack_chunk_value{cumulative_tsn_ack, 0, 0, 0, {}, {}});
         for (const sockaddr_in& path : t3_restarts) {

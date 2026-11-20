@@ -23,10 +23,7 @@ void check(bool cond, const std::string& what) {
 const char* name_of(Cookie_Result result) {
     switch (result) {
         case Cookie_Result::VALID:          return "VALID";
-        case Cookie_Result::MALFORMED:      return "MALFORMED";
-        case Cookie_Result::UNKNOWN_SECRET: return "UNKNOWN_SECRET";
-        case Cookie_Result::BAD_MAC:        return "BAD_MAC";
-        case Cookie_Result::WRONG_ENDPOINT: return "WRONG_ENDPOINT";
+        case Cookie_Result::INVALID:        return "INVALID";
         case Cookie_Result::STALE:          return "STALE";
     }
     return "?";
@@ -131,17 +128,17 @@ void test_malformed() {
     std::vector<uint8_t> cookie = mint(auth);
 
     std::vector<uint8_t> truncated(cookie.begin(), cookie.end() - 1);
-    check_result(verify(auth, truncated), Cookie_Result::MALFORMED, "95 bytes");
+    check_result(verify(auth, truncated), Cookie_Result::INVALID, "95 bytes");
 
     std::vector<uint8_t> extended = cookie;
     extended.push_back(0);
-    check_result(verify(auth, extended), Cookie_Result::MALFORMED, "97 bytes");
+    check_result(verify(auth, extended), Cookie_Result::INVALID, "97 bytes");
 
-    check_result(verify(auth, {}), Cookie_Result::MALFORMED, "empty");
+    check_result(verify(auth, {}), Cookie_Result::INVALID, "empty");
 
     std::vector<uint8_t> wrong_version = cookie;
     wrong_version[0] = STATE_COOKIE_VERSION + 1;
-    check_result(verify(auth, wrong_version), Cookie_Result::MALFORMED, "unknown version");
+    check_result(verify(auth, wrong_version), Cookie_Result::INVALID, "unknown version");
 }
 
 void test_unknown_secret() {
@@ -154,11 +151,11 @@ void test_unknown_secret() {
     // carry a matching MAC - but it is read first, and must be refused first.
     std::vector<uint8_t> foreign = cookie;
     foreign[1] = 99;
-    check_result(verify(auth, foreign), Cookie_Result::UNKNOWN_SECRET, "generation we never issued");
+    check_result(verify(auth, foreign), Cookie_Result::INVALID, "generation we never issued");
 
     // A different endpoint's cookie: right shape, wrong secret entirely.
     Cookie_Auth other;
-    check_result(verify(auth, mint(other)), Cookie_Result::BAD_MAC,
+    check_result(verify(auth, mint(other)), Cookie_Result::INVALID,
                  "another endpoint's cookie at the same generation fails the MAC");
 }
 
@@ -171,7 +168,7 @@ void test_bad_mac() {
     for (size_t i = 0; i < STATE_COOKIE_MAC_SIZE; i++) {
         std::vector<uint8_t> tampered = cookie;
         tampered[STATE_COOKIE_BODY_SIZE + i] ^= 0x01;
-        if (verify(auth, tampered) != Cookie_Result::BAD_MAC) {
+        if (verify(auth, tampered) != Cookie_Result::INVALID) {
             check(false, "flipping MAC byte " + std::to_string(i) + " is rejected");
             return;
         }
@@ -190,7 +187,7 @@ void test_bad_mac() {
             check(false, "flipping body byte " + std::to_string(i) + " is rejected");
             return;
         }
-        if (verify(auth, tampered) == Cookie_Result::BAD_MAC) caught++;
+        if (verify(auth, tampered) == Cookie_Result::INVALID) caught++;
     }
     check(caught > 0, "flipping any body byte is rejected, mostly by the MAC");
 }
@@ -208,7 +205,7 @@ void test_wrong_endpoint() {
     sockaddr_in elsewhere = peer_address();
     sctp_parse_ipv4("10.0.2.9", elsewhere.sin_addr);
     check_result(auth.verify(cookie, echo_header(), elsewhere, decoded, staleness),
-                 Cookie_Result::WRONG_ENDPOINT, "different source address");
+                 Cookie_Result::INVALID, "different source address");
 
     // A NAT may rebind the encapsulation port between INIT and COOKIE ECHO; the
     // new one is recorded, not refused.
@@ -220,22 +217,22 @@ void test_wrong_endpoint() {
     SCTP_Common_Header other_src = echo_header();
     other_src.src_port = PEER_PORT + 1;
     check_result(auth.verify(cookie, other_src, peer_address(), decoded, staleness),
-                 Cookie_Result::WRONG_ENDPOINT, "different SCTP source port");
+                 Cookie_Result::INVALID, "different SCTP source port");
 
     SCTP_Common_Header other_dst = echo_header();
     other_dst.des_port = OUR_PORT + 1;
     check_result(auth.verify(cookie, other_dst, peer_address(), decoded, staleness),
-                 Cookie_Result::WRONG_ENDPOINT, "different SCTP destination port");
+                 Cookie_Result::INVALID, "different SCTP destination port");
 
     // The tag the peer put in the common header must be the one we advertised.
     SCTP_Common_Header wrong_tag = echo_header();
     wrong_tag.verification_tag = LOCAL_TAG ^ 1;
     check_result(auth.verify(cookie, wrong_tag, peer_address(), decoded, staleness),
-                 Cookie_Result::WRONG_ENDPOINT, "verification tag not the one we advertised");
+                 Cookie_Result::INVALID, "verification tag not the one we advertised");
 
     // An INIT-shaped header (tag 0) must not slip through either.
     check_result(auth.verify(cookie, inbound_header(), peer_address(), decoded, staleness),
-                 Cookie_Result::WRONG_ENDPOINT, "verification tag of 0");
+                 Cookie_Result::INVALID, "verification tag of 0");
 }
 
 void test_stale() {
@@ -253,11 +250,11 @@ void test_stale() {
     // offset 12 and created_us at 4.
     std::vector<uint8_t> shortened = cookie;
     shortened[12] ^= 0x01;
-    check_result(verify(auth, shortened), Cookie_Result::BAD_MAC, "edited lifespan is caught by the MAC");
+    check_result(verify(auth, shortened), Cookie_Result::INVALID, "edited lifespan is caught by the MAC");
 
     std::vector<uint8_t> backdated = cookie;
     backdated[8] ^= 0x01;
-    check_result(verify(auth, backdated), Cookie_Result::BAD_MAC, "edited timestamp is caught by the MAC");
+    check_result(verify(auth, backdated), Cookie_Result::INVALID, "edited timestamp is caught by the MAC");
 
     // staleness_us exists only to fill the Stale Cookie error cause, so it must
     // stay zero on every path that does not send one.
@@ -314,13 +311,13 @@ void test_rotation() {
     // A never-used instance holds no secret at all, so it refuses everything
     // before it gets as far as the MAC.
     Cookie_Auth untouched;
-    check_result(verify(untouched, cookie), Cookie_Result::UNKNOWN_SECRET, "an unseeded instance rejects it");
+    check_result(verify(untouched, cookie), Cookie_Result::INVALID, "an unseeded instance rejects it");
 
     // Once seeded it has a secret at the same generation but a different value,
     // which is the key separation rotation relies on.
     Cookie_Auth other;
     mint(other);
-    check_result(verify(other, cookie), Cookie_Result::BAD_MAC, "a seeded instance rejects it at the same generation");
+    check_result(verify(other, cookie), Cookie_Result::INVALID, "a seeded instance rejects it at the same generation");
     check_result(verify(auth, cookie), Cookie_Result::VALID, "and the owner still accepts it");
 }
 

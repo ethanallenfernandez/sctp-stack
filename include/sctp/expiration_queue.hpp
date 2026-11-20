@@ -70,6 +70,8 @@ struct Compare_Expiration {
 };
 
 class Expiration_Queue {
+    friend struct SCTP_Socket_Test_Access;
+
     public:
         void schedule( // Also replaces any timer already running for this key.
             const Expiration_Key& key,
@@ -81,8 +83,6 @@ class Expiration_Queue {
         void cancel_all(const Association_Key& location, Expiration_Timer_Type type);
         void clear();
         bool is_active(const Expiration_Key& key);
-        bool has_any_for(const Association_Key& location);
-        uint64_t generation_of(const Expiration_Key& key);
         std::vector<Expiration_Fallback> drain_expired(std::chrono::steady_clock::time_point now);
         std::optional<std::chrono::steady_clock::time_point> next_deadline();
 

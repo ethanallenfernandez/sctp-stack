@@ -4,9 +4,6 @@
 #include <sctp/association.hpp>
 #include <sctp/sctp.hpp>
 
-#include <array>
-#include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -17,11 +14,7 @@
 enum class Notification_Type {
     SCTP_ASSOC_CHANGE,
     SCTP_REMOTE_ERROR,
-    SCTP_SEND_FAILED,
     SCTP_PEER_ADDR_CHANGE,
-    SCTP_SHUTDOWN_EVENT,
-    SCTP_PARTIAL_DELIVERY_EVENT,
-    COUNT
 };
 
 enum class Assoc_Change_State {
@@ -52,48 +45,21 @@ struct Remote_Error {
     std::vector<error_cause> causes;
 };
 
-// The peer has begun a graceful close: sends are refused from here on.
-struct Shutdown_Event {};
-
-// A message part way through partial delivery will never be finished, and what
-// of it was still unread has been dropped. RFC 6458's only indication, ABORTED.
-struct Partial_Delivery_Event {
-    uint16_t stream;
-    uint16_t ssn;
-};
-
 struct Notification {
     Notification_Type type;
     Association_Key src;
-    uint64_t sequence_number;   // assigned by enqueue
-    std::variant<Assoc_Change, Remote_Error, Shutdown_Event, Peer_Addr_Change, Partial_Delivery_Event> payload;
+    std::variant<Assoc_Change, Remote_Error, Peer_Addr_Change> payload;
 };
-
-constexpr size_t MAX_QUEUED_NOTIFICATIONS = 1024;
 
 class Notification_Queue {
     public:
-        Notification_Queue();
-
         void enqueue(Notification notification);
         std::optional<Notification> dequeue();
-        std::optional<Notification> wait_dequeue(std::chrono::milliseconds timeout);
-        void set_subscribed(Notification_Type type, bool on);
-        bool is_subscribed(Notification_Type type);
-        void close();
         void clear();
-        size_t size();
-        uint64_t dropped();
 
     private:
-        std::optional<Notification> pop_front();
         std::queue<Notification> queue;
-        std::array<bool, static_cast<size_t>(Notification_Type::COUNT)> subscribed{};
-        uint64_t next_sequence_number{1};
-        uint64_t dropped_count{0};
-        bool closed{false};
         std::mutex mutex;
-        std::condition_variable available;
 };
 
 #endif

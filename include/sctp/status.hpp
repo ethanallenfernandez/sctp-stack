@@ -15,7 +15,6 @@ enum class Sctp_Status {
     INVALID_STREAM,
     UNKNOWN_DESTINATION,
     UNCONFIRMED_DESTINATION,
-    TIMED_OUT,
 };
 
 #endif

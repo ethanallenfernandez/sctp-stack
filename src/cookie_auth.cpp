@@ -110,19 +110,19 @@ Cookie_Result Cookie_Auth::verify(
     staleness_us = 0;
 
     if (!deserialize_state_cookie(cookie, out)) {
-        return Cookie_Result::MALFORMED;
+        return Cookie_Result::INVALID;
     }
 
     const uint8_t* secret = secret_for(out.secret_generation);
     if (secret == nullptr) {
-        return Cookie_Result::UNKNOWN_SECRET;
+        return Cookie_Result::INVALID;
     }
 
     uint8_t expected[SHA256_DIGEST_SIZE];
     size_t body_size = cookie.size() - STATE_COOKIE_MAC_SIZE;
     hmac_sha256(secret, COOKIE_SECRET_SIZE, cookie.data(), body_size, expected);
     if (!constant_time_equal(expected, cookie.data() + body_size, STATE_COOKIE_MAC_SIZE)) {
-        return Cookie_Result::BAD_MAC;
+        return Cookie_Result::INVALID;
     }
 
     uint32_t from = ntohl(src.sin_addr.s_addr);
@@ -133,7 +133,7 @@ Cookie_Result Cookie_Auth::verify(
         || out.local_ver_tag != header.verification_tag
         || !listed
     ) {
-        return Cookie_Result::WRONG_ENDPOINT;
+        return Cookie_Result::INVALID;
     }
 
     uint64_t now = now_us();

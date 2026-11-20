@@ -43,6 +43,11 @@ SCTP_Packet data_packet_at(uint32_t tsn) {
 } // namespace
 
 struct SCTP_Socket_Test_Access {
+    static size_t messages(SCTP_Socket& stack, const Association_Key& key) {
+        auto it = stack.receives.pending.find(key);
+        return it == stack.receives.pending.end() ? 0 : it->second.messages.size();
+    }
+
     struct Result {
         Association_State state;
         std::vector<SCTP_Packet> sent;
@@ -101,7 +106,7 @@ struct SCTP_Socket_Test_Access {
                 result.rto = primary(it->second).rto;
                 result.peer_tag = it->second.peer_ver_tag;
             }
-            result.delivered = socket.receives.messages(key);
+            result.delivered = messages(socket, key);
             auto now = std::chrono::steady_clock::now();
             while (auto pending = socket.sends.peek(now)) {
                 result.sent.push_back(pending->deliverable.packet);
@@ -204,24 +209,9 @@ struct SCTP_Socket_Test_Access {
             std::chrono::steady_clock::now() + std::chrono::seconds(1), Deliverable{});
         stack.socket.sctp_shutdown(stack.key);
         Result result = stack.collect();
-        result.any_timer = stack.socket.expirations.has_any_for(stack.key);
+        result.any_timer = std::any_of(stack.socket.expirations.active.begin(), stack.socket.expirations.active.end(),
+            [&](const auto& entry) { return entry.first.location == stack.key; });
         return result;
-    }
-
-    // NEXT_TSN-1 is outstanding, so a SHUTDOWN that does not ack it leaves the
-    // association in SHUTDOWN-RECEIVED.
-    static Result shutdowns_received(Association_State state, bool subscribed, std::vector<uint32_t> cumulative_tsn_acks) {
-        Stack stack(state, NEXT_TSN - 2);
-        stack.add_outstanding(NEXT_TSN - 1, false);
-        stack.socket.sctp_subscribe(Notification_Type::SCTP_SHUTDOWN_EVENT, subscribed);
-        for (uint32_t ack : cumulative_tsn_acks) {
-            SCTP_Packet packet;
-            packet.header = {PEER_PORT, LOCAL_PORT, OUR_TAG, 0};
-            packet.chunks.push_back({{SHUTDOWN, 0, 0}, shutdown_chunk_value{ack}});
-            std::vector<uint8_t> wire = serialize_sctp_packet(packet);
-            stack.socket.handle_recv_packet(wire.data(), wire.size(), peer_address());
-        }
-        return stack.collect();
     }
 
     // Enters SHUTDOWN-SENT, then lets a heartbeat arrive; reports whether T5 was
@@ -230,13 +220,13 @@ struct SCTP_Socket_Test_Access {
         Stack stack(SHUTDOWN_PENDING, NEXT_TSN - 1);
         stack.socket.do_next_shutdown_step(stack.key);
         Expiration_Key t5{stack.key, Expiration_Timer_Type::T5_SHUTDOWN_GUARD};
-        uint64_t before = stack.socket.expirations.generation_of(t5);
+        uint64_t before = stack.socket.expirations.active.at(t5);
         SCTP_Packet packet;
         packet.header = {PEER_PORT, LOCAL_PORT, OUR_TAG, 0};
         packet.chunks.push_back({{HEARTBEAT, 0, 0}, heartbeat_chunk_value{{1, 2, 3, 4}}});
         std::vector<uint8_t> wire = serialize_sctp_packet(packet);
         stack.socket.handle_recv_packet(wire.data(), wire.size(), peer_address());
-        bool untouched = stack.socket.expirations.generation_of(t5) == before;
+        bool untouched = stack.socket.expirations.active.count(t5) != 0 && stack.socket.expirations.active.at(t5) == before;
         return {stack.collect(), untouched};
     }
 
@@ -735,31 +725,6 @@ void test_user_shutdown() {
     }
 }
 
-size_t shutdown_events(const Access::Result& r) {
-    return std::count_if(r.notifications.begin(), r.notifications.end(), [](const Notification& n) {
-        return n.type == Notification_Type::SCTP_SHUTDOWN_EVENT && std::holds_alternative<Shutdown_Event>(n.payload);
-    });
-}
-
-void test_shutdown_event() {
-    std::printf("SCTP_SHUTDOWN_EVENT (RFC 6458 6.1.5, as Linux):\n");
-    for (Association_State state : {ESTABLISHED, SHUTDOWN_PENDING}) {
-        auto r = Access::shutdowns_received(state, true, {NEXT_TSN - 1});
-        check(shutdown_events(r) == 1, name(state) + ": the peer's SHUTDOWN is reported");
-    }
-    auto r = Access::shutdowns_received(ESTABLISHED, false, {NEXT_TSN - 1});
-    check(shutdown_events(r) == 0, "off by default");
-
-    r = Access::shutdowns_received(ESTABLISHED, true, {NEXT_TSN - 2, NEXT_TSN - 2});
-    check(r.state == SHUTDOWN_RECEIVED && shutdown_events(r) == 1, "a repeated SHUTDOWN is not reported again");
-
-    r = Access::shutdowns_received(SHUTDOWN_SENT, true, {NEXT_TSN - 1});
-    check(shutdown_events(r) == 0, "a crossing SHUTDOWN in SHUTDOWN-SENT is not reported");
-
-    r = Access::shutdowns_received(ESTABLISHED, true, {NEXT_TSN});
-    check(!r.has_association && shutdown_events(r) == 0, "a SHUTDOWN that aborts the association is not reported");
-}
-
 void test_t5_guard() {
     std::printf("T5-shutdown-guard (9.2, as Linux):\n");
     auto r = Access::advance(SHUTDOWN_PENDING, NEXT_TSN - 1);
@@ -810,7 +775,6 @@ int main() {
     test_handshake_chunks_while_shutting_down();
     test_data_outlives_association();
     test_user_shutdown();
-    test_shutdown_event();
     test_t5_guard();
 
     if (failures) {

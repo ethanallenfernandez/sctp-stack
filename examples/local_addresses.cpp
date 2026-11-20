@@ -8,8 +8,10 @@
 
 #include <sctp/socket.hpp>
 
+#include <chrono>
 #include <cstdio>
 #include <string>
+#include <thread>
 #include <vector>
 
 // Read by examples/local_addresses.gdb to tell the three stacks apart.
@@ -33,11 +35,33 @@ sockaddr_in address(const char* ip, int port) {
     return out;
 }
 
+// The library never blocks, so waits poll. An association is up once the ULP
+// is told COMMUNICATION UP for it.
+bool await_up(SCTP_Socket& stack, const Association_Key& key, int timeout_ms) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto notification = stack.sctp_recv_notification();
+        const auto* change = notification ? std::get_if<Assoc_Change>(&notification->payload) : nullptr;
+        if (change && change->state == Assoc_Change_State::COMM_UP && notification->src == key) {
+            return true;
+        }
+        if (!notification) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    return false;
+}
+
 bool await_confirmed(SCTP_Socket& stack, const sockaddr_in& at) {
-    while (auto notification = stack.sctp_recv_notification(WAIT_MS)) {
-        const auto* change = std::get_if<Peer_Addr_Change>(&notification->payload);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(WAIT_MS);
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto notification = stack.sctp_recv_notification();
+        const auto* change = notification ? std::get_if<Peer_Addr_Change>(&notification->payload) : nullptr;
         if (change && change->state == Peer_Addr_State::ADDR_CONFIRMED && change->address.sin_addr.s_addr == at.sin_addr.s_addr) {
             return true;
+        }
+        if (!notification) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
     return false;
@@ -45,7 +69,11 @@ bool await_confirmed(SCTP_Socket& stack, const sockaddr_in& at) {
 
 std::string receive(SCTP_Socket& stack, Association_Key* from = nullptr) {
     std::vector<uint8_t> buffer(256);
-    size_t n = stack.sctp_recv_data(buffer, from, nullptr, nullptr, WAIT_MS);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(WAIT_MS);
+    size_t n = 0;
+    while ((n = stack.sctp_recv_data(buffer, from)) == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
     return std::string(buffer.begin(), buffer.begin() + n);
 }
 
@@ -71,12 +99,11 @@ int main() {
         std::printf("could not start the stacks\n");
         return 1;
     }
-    peer.sctp_subscribe(Notification_Type::SCTP_PEER_ADDR_CHANGE, true);
 
     step("2. peer associates to 127.0.0.1; multihomed's INIT ACK lists both of its addresses");
     Association_Key to_multihomed;
     if (peer.sctp_associate("127.0.0.1", 9900, to_multihomed) != Sctp_Status::OK
-            || peer.await_established_association(to_multihomed, WAIT_MS) != Sctp_Status::OK) {
+            || !await_up(peer, to_multihomed, WAIT_MS)) {
         std::printf("association failed\n");
         return 1;
     }
@@ -97,7 +124,7 @@ int main() {
     step("5. multihomed associates to third; its INIT lists both of its addresses");
     Association_Key to_third;
     if (multihomed.sctp_associate("127.0.0.4", 5001, to_third) != Sctp_Status::OK
-            || multihomed.await_established_association(to_third, WAIT_MS) != Sctp_Status::OK) {
+            || !await_up(multihomed, to_third, WAIT_MS)) {
         std::printf("association failed\n");
         return 1;
     }

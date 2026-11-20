@@ -14,6 +14,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "test_support.hpp"
 
 static int failures = 0;
 
@@ -413,8 +414,8 @@ static void test_end_to_end() {
     Association_Key a_to_b;
     a.sctp_associate("127.0.0.1", B_PORT, a_to_b);
     Association_Key b_to_a = a.get_this_association_key();
-    bool established = started && a.await_established_association(a_to_b, 3000) == Sctp_Status::OK
-        && b.await_established_association(b_to_a, 3000) == Sctp_Status::OK;
+    bool established = started && await_established(a, a_to_b, 3000) == Sctp_Status::OK
+        && await_established(b, b_to_a, 3000) == Sctp_Status::OK;
     check(established, "association established");
     if (!established) {
         return;
@@ -455,8 +456,8 @@ static void test_end_to_end() {
     }
     check(ordered, "every stream's messages arrive on it, in order");
     check(unordered_arrived, "the fragmented unordered message arrives whole, on its stream");
-    a.sctp_close(0);
-    b.sctp_close(0);
+    a.sctp_close();
+    b.sctp_close();
 }
 
 int main() {

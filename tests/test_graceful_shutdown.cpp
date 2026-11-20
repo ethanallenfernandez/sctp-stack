@@ -3,7 +3,6 @@
 
 #include <sctp/socket.hpp>
 #include <sctp/platform.hpp>
-#include "serialize.hpp"
 
 #include <chrono>
 #include <cstdio>
@@ -11,6 +10,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "test_support.hpp"
 
 using Clock = std::chrono::steady_clock;
 
@@ -18,26 +18,6 @@ struct SCTP_Socket_Test_Access {
     static size_t association_count(SCTP_Socket& stack) {
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
         return stack.associations.size();
-    }
-
-    // Leaves the UDP socket bound but stops anything answering on it.
-    static void silence(SCTP_Socket& stack) {
-        stack.running.store(false);
-        stack.wake_event_loop();
-        stack.event_loop_thread.join();
-    }
-
-    // Whatever reached a silenced stack's socket, in arrival order.
-    static std::vector<SCTP_Packet> drain_socket(SCTP_Socket& stack) {
-        std::vector<SCTP_Packet> packets;
-        uint8_t buffer[2048];
-        for (;;) {
-            int n = recvfrom(stack.udp_socket, reinterpret_cast<char*>(buffer), sizeof(buffer), 0, nullptr, nullptr);
-            if (n <= 0) {
-                return packets;
-            }
-            packets.push_back(deserialize_sctp_packet(buffer, static_cast<size_t>(n)));
-        }
     }
 };
 
@@ -60,7 +40,7 @@ bool await_notification(SCTP_Socket& stack, Notification_Type type, Assoc_Change
     auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
     while (Clock::now() < deadline) {
         auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now());
-        auto n = stack.sctp_recv_notification(static_cast<int>(std::max<int64_t>(remaining.count(), 1)));
+        auto n = notification_wait(stack, static_cast<int>(std::max<int64_t>(remaining.count(), 1)));
         if (!n || n->type != type) {
             continue;
         }
@@ -70,14 +50,6 @@ bool await_notification(SCTP_Socket& stack, Notification_Type type, Assoc_Change
         }
     }
     return false;
-}
-
-bool await_empty(SCTP_Socket& stack, int timeout_ms = 5000) {
-    auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
-    while (Access::association_count(stack) != 0 && Clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    return Access::association_count(stack) == 0;
 }
 
 std::vector<uint8_t> message(char side, int i) {
@@ -120,8 +92,8 @@ bool pair_up(SCTP_Socket& a, int a_port, SCTP_Socket& b, int b_port, Association
     }
     a.sctp_associate("127.0.0.1", b_port, a_to_b);
     b_to_a = a.get_this_association_key();
-    return a.await_established_association(a_to_b, 3000) == Sctp_Status::OK
-        && b.await_established_association(b_to_a, 3000) == Sctp_Status::OK;
+    return await_established(a, a_to_b, 3000) == Sctp_Status::OK
+        && await_established(b, b_to_a, 3000) == Sctp_Status::OK;
 }
 
 void test_shutdown_delivers_everything() {
@@ -132,7 +104,6 @@ void test_shutdown_delivers_everything() {
     if (!pair_up(a, 39711, b, 39712, a_to_b, b_to_a)) {
         check(false, "association established"); return;
     }
-    b.sctp_subscribe(Notification_Type::SCTP_SHUTDOWN_EVENT, true);
 
     for (int i = 0; i < MESSAGES; ++i) {
         b.sctp_send_data(b_to_a, message('b', i));
@@ -143,8 +114,6 @@ void test_shutdown_delivers_everything() {
     a.sctp_shutdown(a_to_b);
     a.sctp_send_data(a_to_b, message('x', 0));
 
-    check(await_notification(b, Notification_Type::SCTP_SHUTDOWN_EVENT, Assoc_Change_State::COMM_UP),
-          "the peer is told a shutdown has begun");
     check(await_notification(a, Notification_Type::SCTP_ASSOC_CHANGE, Assoc_Change_State::SHUTDOWN_COMP),
           "the initiator reports SHUTDOWN_COMP");
     check(await_notification(b, Notification_Type::SCTP_ASSOC_CHANGE, Assoc_Change_State::SHUTDOWN_COMP),
@@ -159,60 +128,13 @@ void test_shutdown_delivers_everything() {
     check(b.sctp_recv_data_from(b_to_a, buffer) == 0, "a send made after SHUTDOWN was refused");
 }
 
-void test_close_is_graceful() {
-    std::printf("sctp_close shuts associations down gracefully:\n");
-    SCTP_Socket a, b;
-    Association_Key a_to_b{}, b_to_a{};
-    if (!pair_up(a, 39713, b, 39714, a_to_b, b_to_a)) {
-        check(false, "association established"); return;
-    }
-    for (int i = 0; i < 10; ++i) {
-        a.sctp_send_data(a_to_b, message('a', i));
-    }
-
-    auto started = Clock::now();
-    a.sctp_close();
-    auto took = Clock::now() - started;
-    check(took < std::chrono::seconds(2), "close returns once the shutdown completes, well inside the linger");
-    check(await_notification(b, Notification_Type::SCTP_ASSOC_CHANGE, Assoc_Change_State::SHUTDOWN_COMP),
-          "the peer sees a graceful SHUTDOWN_COMP, not an ABORT");
-    check(await_empty(b), "the peer's association is gone");
-    check(in_order(read_all(b, b_to_a, 10), 'a', 10), "data sent just before close still arrives");
-}
-
-void test_close_aborts_after_linger() {
-    std::printf("sctp_close with an unresponsive peer:\n");
-    SCTP_Socket a, b;
-    Association_Key a_to_b{}, b_to_a{};
-    if (!pair_up(a, 39715, b, 39716, a_to_b, b_to_a)) {
-        check(false, "association established"); return;
-    }
-    Access::silence(b);
-
-    auto started = Clock::now();
-    a.sctp_close(300);
-    auto took = Clock::now() - started;
-    check(took >= std::chrono::milliseconds(300) && took < std::chrono::seconds(2), "close waits out the linger and no longer");
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    auto packets = Access::drain_socket(b);
-    bool shutdown_first = !packets.empty() && packets.front().chunks.at(0).chunk_header.type == SHUTDOWN;
-    const SCTP_Chunk* last = packets.empty() ? nullptr : &packets.back().chunks.at(0);
-    bool aborted = last && last->chunk_header.type == ABORT
-        && std::get<error_chunk_value>(last->chunk_value).causes.size() == 1
-        && std::get<error_chunk_value>(last->chunk_value).causes[0].code == CAUSE_USER_INITIATED_ABORT;
-    check(shutdown_first, "a SHUTDOWN was tried first");
-    check(aborted, "then an ABORT with User-Initiated Abort reached the wire before the loop stopped");
-}
-
-void test_close_with_zero_linger() {
-    std::printf("sctp_close with a linger of 0:\n");
+void test_close_aborts() {
+    std::printf("sctp_close:\n");
     SCTP_Socket a, b;
     Association_Key a_to_b{}, b_to_a{};
     if (!pair_up(a, 39717, b, 39718, a_to_b, b_to_a)) {
         check(false, "association established"); return;
     }
-    a.sctp_set_linger(0);
 
     auto started = Clock::now();
     a.sctp_close();
@@ -240,9 +162,7 @@ void test_close_mid_handshake() {
 
 int main() {
     test_shutdown_delivers_everything();
-    test_close_is_graceful();
-    test_close_aborts_after_linger();
-    test_close_with_zero_linger();
+    test_close_aborts();
     test_close_mid_handshake();
 
     if (failures) {

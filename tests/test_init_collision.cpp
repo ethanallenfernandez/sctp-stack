@@ -13,6 +13,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "test_support.hpp"
 
 struct SCTP_Socket_Test_Access {
     // Set before sctp_run: the event loop reads the clock.
@@ -157,7 +158,7 @@ bool recv_cookie_ack(RawPeer& peer, uint32_t& vtag, int timeout_ms = 2000) {
 }
 
 bool assoc_change(SCTP_Socket& stack, Assoc_Change_State state) {
-    auto notification = stack.sctp_recv_notification(500);
+    auto notification = notification_wait(stack, 500);
     const auto* change = notification ? std::get_if<Assoc_Change>(&notification->payload) : nullptr;
     return change != nullptr && change->state == state;
 }
@@ -173,7 +174,6 @@ void settle() {
 }
 
 bool start(SCTP_Socket& stack, uint16_t port) {
-    stack.sctp_set_linger(0); // the raw peer never answers a SHUTDOWN
     return stack.sctp_bind("127.0.0.1", port) && stack.sctp_run();
 }
 
@@ -210,7 +210,7 @@ void test_init_in_cookie_wait() {
     peer.send_echo(our_init.initiate_tag, ack.cookie);
     uint32_t vtag = 0;
     check(recv_cookie_ack(peer, vtag) && vtag == PEER_TAG, "COOKIE ACK sent under the peer's tag (B)");
-    check(stack.await_established_association(key, 1000) == Sctp_Status::OK, "association is ESTABLISHED");
+    check(await_established(stack, key, 1000) == Sctp_Status::OK, "association is ESTABLISHED");
     check(SCTP_Socket_Test_Access::snapshot(stack, PEER_PORT, tcb) && tcb.peer_ver_tag == PEER_TAG,
           "peer tag adopted from the cookie");
 
@@ -257,7 +257,7 @@ void test_init_in_cookie_echoed() {
     peer.send_echo(our_init.initiate_tag, ack.cookie);
     uint32_t vtag = 0;
     check(recv_cookie_ack(peer, vtag) && vtag == PEER_TAG_2, "COOKIE ACK sent under the new peer tag (B)");
-    check(stack.await_established_association(key, 1000) == Sctp_Status::OK, "association is ESTABLISHED");
+    check(await_established(stack, key, 1000) == Sctp_Status::OK, "association is ESTABLISHED");
     check(SCTP_Socket_Test_Access::snapshot(stack, PEER_PORT, tcb) && tcb.peer_ver_tag == PEER_TAG_2,
           "peer tag updated from the cookie");
 }
@@ -343,7 +343,7 @@ void test_stale_cookie_for_the_live_association() {
     SCTP_Packet reply;
     check(peer.recv_type(COOKIE_ACK, reply, 1000) && reply.header.verification_tag == PEER_TAG,
           "the stale cookie is answered with a COOKIE ACK, not a Stale Cookie ERROR");
-    check(!stack.sctp_recv_notification(200), "and nothing is reported to the ULP");
+    check(!notification_wait(stack, 200), "and nothing is reported to the ULP");
 
     Association tcb;
     SCTP_Socket_Test_Access::snapshot(stack, PEER_PORT, tcb);
@@ -402,8 +402,8 @@ void test_simultaneous_open() {
     a.sctp_associate("127.0.0.1", PORT_B, to_b);
     Association_Key to_a;
     b.sctp_associate("127.0.0.1", PORT_A, to_a);
-    check(a.await_established_association(to_b, 3000) == Sctp_Status::OK, "A reached ESTABLISHED");
-    check(b.await_established_association(to_a, 3000) == Sctp_Status::OK, "B reached ESTABLISHED");
+    check(await_established(a, to_b, 3000) == Sctp_Status::OK, "A reached ESTABLISHED");
+    check(await_established(b, to_a, 3000) == Sctp_Status::OK, "B reached ESTABLISHED");
 
     Association at_a, at_b;
     SCTP_Socket_Test_Access::snapshot(a, PORT_B, at_a);

@@ -338,7 +338,6 @@ void test_unanswered_probes_end_the_association() {
     std::printf("A peer that stops answering (8.1):\n");
 
     SCTP_Socket stack;
-    stack.sctp_subscribe(Notification_Type::SCTP_ASSOC_CHANGE, true);
     Association_Key key{peer_address()};
     Access::establish(stack, key);
 
@@ -434,7 +433,6 @@ void test_ack_confirms_the_path_it_names() {
     std::printf("A HEARTBEAT ACK for an UNCONFIRMED path, arriving over another:\n");
 
     SCTP_Socket stack;
-    stack.sctp_subscribe(Notification_Type::SCTP_PEER_ADDR_CHANGE, true);
     Association_Key key{peer_address()};
     Access::establish(stack, key);
     Access::add_paths(stack, key, {second_address()});
@@ -481,7 +479,6 @@ void test_unconfirmed_path_that_never_answers() {
     std::printf("An UNCONFIRMED path that never answers:\n");
 
     SCTP_Socket stack;
-    stack.sctp_subscribe(Notification_Type::SCTP_PEER_ADDR_CHANGE, true);
     Association_Key key{peer_address()};
     Access::establish(stack, key);
     Access::add_paths(stack, key, {second_address(), third_address()});
@@ -507,7 +504,6 @@ void test_alternate_path_failure_and_recovery() {
     std::printf("A CONFIRMED alternate path that stops answering (8.2, 8.3):\n");
 
     SCTP_Socket stack;
-    stack.sctp_subscribe(Notification_Type::SCTP_PEER_ADDR_CHANGE, true);
     Association_Key key{peer_address()};
     Access::establish(stack, key);
     Access::add_paths(stack, key, {second_address()});

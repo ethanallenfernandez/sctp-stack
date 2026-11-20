@@ -91,7 +91,7 @@ void test_send() {
     SCTP_Socket stack;
     Association_Key key = Access::establish(stack);
 
-    stack.sctp_send_data(key, std::vector<uint8_t>(2 * FRAGMENT_SIZE + 1, 'm'), 0, false, 0, 0xDEADBEEF);
+    stack.sctp_send_data(key, std::vector<uint8_t>(2 * FRAGMENT_SIZE + 1, 'm'), 0, false, 0xDEADBEEF);
     stack.sctp_send_data(key, {'d'});
     auto sent = Access::drain(stack);
     check(sent.size() == 4 && sent[0].payload_protocal == 0xDEADBEEF && sent[1].payload_protocal == 0xDEADBEEF
@@ -113,12 +113,12 @@ void test_receive() {
     Access::deliver(stack, 1, 3, 0, 7, "st", DATA_FLAG_E);
     Access::deliver(stack, 3, 1, 0, 11, "unordered", DATA_FLAG_U | DATA_FLAG_B | DATA_FLAG_E);
 
-    size_t n = stack.sctp_recv_data_from(key, buffer, nullptr, &stream, 0, &ppid);
+    size_t n = stack.sctp_recv_data_from(key, buffer, nullptr, &stream, &ppid);
     check(n == 5 && std::string(buffer.begin(), buffer.begin() + 5) == "first" && ppid == 7 && stream == 3,
           "a reassembled message goes up with its PPID");
-    n = stack.sctp_recv_data_from(key, buffer, nullptr, nullptr, 0, &ppid);
+    n = stack.sctp_recv_data_from(key, buffer, nullptr, nullptr, &ppid);
     check(n == 6 && ppid == 9, "so does one completed early and held for ordering");
-    n = stack.sctp_recv_data(buffer, &from, nullptr, nullptr, 0, &ppid);
+    n = stack.sctp_recv_data(buffer, &from, nullptr, nullptr, &ppid);
     check(n == 9 && ppid == 11 && from == key, "and an unordered one");
 }
 

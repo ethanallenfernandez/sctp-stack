@@ -57,6 +57,7 @@ int main() {
 #include <mutex>
 #include <optional>
 #include <thread>
+#include "test_support.hpp"
 
 using Clock = std::chrono::steady_clock;
 
@@ -442,7 +443,7 @@ std::optional<Assoc_Change_State> next_assoc_change(SCTP_Socket& stack, Associat
     auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
     while (Clock::now() < deadline) {
         auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now());
-        auto n = stack.sctp_recv_notification(static_cast<int>(std::max<int64_t>(remaining.count(), 1)));
+        auto n = notification_wait(stack, static_cast<int>(std::max<int64_t>(remaining.count(), 1)));
         if (!n) continue;
         if (n->type == Notification_Type::SCTP_REMOTE_ERROR) {
             const auto& causes = std::get<Remote_Error>(n->payload).causes;
@@ -486,7 +487,7 @@ bool await_empty(SCTP_Socket& stack, int timeout_ms = TIMEOUT_MS) {
 // We initiate; returns the kernel's accepted socket, or -1.
 int associate_to_kernel(SCTP_Socket& stack, int listener, Association_Key& key) {
     stack.sctp_associate("127.0.0.1", KERNEL_PORT, key);
-    bool up = stack.await_established_association(key, TIMEOUT_MS) == Sctp_Status::OK;
+    bool up = await_established(stack, key, TIMEOUT_MS) == Sctp_Status::OK;
     int fd = up ? ::accept(listener, nullptr, nullptr) : -1;
     if (fd >= 0) set_timeouts(fd, TIMEOUT_MS);
     auto change = next_assoc_change(stack);
@@ -682,7 +683,7 @@ void phase_heartbeat(SCTP_Socket& stack, const Association_Key& key, int fd) {
           && st.sstat_primary.spinfo_state == SCTP_ACTIVE,
           "after 3 s idle the kernel still has us ESTABLISHED and ACTIVE");
     check(acks >= 3, "kernel received " + std::to_string(acks) + " control chunks while idle (our HEARTBEAT ACKs)");
-    check(Access::association_count(stack) == 1 && !stack.sctp_recv_notification(0), "no change on our side");
+    check(Access::association_count(stack) == 1 && !stack.sctp_recv_notification(), "no change on our side");
 
     auto in = text("after heartbeats");
     kernel_send(fd, in);
@@ -822,7 +823,7 @@ void phase_distinct_ports(SCTP_Socket& stack) {
     }
     Association_Key key;
     stack.sctp_associate("127.0.0.1", LISTEN_PORT, key, KERNEL_PORT);
-    bool up = stack.await_established_association(key, TIMEOUT_MS) == Sctp_Status::OK;
+    bool up = await_established(stack, key, TIMEOUT_MS) == Sctp_Status::OK;
     int fd = up ? ::accept(listener, nullptr, nullptr) : -1;
     ::close(listener);
     check(up && fd >= 0, "we associate to SCTP port 5001 through UDP port 9899");
@@ -904,7 +905,6 @@ int main() {
     }
 
     SCTP_Socket stack;
-    stack.sctp_subscribe(Notification_Type::SCTP_REMOTE_ERROR, true);
     if (!stack.sctp_bind("127.0.0.1", OUR_PORT) || !stack.sctp_run()) {
         std::printf("  [FAIL] start our stack on %u\n", OUR_PORT);
         return 1;
@@ -932,7 +932,7 @@ int main() {
     phase_kernel_initiates(stack);
     phase_distinct_ports(stack);
 
-    stack.sctp_close(1000);
+    stack.sctp_close();
 
     section("Kernel counters");
     auto snmp_after = sctp_snmp();

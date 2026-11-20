@@ -64,8 +64,6 @@ enum Chunk_Type : uint8_t {
     OP_ERROR = 9,
     COOKIE_ECHO = 10,
     COOKIE_ACK = 11,
-    ECNE = 12,
-    CWR = 13, 
     SHUTDOWN_COMPLETE = 14,
     PAD = 0x84, // RFC 4820
 };

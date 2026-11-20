@@ -6,12 +6,12 @@
 #include <sctp/notification_queue.hpp>
 #include "serialize.hpp"
 
-#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <string>
 #include <thread>
 #include <vector>
+#include "test_support.hpp"
 
 namespace {
 
@@ -36,9 +36,9 @@ Association_Key peer_key() {
 
 Notification event(Notification_Type type) {
     if (type == Notification_Type::SCTP_ASSOC_CHANGE) {
-        return Notification{type, peer_key(), 0, Assoc_Change{Assoc_Change_State::COMM_UP}};
+        return Notification{type, peer_key(), Assoc_Change{Assoc_Change_State::COMM_UP}};
     }
-    return Notification{type, peer_key(), 0, Remote_Error{{error_cause{CAUSE_PROTOCOL_VIOLATION, {}}}}};
+    return Notification{type, peer_key(), Remote_Error{{error_cause{CAUSE_PROTOCOL_VIOLATION, {}}}}};
 }
 
 bool is_assoc_change(const std::optional<Notification>& n, Assoc_Change_State state) {
@@ -85,25 +85,9 @@ namespace {
 
 using Access = SCTP_Socket_Test_Access;
 
-void test_queue_subscription() {
-    std::printf("Subscriptions:\n");
-    Notification_Queue queue;
-
-    check(queue.is_subscribed(Notification_Type::SCTP_ASSOC_CHANGE), "ASSOC_CHANGE is on by default");
-    check(!queue.is_subscribed(Notification_Type::SCTP_REMOTE_ERROR), "REMOTE_ERROR is off by default");
-
-    queue.enqueue(event(Notification_Type::SCTP_REMOTE_ERROR));
-    check(queue.size() == 0, "unsubscribed event is not stored");
-
-    queue.set_subscribed(Notification_Type::SCTP_REMOTE_ERROR, true);
-    queue.enqueue(event(Notification_Type::SCTP_REMOTE_ERROR));
-    check(queue.size() == 1, "subscribed event is stored");
-}
-
 void test_queue_order() {
     std::printf("Ordering:\n");
     Notification_Queue queue;
-    queue.set_subscribed(Notification_Type::SCTP_REMOTE_ERROR, true);
 
     queue.enqueue(event(Notification_Type::SCTP_ASSOC_CHANGE));
     queue.enqueue(event(Notification_Type::SCTP_REMOTE_ERROR));
@@ -114,68 +98,17 @@ void test_queue_order() {
     auto c = queue.dequeue();
     check(a && b && c, "three events dequeued");
     if (a && b && c) {
-        check(a->type == Notification_Type::SCTP_ASSOC_CHANGE && b->type == Notification_Type::SCTP_REMOTE_ERROR,
+        check(a->type == Notification_Type::SCTP_ASSOC_CHANGE && b->type == Notification_Type::SCTP_REMOTE_ERROR
+                  && c->type == Notification_Type::SCTP_ASSOC_CHANGE,
               "FIFO order");
-        check(a->sequence_number < b->sequence_number && b->sequence_number < c->sequence_number,
-              "sequence numbers increase");
     }
     check(!queue.dequeue(), "empty queue returns nullopt");
-}
-
-void test_queue_cap() {
-    std::printf("Cap:\n");
-    Notification_Queue queue;
-    queue.set_subscribed(Notification_Type::SCTP_REMOTE_ERROR, true);
-
-    for (size_t i = 0; i < MAX_QUEUED_NOTIFICATIONS + 10; ++i) {
-        queue.enqueue(event(Notification_Type::SCTP_REMOTE_ERROR));
-    }
-    check(queue.size() == MAX_QUEUED_NOTIFICATIONS, "REMOTE_ERROR stops at the cap");
-    check(queue.dropped() == 10, "drops are counted");
-
-    queue.enqueue(event(Notification_Type::SCTP_ASSOC_CHANGE));
-    check(queue.size() == MAX_QUEUED_NOTIFICATIONS + 1, "ASSOC_CHANGE is kept past the cap");
-    check(queue.dropped() == 10, "and is not counted as a drop");
-}
-
-void test_queue_blocking() {
-    std::printf("Blocking dequeue:\n");
-    Notification_Queue queue;
-
-    auto start = std::chrono::steady_clock::now();
-    check(!queue.wait_dequeue(std::chrono::milliseconds(50)), "times out on an empty queue");
-    check(std::chrono::steady_clock::now() - start >= std::chrono::milliseconds(45), "and waits for the timeout");
-
-    std::thread producer([&] {
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        queue.enqueue(event(Notification_Type::SCTP_ASSOC_CHANGE));
-    });
-    check(queue.wait_dequeue(std::chrono::seconds(5)).has_value(), "wakes when an event arrives");
-    producer.join();
-
-    std::atomic<bool> returned{false};
-    std::thread waiter([&] {
-        queue.wait_dequeue(std::chrono::seconds(30));
-        returned = true;
-    });
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    start = std::chrono::steady_clock::now();
-    queue.close();
-    waiter.join();
-    check(returned && std::chrono::steady_clock::now() - start < std::chrono::seconds(5), "close() releases a waiter");
-
-    queue.enqueue(event(Notification_Type::SCTP_ASSOC_CHANGE));
-    check(queue.wait_dequeue(std::chrono::seconds(30)).has_value(), "events queued after close are still readable");
-    start = std::chrono::steady_clock::now();
-    check(!queue.wait_dequeue(std::chrono::seconds(30)), "empty and closed returns immediately");
-    check(std::chrono::steady_clock::now() - start < std::chrono::seconds(5), "without waiting for the timeout");
 }
 
 void test_remote_error() {
     std::printf("ERROR chunk -> REMOTE_ERROR:\n");
 
     SCTP_Socket stack;
-    stack.sctp_subscribe(Notification_Type::SCTP_REMOTE_ERROR, true);
     Access::add_association(stack, ESTABLISHED);
 
     error_chunk_value error;
@@ -205,7 +138,6 @@ void test_error_while_echoed() {
     std::printf("ERROR in COOKIE_ECHOED:\n");
 
     SCTP_Socket stack;
-    stack.sctp_subscribe(Notification_Type::SCTP_REMOTE_ERROR, true);
     Access::add_association(stack, COOKIE_ECHOED);
 
     Access::receive(stack, error_chunk_value{{error_cause{CAUSE_PROTOCOL_VIOLATION, {}}}});
@@ -240,12 +172,12 @@ void test_handshake_comm_up() {
 
     Association_Key key;
     client.sctp_associate("127.0.0.1", 47102, key);
-    auto client_event = client.sctp_recv_notification(5000);
-    auto server_event = server.sctp_recv_notification(5000);
+    auto client_event = notification_wait(client, 5000);
+    auto server_event = notification_wait(server, 5000);
     check(is_assoc_change(client_event, Assoc_Change_State::COMM_UP), "initiator gets COMM_UP");
     check(client_event && client_event->src == key, "keyed on the association");
     check(is_assoc_change(server_event, Assoc_Change_State::COMM_UP), "responder gets COMM_UP");
-    check(!client.sctp_recv_notification(100) && !server.sctp_recv_notification(100), "exactly one each");
+    check(!notification_wait(client, 100) && !notification_wait(server, 100), "exactly one each");
 
     client.sctp_close();
     server.sctp_close();
@@ -254,10 +186,7 @@ void test_handshake_comm_up() {
 } // namespace
 
 int main() {
-    test_queue_subscription();
     test_queue_order();
-    test_queue_cap();
-    test_queue_blocking();
     test_remote_error();
     test_error_while_echoed();
     test_handshake_comm_up();

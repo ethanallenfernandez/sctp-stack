@@ -28,6 +28,11 @@ sockaddr_in peer_address() {
 } // namespace
 
 struct SCTP_Socket_Test_Access {
+    static size_t messages(SCTP_Socket& stack, const Association_Key& key) {
+        auto it = stack.receives.pending.find(key);
+        return it == stack.receives.pending.end() ? 0 : it->second.messages.size();
+    }
+
     struct Result {
         size_t delivered;
         std::vector<SCTP_Packet> errors;
@@ -56,7 +61,7 @@ struct SCTP_Socket_Test_Access {
         stack.handle_recv_packet(wire.data(), wire.size(), src);
 
         Result result{0, {}};
-        result.delivered = stack.receives.messages(key);
+        result.delivered = messages(stack, key);
         auto now = std::chrono::steady_clock::now();
         while (auto pending = stack.sends.peek(now)) {
             const SCTP_Packet& sent = pending->deliverable.packet;

@@ -15,6 +15,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "test_support.hpp"
 
 struct SCTP_Socket_Test_Access {
     static size_t association_count(SCTP_Socket& stack) {
@@ -132,7 +133,7 @@ void test_init_flood_allocates_nothing() {
     }
     Association_Key key;
     client.sctp_associate("127.0.0.1", STACK_PORT, key);
-    check(client.await_established_association(key, 3000) == Sctp_Status::OK,
+    check(await_established(client, key, 3000) == Sctp_Status::OK,
           "a real handshake still completes after the flood");
     check(SCTP_Socket_Test_Access::association_count(stack) == 1,
           "and allocates exactly one association");
@@ -155,7 +156,6 @@ void test_cookie_echo_does_not_bypass_tag_check() {
     constexpr uint32_t WRONG_TAG = 0xBADBAD00;
 
     SCTP_Socket stack;
-    stack.sctp_set_linger(0); // the raw peer never answers a SHUTDOWN
     if (!stack.sctp_bind("127.0.0.1", STACK_PORT) || !stack.sctp_run()) {
         check(false, "stack started"); return;
     }

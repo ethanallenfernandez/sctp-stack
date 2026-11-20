@@ -13,6 +13,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "test_support.hpp"
 
 namespace {
 
@@ -165,7 +166,7 @@ struct RawPeer {
         send(cookie_ack);
 
         Association_Key key{self};
-        return stack.await_established_association(key, 1000) == Sctp_Status::OK;
+        return await_established(stack, key, 1000) == Sctp_Status::OK;
     }
 
     void send_sack(
@@ -222,7 +223,6 @@ bool setup(SCTP_Socket& stack, RawPeer& peer, Association_Key& key) {
     if (!peer.open()) {
         return false;
     }
-    stack.sctp_set_linger(0); // the raw peer never answers a SHUTDOWN
     if (!stack.sctp_bind("127.0.0.1", STACK_PORT)
             || !stack.sctp_run()) {
         return false;

@@ -61,6 +61,11 @@ const SCTP_Chunk* first_chunk(const std::vector<SCTP_Packet>& sent, Chunk_Type t
 } // namespace
 
 struct SCTP_Socket_Test_Access {
+    static size_t messages(SCTP_Socket& stack, const Association_Key& key) {
+        auto it = stack.receives.pending.find(key);
+        return it == stack.receives.pending.end() ? 0 : it->second.messages.size();
+    }
+
     SCTP_Socket stack;
 
     SCTP_Socket_Test_Access() {
@@ -79,7 +84,7 @@ struct SCTP_Socket_Test_Access {
     }
 
     size_t delivered() {
-        return stack.receives.messages(peer_key());
+        return messages(stack, peer_key());
     }
 
     Association* find() {
