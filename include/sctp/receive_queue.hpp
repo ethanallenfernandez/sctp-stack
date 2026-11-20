@@ -33,9 +33,10 @@ class Receive_Queue {
             // More of this message remains, queued or yet to arrive.
             bool partial;
             uint16_t stream;
+            uint32_t ppid;
         };
 
-        void push(const Association_Key& key, std::vector<uint8_t> bytes, bool complete = true, uint16_t stream = 0);
+        void push(const Association_Key& key, std::vector<uint8_t> bytes, bool complete = true, uint16_t stream = 0, uint32_t ppid = 0);
         // Each waits up to timeout for a message, or until close().
         std::optional<Read> read_any(uint8_t* out, size_t capacity, std::chrono::milliseconds timeout = {});
         std::optional<Read> read_from(const Association_Key& key, uint8_t* out, size_t capacity, std::chrono::milliseconds timeout = {});
@@ -57,6 +58,7 @@ class Receive_Queue {
             size_t offset;
             bool complete;
             uint16_t stream;
+            uint32_t ppid;
         };
 
         struct Pending {

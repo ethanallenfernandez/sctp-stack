@@ -68,17 +68,19 @@ public:
     // Refused if the stream is not one the association negotiated. An unordered
     // message takes no SSN and may be delivered ahead of others on its stream.
     // With a timeout, waits that long for room rather than returning QUEUE_FULL.
-    Sctp_Status sctp_send_data(const sockaddr_in& association_id, const std::vector<uint8_t>& data, uint16_t stream = 0, bool unordered = false, int timeout_ms = 0);
-    Sctp_Status sctp_send_data(const Association_Key& association_id, const std::vector<uint8_t>& data, uint16_t stream = 0, bool unordered = false, int timeout_ms = 0);
+    // ppid goes on every DATA chunk of the message, unchanged.
+    Sctp_Status sctp_send_data(const sockaddr_in& association_id, const std::vector<uint8_t>& data, uint16_t stream = 0, bool unordered = false, int timeout_ms = 0, uint32_t ppid = 0);
+    Sctp_Status sctp_send_data(const Association_Key& association_id, const std::vector<uint8_t>& data, uint16_t stream = 0, bool unordered = false, int timeout_ms = 0, uint32_t ppid = 0);
     Sctp_Status sctp_abort(const sockaddr_in& association_id, const std::vector<uint8_t>& reason = {});
     Sctp_Status sctp_abort(const Association_Key& association_id, const std::vector<uint8_t>& reason = {});
     // Reads at most one message. *out_partial is set when more of it remains: the
     // buffer was too small, or the message is being handed up before all of it
     // has arrived. The rest is returned by the following reads. With a timeout,
-    // waits that long for a message.
-    size_t sctp_recv_data(std::vector<uint8_t>& buffer, Association_Key* out_association_id = nullptr, bool* out_partial = nullptr, uint16_t* out_stream = nullptr, int timeout_ms = 0);
-    size_t sctp_recv_data_from(const sockaddr_in& association_id, std::vector<uint8_t>& buffer, bool* out_partial = nullptr, uint16_t* out_stream = nullptr, int timeout_ms = 0);
-    size_t sctp_recv_data_from(const Association_Key& association_id, std::vector<uint8_t>& buffer, bool* out_partial = nullptr, uint16_t* out_stream = nullptr, int timeout_ms = 0);
+    // waits that long for a message. *out_ppid is the message's Payload
+    // Protocol Identifier, as the peer sent it.
+    size_t sctp_recv_data(std::vector<uint8_t>& buffer, Association_Key* out_association_id = nullptr, bool* out_partial = nullptr, uint16_t* out_stream = nullptr, int timeout_ms = 0, uint32_t* out_ppid = nullptr);
+    size_t sctp_recv_data_from(const sockaddr_in& association_id, std::vector<uint8_t>& buffer, bool* out_partial = nullptr, uint16_t* out_stream = nullptr, int timeout_ms = 0, uint32_t* out_ppid = nullptr);
+    size_t sctp_recv_data_from(const Association_Key& association_id, std::vector<uint8_t>& buffer, bool* out_partial = nullptr, uint16_t* out_stream = nullptr, int timeout_ms = 0, uint32_t* out_ppid = nullptr);
     // SHUTTING_DOWN if a shutdown is already under way.
     Sctp_Status sctp_shutdown(const sockaddr_in& association_id);
     Sctp_Status sctp_shutdown(const Association_Key& association_id);

@@ -150,7 +150,7 @@ namespace {
                 .tsn = assoc.next_tsn++,
                 .stream_identifier = message.stream,
                 .stream_seq_num = message.ssn,
-                .payload_protocal = 0,
+                .payload_protocal = message.ppid,
                 .user_data = std::vector<uint8_t>(begin, begin + static_cast<long>(take)),
                 .flags = flags,
             });

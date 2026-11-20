@@ -29,8 +29,8 @@ namespace {
             (void)tsn;
         }
         for (const auto& [id, stream] : assoc.inbound_streams) {
-            for (const auto& [ssn, bytes] : stream.early) {
-                total += bytes.size();
+            for (const auto& [ssn, early] : stream.early) {
+                total += early.bytes.size();
                 (void)ssn;
             }
             (void)id;
@@ -114,23 +114,24 @@ namespace {
         Inbound_Stream& stream = assoc.inbound_streams[stream_id];
         ++stream.next_ssn;
         for (auto next = stream.early.find(stream.next_ssn); next != stream.early.end(); next = stream.early.find(++stream.next_ssn)) {
-            hand_up(assoc, Delivery{std::move(next->second), true, stream_id}, delivered);
+            hand_up(assoc, std::move(next->second), delivered);
             stream.early.erase(next);
         }
     }
 
     // False if the SSN was already delivered or is already waiting: the peer
     // reused it.
-    bool order_message(Association& assoc, uint16_t stream_id, uint16_t ssn, bool unordered, std::vector<uint8_t> bytes, std::vector<Delivery>& delivered) {
+    bool order_message(Association& assoc, uint16_t stream_id, uint16_t ssn, bool unordered, std::vector<uint8_t> bytes, uint32_t ppid, std::vector<Delivery>& delivered) {
+        Delivery message{std::move(bytes), true, stream_id, ppid};
         if (unordered) {
-            hand_up(assoc, Delivery{std::move(bytes), true, stream_id}, delivered);
+            hand_up(assoc, std::move(message), delivered);
             return true;
         }
         Inbound_Stream& stream = assoc.inbound_streams[stream_id];
         if (ssn != stream.next_ssn) {
-            return ssn_gt(ssn, stream.next_ssn) && stream.early.emplace(ssn, std::move(bytes)).second;
+            return ssn_gt(ssn, stream.next_ssn) && stream.early.emplace(ssn, std::move(message)).second;
         }
-        hand_up(assoc, Delivery{std::move(bytes), true, stream_id}, delivered);
+        hand_up(assoc, std::move(message), delivered);
         advance_stream(assoc, stream_id, delivered);
         return true;
     }
@@ -148,7 +149,7 @@ namespace {
             return false;
         }
         if (begins) {
-            message = Reassembly{true, false, unordered, data.stream_identifier, data.stream_seq_num, {}};
+            message = Reassembly{true, false, unordered, data.stream_identifier, data.stream_seq_num, data.payload_protocal, {}};
         } else if (data.stream_identifier != message.stream || unordered != message.unordered
                 || (!unordered && data.stream_seq_num != message.ssn)) {
             return false;
@@ -159,7 +160,7 @@ namespace {
         }
         message.bytes.insert(message.bytes.end(), data.user_data.begin(), data.user_data.end());
         if (message.partially_delivered) {
-            delivered.push_back(Delivery{std::move(message.bytes), ends, message.stream});
+            delivered.push_back(Delivery{std::move(message.bytes), ends, message.stream, message.ppid});
             message.bytes.clear();
             if (ends) {
                 std::move(assoc.held_deliveries.begin(), assoc.held_deliveries.end(), std::back_inserter(delivered));
@@ -172,7 +173,7 @@ namespace {
         }
         std::vector<uint8_t> bytes = std::move(message.bytes);
         message.bytes.clear();
-        return order_message(assoc, message.stream, message.ssn, message.unordered, std::move(bytes), delivered);
+        return order_message(assoc, message.stream, message.ssn, message.unordered, std::move(bytes), message.ppid, delivered);
     }
 
     // A message lying wholly above the Cumulative TSN Ack is taken out as soon
@@ -213,6 +214,7 @@ namespace {
             ++last;
         }
 
+        uint32_t ppid = usable(first)->payload_protocal;
         std::vector<uint8_t> bytes;
         for (uint32_t at = first;; ++at) {
             Held_Chunk& held = assoc.tsn_ooo_buffer.at(at);
@@ -223,7 +225,7 @@ namespace {
                 break;
             }
         }
-        return order_message(assoc, stream, ssn, unordered, std::move(bytes), delivered);
+        return order_message(assoc, stream, ssn, unordered, std::move(bytes), ppid, delivered);
     }
 
     // Leading reports win: keeps as many as fit in room, each costing per_report on top of its size.
@@ -1802,7 +1804,7 @@ void SCTP_Socket::handle_data_packet(
         Reassembly& message = assoc.reassembly;
         if (message.open && !message.bytes.empty() && used + amdcs(assoc) > RWND
                 && (message.unordered || message.ssn == assoc.inbound_streams[message.stream].next_ssn)) {
-            delivered.push_back(Delivery{std::move(message.bytes), false, message.stream});
+            delivered.push_back(Delivery{std::move(message.bytes), false, message.stream, message.ppid});
             message.bytes.clear();
             message.partially_delivered = true;
             if (!message.unordered) {
@@ -1832,7 +1834,7 @@ void SCTP_Socket::handle_data_packet(
         return;
     }
     for (auto& delivery : delivered) {
-        receives.push(key, std::move(delivery.bytes), delivery.complete, delivery.stream);
+        receives.push(key, std::move(delivery.bytes), delivery.complete, delivery.stream, delivery.ppid);
     }
     if (!invalid_streams.empty()) {
         send_error(packet.header, key, reply_to, peer_tag, std::move(invalid_streams));

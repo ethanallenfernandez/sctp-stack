@@ -483,12 +483,12 @@ Sctp_Status SCTP_Socket::await_established_association(const Association_Key& as
     return status;
 }
 
-Sctp_Status SCTP_Socket::sctp_send_data(const sockaddr_in& association_id, const std::vector<uint8_t>& data, uint16_t stream, bool unordered, int timeout_ms) {
+Sctp_Status SCTP_Socket::sctp_send_data(const sockaddr_in& association_id, const std::vector<uint8_t>& data, uint16_t stream, bool unordered, int timeout_ms, uint32_t ppid) {
     Association_Key key{association_id};
-    return sctp_send_data(key, data, stream, unordered, timeout_ms);
+    return sctp_send_data(key, data, stream, unordered, timeout_ms, ppid);
 }
 
-Sctp_Status SCTP_Socket::sctp_send_data(const Association_Key& association_id, const std::vector<uint8_t>& data, uint16_t stream, bool unordered, int timeout_ms) {
+Sctp_Status SCTP_Socket::sctp_send_data(const Association_Key& association_id, const std::vector<uint8_t>& data, uint16_t stream, bool unordered, int timeout_ms, uint32_t ppid) {
     {
         std::unique_lock<std::mutex> assoc_lock(associations_mutex);
         Sctp_Status status = Sctp_Status::OK;
@@ -514,7 +514,7 @@ Sctp_Status SCTP_Socket::sctp_send_data(const Association_Key& association_id, c
         }
         Association& assoc = associations.at(association_id);
         uint16_t ssn = unordered ? 0 : assoc.next_ssn[stream]++;
-        assoc.outbound.push_back(Outbound_Message{stream, ssn, unordered, data});
+        assoc.outbound.push_back(Outbound_Message{stream, ssn, unordered, data, 0, ppid});
         assoc.outbound_bytes += data.size();
     }
     wake_event_loop();
@@ -568,7 +568,7 @@ Sctp_Status SCTP_Socket::sctp_abort(const Association_Key& association_id, const
 
 
 
-size_t SCTP_Socket::sctp_recv_data(std::vector<uint8_t>& buffer, Association_Key* out_association_id, bool* out_partial, uint16_t* out_stream, int timeout_ms) {
+size_t SCTP_Socket::sctp_recv_data(std::vector<uint8_t>& buffer, Association_Key* out_association_id, bool* out_partial, uint16_t* out_stream, int timeout_ms, uint32_t* out_ppid) {
     auto read = receives.read_any(buffer.data(), buffer.size(), std::chrono::milliseconds(std::max(timeout_ms, 0)));
     if (!read) {
         return 0;
@@ -582,16 +582,19 @@ size_t SCTP_Socket::sctp_recv_data(std::vector<uint8_t>& buffer, Association_Key
     if (out_stream) {
         *out_stream = read->stream;
     }
+    if (out_ppid) {
+        *out_ppid = read->ppid;
+    }
     maybe_send_window_update(read->key);
     return read->bytes;
 }
 
-size_t SCTP_Socket::sctp_recv_data_from(const sockaddr_in& association_id, std::vector<uint8_t>& buffer, bool* out_partial, uint16_t* out_stream, int timeout_ms) {
+size_t SCTP_Socket::sctp_recv_data_from(const sockaddr_in& association_id, std::vector<uint8_t>& buffer, bool* out_partial, uint16_t* out_stream, int timeout_ms, uint32_t* out_ppid) {
     Association_Key key{association_id};
-    return sctp_recv_data_from(key, buffer, out_partial, out_stream, timeout_ms);
+    return sctp_recv_data_from(key, buffer, out_partial, out_stream, timeout_ms, out_ppid);
 }
 
-size_t SCTP_Socket::sctp_recv_data_from(const Association_Key& association_id, std::vector<uint8_t>& buffer, bool* out_partial, uint16_t* out_stream, int timeout_ms) {
+size_t SCTP_Socket::sctp_recv_data_from(const Association_Key& association_id, std::vector<uint8_t>& buffer, bool* out_partial, uint16_t* out_stream, int timeout_ms, uint32_t* out_ppid) {
     auto read = receives.read_from(association_id, buffer.data(), buffer.size(), std::chrono::milliseconds(std::max(timeout_ms, 0)));
     if (!read) {
         return 0;
@@ -601,6 +604,9 @@ size_t SCTP_Socket::sctp_recv_data_from(const Association_Key& association_id, s
     }
     if (out_stream) {
         *out_stream = read->stream;
+    }
+    if (out_ppid) {
+        *out_ppid = read->ppid;
     }
     maybe_send_window_update(association_id);
     return read->bytes;

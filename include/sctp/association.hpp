@@ -56,12 +56,13 @@ struct Delivery {
     std::vector<uint8_t> bytes;
     bool complete{true};
     uint16_t stream{0};
+    uint32_t ppid{0};
 };
 
 // Ordered messages that arrived complete ahead of the next SSN, keyed by SSN.
 struct Inbound_Stream {
     uint16_t next_ssn{0};
-    std::map<uint16_t, std::vector<uint8_t>> early;
+    std::map<uint16_t, Delivery> early;
 };
 
 // Queued by the ULP, cut into DATA chunks only once a packet can carry them.
@@ -71,6 +72,7 @@ struct Outbound_Message {
     bool unordered;
     std::vector<uint8_t> bytes;
     size_t offset{0};
+    uint32_t ppid{0};
 };
 
 // The message whose fragments are being consumed in TSN order.
@@ -82,6 +84,7 @@ struct Reassembly {
     bool unordered{false};
     uint16_t stream{0};
     uint16_t ssn{0};
+    uint32_t ppid{0};
     std::vector<uint8_t> bytes;
 };
 

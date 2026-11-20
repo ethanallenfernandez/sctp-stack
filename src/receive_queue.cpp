@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-void Receive_Queue::push(const Association_Key& key, std::vector<uint8_t> bytes, bool complete, uint16_t stream) {
+void Receive_Queue::push(const Association_Key& key, std::vector<uint8_t> bytes, bool complete, uint16_t stream, uint32_t ppid) {
     std::lock_guard<std::mutex> lock(mutex);
     available.notify_all();
     Pending& entry = pending[key];
@@ -15,7 +15,7 @@ void Receive_Queue::push(const Association_Key& key, std::vector<uint8_t> bytes,
         tail.bytes.insert(tail.bytes.end(), bytes.begin(), bytes.end());
         tail.complete = complete;
     } else {
-        entry.messages.push_back(Message{std::move(bytes), 0, complete, stream});
+        entry.messages.push_back(Message{std::move(bytes), 0, complete, stream, ppid});
     }
 }
 
@@ -60,7 +60,7 @@ Receive_Queue::Read Receive_Queue::read_locked(std::unordered_map<Association_Ke
     it->second.bytes -= count;
     it->second.detached -= std::min(it->second.detached, count);
 
-    Read read{it->first, count, front.offset < front.bytes.size() || !front.complete, front.stream};
+    Read read{it->first, count, front.offset < front.bytes.size() || !front.complete, front.stream, front.ppid};
     if (front.offset == front.bytes.size()) {
         it->second.messages.pop_front();
         if (it->second.messages.empty()) {
