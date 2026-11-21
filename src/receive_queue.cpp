@@ -8,7 +8,7 @@ void Receive_Queue::push(const Association_Key& key, std::vector<uint8_t> bytes,
     entry.bytes += bytes.size();
     if (!entry.messages.empty() && !entry.messages.back().complete) {
         Message& tail = entry.messages.back();
-        tail.bytes.insert(tail.bytes.end(), bytes.begin(), bytes.end());
+        tail.bytes.append_range(bytes);
         tail.complete = complete;
     } else {
         entry.messages.push_back(Message{std::move(bytes), 0, complete, stream, ppid});

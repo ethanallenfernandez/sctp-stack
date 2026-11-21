@@ -18,16 +18,17 @@
 
 void SCTP_Socket::event_loop() {
     std::vector<Local_Address> locals{Local_Address{local_address, udp_socket}};
-    locals.insert(locals.end(), other_local_addresses.begin(), other_local_addresses.end());
+    locals.append_range(other_local_addresses);
     std::vector<sctp_pollfd> descriptors(1 + locals.size());
+    auto polled_locals = std::views::zip(descriptors | std::views::drop(1), locals);
     while (running.load()) {
         descriptors[0] = sctp_pollfd{};
         descriptors[0].fd = wakeup.poll_handle();
         descriptors[0].events = SCTP_POLL_READ;
-        for (size_t i = 0; i < locals.size(); ++i) {
-            descriptors[i + 1] = sctp_pollfd{};
-            descriptors[i + 1].fd = locals[i].socket;
-            descriptors[i + 1].events = SCTP_POLL_READ;
+        for (auto&& [descriptor, local] : polled_locals) {
+            descriptor = sctp_pollfd{};
+            descriptor.fd = local.socket;
+            descriptor.events = SCTP_POLL_READ;
         }
 
         int ready = sctp_poll(descriptors.data(), descriptors.size(), next_poll_timeout());
@@ -54,13 +55,13 @@ void SCTP_Socket::event_loop() {
         }
 
         bool fatal = false;
-        for (size_t i = 0; i < locals.size(); ++i) {
-            short revents = descriptors[i + 1].revents;
+        for (auto&& [descriptor, local] : polled_locals) {
+            short revents = descriptor.revents;
             if ((revents & SCTP_POLL_ERROR) != 0) {
-                run_icmp_errors(locals[i].socket);
+                run_icmp_errors(local.socket);
             }
             if ((revents & (SCTP_POLL_READ | SCTP_POLL_ERROR)) != 0) {
-                run_receiving(locals[i].socket, locals[i].address.sin_addr);
+                run_receiving(local.socket, local.address.sin_addr);
             }
             fatal = fatal || (revents & SCTP_POLL_FATAL) != 0;
         }
@@ -259,10 +260,10 @@ Send_Allowances SCTP_Socket::send_allowances() {
 // delayed, sending it on its own instead when the packet has no room for it.
 void SCTP_Socket::prepare_data_packet(Deliverable& deliverable, bool new_data) {
     auto& chunks = deliverable.packet.chunks;
-    auto last_data = std::find_if(chunks.rbegin(), chunks.rend(), [](const SCTP_Chunk& chunk) {
+    auto last_data = std::ranges::find_last_if(chunks, [](const SCTP_Chunk& chunk) {
         return chunk.chunk_header.type == DATA;
-    });
-    if (last_data == chunks.rend()) {
+    }).begin();
+    if (last_data == chunks.end()) {
         return;
     }
 

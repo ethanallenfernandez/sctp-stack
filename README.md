@@ -47,6 +47,9 @@ Public headers are included as `<sctp/socket.hpp>`; internal headers as
 
 ## Build
 
+Needs a C++23 compiler and standard library: GCC 15 or newer, or Clang
+against the same libstdc++.
+
 ```sh
 make            # library + examples + tests -> build/
 make test       # build and run the tests, listing any that fail

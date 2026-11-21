@@ -30,7 +30,7 @@ void Expiration_Queue::cancel_all(const Association_Key& location, Expiration_Ti
 
 bool Expiration_Queue::is_active(const Expiration_Key& key) {
     std::lock_guard<std::mutex> lock(mutex);
-    return active.find(key) != active.end();
+    return active.contains(key);
 }
 
 void Expiration_Queue::clear() {

@@ -47,12 +47,8 @@ inline bool sack_acknowledges(const sack_chunk_value& sack, uint32_t tsn) {
     if (offset > UINT16_MAX) {
         return false;
     }
-    return std::any_of(
-        sack.gap_ack_blocks.begin(),
-        sack.gap_ack_blocks.end(),
-        [offset](const sack_gap_ack_block& block) {
-            return offset >= block.start && offset <= block.end;
-        }
-    );
+    return std::ranges::any_of(sack.gap_ack_blocks, [offset](const sack_gap_ack_block& block) {
+        return offset >= block.start && offset <= block.end;
+    });
 }
 #endif // SCTP_UTILS_HPP

@@ -145,14 +145,12 @@ void serialize_chunk(const SCTP_Chunk& chunk, std::vector<uint8_t>& out) {
             append16(out, init.out_streams);
             append16(out, init.in_streams);
             append32(out, init.initial_tsn);
-            out.insert(out.end(), init.optional_parameters.begin(), init.optional_parameters.end());
+            out.append_range(init.optional_parameters);
             break;
         }
-        case COOKIE_ECHO: {
-            const auto& cookie = std::get<cookie_echo_chunk_value>(value).cookie_data;
-            out.insert(out.end(), cookie.begin(), cookie.end());
+        case COOKIE_ECHO:
+            out.append_range(std::get<cookie_echo_chunk_value>(value).cookie_data);
             break;
-        }
         case COOKIE_ACK:
         case SHUTDOWN_ACK:
         case SHUTDOWN_COMPLETE:
@@ -179,18 +177,16 @@ void serialize_chunk(const SCTP_Chunk& chunk, std::vector<uint8_t>& out) {
             append16(out, data.stream_identifier);
             append16(out, data.stream_seq_num);
             append32(out, data.payload_protocal);
-            out.insert(out.end(), data.user_data.begin(), data.user_data.end());
+            out.append_range(data.user_data);
             break;
         }
         case SACK:
             serialize_sack_chunk(std::get<sack_chunk_value>(value), out);
             break;
-        default: {
+        default:
             // Lets tests and cause-6 reports put an arbitrary chunk on the wire.
-            const auto& body = std::get<unknown_chunk_value>(value).body;
-            out.insert(out.end(), body.begin(), body.end());
+            out.append_range(std::get<unknown_chunk_value>(value).body);
             break;
-        }
     }
 
     // Chunk Length covers the header and body but excludes trailing padding.
@@ -245,7 +241,7 @@ Parameter_Scan scan_parameters(const std::vector<uint8_t>& params, std::initiali
     Parameter_Scan scan;
     const uint8_t* end = params.data() + params.size();
     walk_tlvs(params.data(), params.size(), [&](uint16_t type, const uint8_t* parameter, uint16_t length) {
-        if (std::find(recognized.begin(), recognized.end(), type) != recognized.end()) {
+        if (std::ranges::contains(recognized, type)) {
             scan.recognized.insert(scan.recognized.end(), parameter, parameter + std::min(padded(length), static_cast<size_t>(end - parameter)));
             return true;
         }
@@ -295,7 +291,7 @@ std::vector<uint8_t> serialize_state_cookie(const State_Cookie& cookie) {
         append32(out, address);
     }
 
-    out.insert(out.end(), cookie.mac, cookie.mac + STATE_COOKIE_MAC_SIZE);
+    out.append_range(cookie.mac);
     return out;
 }
 

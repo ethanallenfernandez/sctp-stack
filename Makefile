@@ -6,7 +6,7 @@
 # ---- toolchain -------------------------------------------------------------
 CXX      ?= g++
 AR       ?= ar
-CXXSTD   := -std=c++20
+CXXSTD   := -std=c++23
 WARN     := -Wall -Wextra
 OPT      ?= -O2
 SANITIZE ?=

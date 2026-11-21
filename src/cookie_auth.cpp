@@ -126,8 +126,7 @@ Cookie_Result Cookie_Auth::verify(
     }
 
     uint32_t from = ntohl(src.sin_addr.s_addr);
-    bool listed = from == out.peer_ipv4
-        || std::find(out.peer_addresses.begin(), out.peer_addresses.end(), from) != out.peer_addresses.end();
+    bool listed = from == out.peer_ipv4 || std::ranges::contains(out.peer_addresses, from);
     if (out.sctp_src_port != header.src_port
         || out.sctp_dst_port != header.des_port
         || out.local_ver_tag != header.verification_tag

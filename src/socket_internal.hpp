@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <ranges>
 #include <unordered_map>
 #include <vector>
 
@@ -85,7 +86,7 @@ struct Inbound_Datagram {
 inline thread_local const Inbound_Datagram* inbound_datagram = nullptr;
 
 inline Peer_Path* find_path(Association& assoc, const sockaddr_in& address) {
-    auto path = std::find_if(assoc.peer_address_list.begin(), assoc.peer_address_list.end(), [&](const Peer_Path& candidate) {
+    auto path = std::ranges::find_if(assoc.peer_address_list, [&](const Peer_Path& candidate) {
         return same_destination(candidate.address, address);
     });
     return path == assoc.peer_address_list.end() ? nullptr : &*path;
@@ -134,7 +135,7 @@ inline Peer_Path& data_path(Association& assoc) {
     if (preferred.active) {
         return preferred;
     }
-    auto alternate = std::find_if(assoc.peer_address_list.begin(), assoc.peer_address_list.end(), [](const Peer_Path& path) {
+    auto alternate = std::ranges::find_if(assoc.peer_address_list, [](const Peer_Path& path) {
         return path.confirmed && path.active;
     });
     return alternate == assoc.peer_address_list.end() ? preferred : *alternate;
@@ -205,18 +206,14 @@ inline Association_Key cookie_key(const State_Cookie& cookie) {
 }
 
 inline bool has_unacknowledged_data(const Association& assoc) {
-    return std::any_of(
-        assoc.outstanding_data.begin(),
-        assoc.outstanding_data.end(),
-        [](const auto& entry) {
-            return !entry.second.gap_acked;
-        }
-    );
+    return std::ranges::any_of(assoc.outstanding_data | std::views::values, [](const Outstanding_Data& outstanding) {
+        return !outstanding.gap_acked;
+    });
 }
 
 inline bool has_unacknowledged_data(const Association& assoc, const Peer_Path& path) {
-    return std::any_of(assoc.outstanding_data.begin(), assoc.outstanding_data.end(), [&](const auto& entry) {
-        return !entry.second.gap_acked && &destination_of(assoc, entry.second) == &path;
+    return std::ranges::any_of(assoc.outstanding_data | std::views::values, [&](const Outstanding_Data& outstanding) {
+        return !outstanding.gap_acked && &destination_of(assoc, outstanding) == &path;
     });
 }
 
@@ -266,8 +263,7 @@ constexpr size_t HEARTBEAT_INFO_SIZE = 14;
 
 inline std::vector<uint8_t> heartbeat_info(uint64_t nonce, const sockaddr_in& destination) {
     std::vector<uint8_t> info = be32_bytes(static_cast<uint32_t>(nonce >> 32));
-    std::vector<uint8_t> low = be32_bytes(static_cast<uint32_t>(nonce));
-    info.insert(info.end(), low.begin(), low.end());
+    info.append_range(be32_bytes(static_cast<uint32_t>(nonce)));
     const uint8_t* address = reinterpret_cast<const uint8_t*>(&destination.sin_addr.s_addr);
     info.insert(info.end(), address, address + sizeof(destination.sin_addr.s_addr));
     const uint8_t* port = reinterpret_cast<const uint8_t*>(&destination.sin_port);

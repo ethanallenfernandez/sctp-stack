@@ -80,7 +80,7 @@ std::optional<Send_Queue::Pending> Send_Queue::peek_locked(std::chrono::steady_c
         if (allowances == nullptr) {
             return Pending{Send_Priority::NEW_DATA, queued.deliverable, queued.id};
         }
-        if (std::find(refused.begin(), refused.end(), location) != refused.end()) {
+        if (std::ranges::contains(refused, location)) {
             continue;
         }
         auto allowance = allowances->find(location);
@@ -100,9 +100,7 @@ void Send_Queue::commit(const Pending& pending) {
     // outcome and not merely a guard: purge() dropped that packet because the
     // association it belonged to was abandoned.
     std::deque<Queued>& queue = queue_for(pending.priority);
-    auto it = std::find_if(queue.begin(), queue.end(), [&](const Queued& queued) {
-        return queued.id == pending.id;
-    });
+    auto it = std::ranges::find(queue, pending.id, &Queued::id);
     if (it != queue.end()) {
         queue.erase(it);
     }
@@ -123,59 +121,34 @@ void Send_Queue::purge(const Association_Key& location) {
 
 void Send_Queue::remove_acked_retransmissions(const Association_Key& location, const sack_chunk_value& sack) {
     std::lock_guard<std::mutex> lock(mutex);
-    std::deque<Queued> retained;
-    while (!retransmission.empty()) {
-        Queued queued = std::move(retransmission.front());
-        retransmission.pop_front();
+    for (Queued& queued : retransmission) {
         if (queued.deliverable.location == location) {
-            auto& chunks = queued.deliverable.packet.chunks;
-            chunks.erase(
-                std::remove_if(
-                    chunks.begin(),
-                    chunks.end(),
-                    [&](const SCTP_Chunk& chunk) {
-                        return chunk.chunk_header.type == DATA && sack_acknowledges(sack, std::get<data_chunk_value>(chunk.chunk_value).tsn);
-                    }
-                ),
-                chunks.end()
-            );
-        }
-        if (!queued.deliverable.packet.chunks.empty()) {
-            retained.push_back(std::move(queued));
+            std::erase_if(queued.deliverable.packet.chunks, [&](const SCTP_Chunk& chunk) {
+                return chunk.chunk_header.type == DATA && sack_acknowledges(sack, std::get<data_chunk_value>(chunk.chunk_value).tsn);
+            });
         }
     }
-    retransmission = std::move(retained);
+    std::erase_if(retransmission, [](const Queued& queued) { return queued.deliverable.packet.chunks.empty(); });
 }
 
 void Send_Queue::remove_retransmissions_of_type(const Association_Key& location, Chunk_Type type, const sockaddr_in* destination) {
     std::lock_guard<std::mutex> lock(mutex);
-    std::deque<Queued> retained;
-    while (!retransmission.empty()) {
-        Queued queued = std::move(retransmission.front());
-        retransmission.pop_front();
+    for (Queued& queued : retransmission) {
         if (queued.deliverable.location == location
                 && (destination == nullptr || destination->sin_addr.s_addr == queued.deliverable.destination.sin_addr.s_addr)) {
             auto& chunks = queued.deliverable.packet.chunks;
-            bool carried = std::any_of(chunks.begin(), chunks.end(), [&](const SCTP_Chunk& chunk) {
+            bool carried = std::ranges::any_of(chunks, [&](const SCTP_Chunk& chunk) {
                 return chunk.chunk_header.type == type;
             });
             // The only ERROR retransmitted is one bundled behind a COOKIE ECHO, and it goes with it.
-            chunks.erase(
-                std::remove_if(
-                    chunks.begin(),
-                    chunks.end(),
-                    [&](const SCTP_Chunk& chunk) {
-                        return carried && (chunk.chunk_header.type == type || chunk.chunk_header.type == OP_ERROR);
-                    }
-                ),
-                chunks.end()
-            );
-        }
-        if (!queued.deliverable.packet.chunks.empty()) {
-            retained.push_back(std::move(queued));
+            if (carried) {
+                std::erase_if(chunks, [&](const SCTP_Chunk& chunk) {
+                    return chunk.chunk_header.type == type || chunk.chunk_header.type == OP_ERROR;
+                });
+            }
         }
     }
-    retransmission = std::move(retained);
+    std::erase_if(retransmission, [](const Queued& queued) { return queued.deliverable.packet.chunks.empty(); });
 }
 
 void Send_Queue::clear() {
@@ -203,14 +176,14 @@ size_t Send_Queue::size() {
 
 bool Send_Queue::has_retransmission_for(const Association_Key& location) {
     std::lock_guard<std::mutex> lock(mutex);
-    return std::any_of(retransmission.begin(), retransmission.end(), [&](const Queued& queued) {
+    return std::ranges::any_of(retransmission, [&](const Queued& queued) {
         return queued.deliverable.location == location;
     });
 }
 
 bool Send_Queue::has_new_data_for(const Association_Key& location) {
     std::lock_guard<std::mutex> lock(mutex);
-    return std::any_of(new_data.begin(), new_data.end(), [&](const Queued& queued) {
+    return std::ranges::any_of(new_data, [&](const Queued& queued) {
         return queued.deliverable.location == location;
     });
 }

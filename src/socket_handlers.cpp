@@ -14,11 +14,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
-#include <iterator>
 #include <mutex>
 #include <optional>
 #include <ranges>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -49,12 +49,10 @@ namespace {
     // Whether anything held is complete and waiting only on the TSN at the
     // Cumulative TSN Ack point. Nothing could be dropped to make room for it.
     bool blocked_on_cumulative_tsn(const Association& assoc) {
-        bool assembled = std::any_of(assoc.tsn_ooo_buffer.begin(), assoc.tsn_ooo_buffer.end(), [](const auto& entry) {
-            return entry.second.assembled;
-        });
-        return assembled || std::any_of(assoc.inbound_streams.begin(), assoc.inbound_streams.end(), [](const auto& entry) {
-            return !entry.second.early.empty();
-        });
+        return std::ranges::any_of(assoc.tsn_ooo_buffer | std::views::values, &Held_Chunk::assembled)
+            || std::ranges::any_of(assoc.inbound_streams | std::views::values, [](const Inbound_Stream& stream) {
+                return !stream.early.empty();
+            });
     }
 
     // With the receive buffer full, a new chunk above everything received is
@@ -72,9 +70,7 @@ namespace {
                 destination = outstanding->second.destination;
             } else {
                 auto& acked = assoc.acked_retransmissions;
-                auto match = std::find_if(acked.begin(), acked.end(), [tsn](const Acked_Retransmission& entry) {
-                    return entry.tsn == tsn;
-                });
+                auto match = std::ranges::find(acked, tsn, &Acked_Retransmission::tsn);
                 if (match == acked.end()) {
                     continue;
                 }
@@ -90,14 +86,14 @@ namespace {
     }
 
     bool make_room(Association& assoc, uint32_t tsn, size_t& used) {
-        auto highest = std::find_if(assoc.tsn_ooo_buffer.rbegin(), assoc.tsn_ooo_buffer.rend(), [](const auto& entry) {
+        auto highest = std::ranges::find_last_if(assoc.tsn_ooo_buffer, [](const auto& entry) {
             return !entry.second.assembled;
-        });
-        if (highest == assoc.tsn_ooo_buffer.rend() || tsn_gt(tsn, highest->first)) {
+        }).begin();
+        if (highest == assoc.tsn_ooo_buffer.end() || tsn_gt(tsn, highest->first)) {
             return false;
         }
         used -= highest->second.data.user_data.size();
-        assoc.tsn_ooo_buffer.erase(std::next(highest).base());
+        assoc.tsn_ooo_buffer.erase(highest);
         return true;
     }
 
@@ -157,12 +153,12 @@ namespace {
         if (!keep_bytes) {
             return true;
         }
-        message.bytes.insert(message.bytes.end(), data.user_data.begin(), data.user_data.end());
+        message.bytes.append_range(data.user_data);
         if (message.partially_delivered) {
             delivered.push_back(Delivery{std::move(message.bytes), ends, message.stream, message.ppid});
             message.bytes.clear();
             if (ends) {
-                std::move(assoc.held_deliveries.begin(), assoc.held_deliveries.end(), std::back_inserter(delivered));
+                delivered.append_range(assoc.held_deliveries | std::views::as_rvalue);
                 assoc.held_deliveries.clear();
             }
             return true;
@@ -217,7 +213,7 @@ namespace {
         std::vector<uint8_t> bytes;
         for (uint32_t at = first;; ++at) {
             Held_Chunk& held = assoc.tsn_ooo_buffer.at(at);
-            bytes.insert(bytes.end(), held.data.user_data.begin(), held.data.user_data.end());
+            bytes.append_range(held.data.user_data);
             held.data.user_data = {};
             held.assembled = true;
             if (at == last) {
@@ -276,7 +272,7 @@ namespace {
         for (uint32_t address : find_ipv4_addresses(recognized)) {
             sockaddr_in listed = src;
             listed.sin_addr.s_addr = htonl(address);
-            if (std::none_of(out.begin(), out.end(), [&](const sockaddr_in& seen) { return same_destination(seen, listed); })) {
+            if (std::ranges::none_of(out, [&](const sockaddr_in& seen) { return same_destination(seen, listed); })) {
                 out.push_back(listed);
             }
         }
@@ -305,7 +301,7 @@ namespace {
         std::vector<uint32_t> listed = find_ipv4_addresses(recognized);
         std::vector<uint8_t> info;
         for (const sockaddr_in& address : added) {
-            if (std::find(listed.begin(), listed.end(), ntohl(address.sin_addr.s_addr)) != listed.end()) {
+            if (std::ranges::contains(listed, ntohl(address.sin_addr.s_addr))) {
                 append_parameter(info, PARAM_IPV4_ADDRESS, reinterpret_cast<const uint8_t*>(&address.sin_addr.s_addr), 4);
             }
         }
@@ -329,12 +325,12 @@ namespace {
         const auto& body = std::get<unknown_chunk_value>(chunk.chunk_value).body;
         uint16_t length = static_cast<uint16_t>(SCTP_CHUNK_HEADER_SIZE + body.size());
         std::vector<uint8_t> info{
-            static_cast<uint8_t>(chunk.chunk_header.type),
+            std::to_underlying(chunk.chunk_header.type),
             chunk.chunk_header.flag,
             static_cast<uint8_t>(length >> 8),
             static_cast<uint8_t>(length),
         };
-        info.insert(info.end(), body.begin(), body.end());
+        info.append_range(body);
         return error_cause{CAUSE_UNRECOGNIZED_CHUNK, std::move(info)};
     }
 
@@ -374,16 +370,13 @@ namespace {
     }
 
     bool contains_chunk(const SCTP_Packet& packet, Chunk_Type type) {
-        return std::any_of(packet.chunks.begin(), packet.chunks.end(), [type](const SCTP_Chunk& chunk) {
+        return std::ranges::any_of(packet.chunks, [type](const SCTP_Chunk& chunk) {
             return chunk.chunk_header.type == type;
         });
     }
 
     bool carries_stale_cookie(const SCTP_Chunk& chunk) {
-        const auto& error = std::get<error_chunk_value>(chunk.chunk_value);
-        return std::any_of(error.causes.begin(), error.causes.end(), [](const error_cause& cause) {
-            return cause.code == CAUSE_STALE_COOKIE;
-        });
+        return std::ranges::contains(std::get<error_chunk_value>(chunk.chunk_value).causes, CAUSE_STALE_COOKIE, &error_cause::code);
     }
 }
 
@@ -417,10 +410,10 @@ void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockad
 
     std::lock_guard<std::mutex> assoc_lock(associations_mutex);
     Association_Key key = association_key_for(peer_key(src, in_pkt.header.src_port));
-    if (associations.count(key) == 0) {
+    if (!associations.contains(key)) {
         for (const sockaddr_in& address : init_addresses(in_pkt, src)) {
             Association_Key listed = association_key_for(peer_key(address, in_pkt.header.src_port));
-            if (associations.count(listed) != 0) {
+            if (associations.contains(listed)) {
                 key = listed;
                 break;
             }
@@ -559,7 +552,7 @@ void SCTP_Socket::answer_ootb(const SCTP_Packet& pkt, const Association_Key& key
     if (contains_chunk(pkt, SHUTDOWN_ACK)) {
         return reply(pkt.header, key, src, pkt.header.verification_tag, SHUTDOWN_COMPLETE, empty_chunk_value{}, CHUNK_FLAG_T_BIT);
     }
-    bool stale_cookie = std::any_of(pkt.chunks.begin(), pkt.chunks.end(), [](const SCTP_Chunk& chunk) {
+    bool stale_cookie = std::ranges::any_of(pkt.chunks, [](const SCTP_Chunk& chunk) {
         return chunk.chunk_header.type == OP_ERROR && carries_stale_cookie(chunk);
     });
     if (!stale_cookie && !contains_chunk(pkt, SHUTDOWN_COMPLETE) && !contains_chunk(pkt, COOKIE_ACK)) {
@@ -632,10 +625,9 @@ void SCTP_Socket::handle_init(const SCTP_Common_Header& header, const SCTP_Chunk
                 destination = primary(assoc).address;
                 break;
             default: {
-                std::vector<sockaddr_in> added;
-                std::copy_if(addresses.begin(), addresses.end(), std::back_inserter(added), [&](const sockaddr_in& address) {
+                auto added = addresses | std::views::filter([&](const sockaddr_in& address) {
                     return find_path(assoc, address) == nullptr;
-                });
+                }) | std::ranges::to<std::vector>();
                 if (!added.empty()) {
                     return reply(header, key, src, init.initiate_tag, ABORT, error_chunk_value{new_address_causes(added, params.recognized)});
                 }
@@ -653,10 +645,9 @@ void SCTP_Socket::handle_init(const SCTP_Common_Header& header, const SCTP_Chunk
         }
     }
 
-    std::vector<uint32_t> other_addresses;
-    for (auto address = addresses.begin() + 1; address != addresses.end(); ++address) {
-        other_addresses.push_back(ntohl(address->sin_addr.s_addr));
-    }
+    auto other_addresses = addresses | std::views::drop(1) | std::views::transform([](const sockaddr_in& address) {
+        return ntohl(address.sin_addr.s_addr);
+    }) | std::ranges::to<std::vector<uint32_t>>();
     std::vector<uint8_t> cookie = cookie_authorizer.generate(
         header,
         init,
@@ -737,7 +728,7 @@ void SCTP_Socket::handle_init_ack(const SCTP_Common_Header& header, const SCTP_C
     if (!params.reported.empty()) {
         std::vector<uint8_t> info;
         for (const auto& parameter : params.reported) {
-            info.insert(info.end(), parameter.begin(), parameter.end());
+            info.append_range(parameter);
         }
         echo.chunks.push_back(SCTP_Chunk{{OP_ERROR, 0, 0}, error_chunk_value{{error_cause{CAUSE_UNRECOGNIZED_PARAMS, std::move(info)}}}});
     }
@@ -863,7 +854,7 @@ void SCTP_Socket::handle_error(const SCTP_Common_Header&, const SCTP_Chunk& chun
     if (error.causes.empty() || assoc == nullptr) {
         return;
     }
-    auto stale = std::find_if(error.causes.begin(), error.causes.end(), [](const error_cause& cause) {
+    auto stale = std::ranges::find_if(error.causes, [](const error_cause& cause) {
         return cause.code == CAUSE_STALE_COOKIE && cause.info.size() == 4;
     });
     // Every cause is passed up raw, unknown codes included, unless the
@@ -1058,9 +1049,9 @@ void SCTP_Socket::handle_shutdown(const SCTP_Common_Header& header, const SCTP_C
             assoc.in_fast_recovery = false;
         }
         sends.remove_acked_retransmissions(key, sack_chunk_value{cumulative_tsn_ack, 0, {}, {}});
-        for (size_t i = 0; i < acked_on.size(); ++i) {
-            if (acked_on[i]) {
-                restart_t3(key, assoc.peer_address_list[i].address);
+        for (auto&& [path, acked] : std::views::zip(assoc.peer_address_list, acked_on)) {
+            if (acked) {
+                restart_t3(key, path.address);
             }
         }
     }
@@ -1093,7 +1084,7 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
     }
     Association& assoc = *found;
     bool acks_unsent = !tsn_lt(sack.cumulative_tsn_ack, assoc.next_tsn)
-        || std::any_of(sack.gap_ack_blocks.begin(), sack.gap_ack_blocks.end(), [&](const sack_gap_ack_block& block) {
+        || std::ranges::any_of(sack.gap_ack_blocks, [&](const sack_gap_ack_block& block) {
             return !tsn_lt(sack.cumulative_tsn_ack + block.end, assoc.next_tsn);
         });
     if (acks_unsent) {
@@ -1113,8 +1104,8 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
         auto ack_of = [&](const Outstanding_Data& outstanding) -> Path_Ack& {
             return acks[index_of(assoc, destination_of(assoc, outstanding))];
         };
-        for (size_t i = 0; i < paths.size(); ++i) {
-            acks[i].flight_before = bytes_in_flight(assoc, &paths[i]);
+        for (auto&& [path, ack] : std::views::zip(paths, acks)) {
+            ack.flight_before = bytes_in_flight(assoc, &path);
         }
 
         // outstanding_data is in TSN order, so the first match is the lowest
@@ -1178,20 +1169,19 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
         if (newly_acknowledged) {
             assoc.error_count = 0;
         }
-        for (size_t i = 0; i < paths.size(); ++i) {
-            Path_Ack& ack = acks[i];
+        for (auto&& [path, ack, duplicate] : std::views::zip(paths, acks, duplicates)) {
             if (ack.newly_acknowledged) {
-                clear_path_errors(key, paths[i]);
-                paths[i].single_packet_in_flight = false;
+                clear_path_errors(key, path);
+                path.single_packet_in_flight = false;
             }
-            if (ack.newly_acknowledged || duplicates[i] > 0) {
-                grow_cwnd(assoc, paths[i], ack.bytes_acked, duplicates[i], ack.flight_before);
+            if (ack.newly_acknowledged || duplicate > 0) {
+                grow_cwnd(assoc, path, ack.bytes_acked, duplicate, ack.flight_before);
             }
-            bool sent_here = std::any_of(assoc.outstanding_data.begin(), assoc.outstanding_data.end(), [&](const auto& entry) {
-                return &destination_of(assoc, entry.second) == &paths[i];
+            bool sent_here = std::ranges::any_of(assoc.outstanding_data | std::views::values, [&](const Outstanding_Data& outstanding) {
+                return &destination_of(assoc, outstanding) == &path;
             });
             if (!sent_here) {
-                paths[i].partial_bytes_acked = 0;
+                path.partial_bytes_acked = 0;
             }
         }
 
@@ -1201,7 +1191,7 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
             }
 
             const std::optional<uint32_t>& above = assoc.in_fast_recovery && cumulative_ack_advanced ? highest_reported : htna;
-            bool was_reneged = std::find(reneged_tsns.begin(), reneged_tsns.end(), tsn) != reneged_tsns.end();
+            bool was_reneged = std::ranges::contains(reneged_tsns, tsn);
             // Reneging was already counted once while applying the Gap Ack
             // state transition above.
             if (above && tsn_lt(tsn, *above) && !was_reneged) {
@@ -1216,11 +1206,11 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
         }
 
         if (schedule_fast_retransmission && !assoc.in_fast_recovery) {
-            for (size_t i = 0; i < paths.size(); ++i) {
-                if (acks[i].fast_retransmitted) {
-                    paths[i].ssthresh = std::max(paths[i].cwnd / 2, 4U * pmdcs(paths[i]));
-                    paths[i].cwnd = paths[i].ssthresh;
-                    paths[i].partial_bytes_acked = 0;
+            for (auto&& [path, ack] : std::views::zip(paths, acks)) {
+                if (ack.fast_retransmitted) {
+                    path.ssthresh = std::max(path.cwnd / 2, 4U * pmdcs(path));
+                    path.cwnd = path.ssthresh;
+                    path.partial_bytes_acked = 0;
                 }
             }
 
@@ -1240,7 +1230,7 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
                 break;
             }
             if (!outstanding.gap_acked && !outstanding.retransmitted
-                    && std::none_of(assoc.outstanding_data.begin(), assoc.outstanding_data.end(), [&](const auto& other) {
+                    && std::ranges::none_of(assoc.outstanding_data, [&](const auto& other) {
                         return other.second.retransmitted && tsn_lte(other.first, tsn) && other.second.last_sent >= outstanding.first_sent;
                     })) {
                 assoc.rtt_measurement_tsn = tsn;
@@ -1256,17 +1246,16 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
         }
 
         // 6.3.2 R2-R4, and 7.2.4 step 4.
-        for (size_t i = 0; i < paths.size(); ++i) {
-            const Path_Ack& ack = acks[i];
+        for (auto&& [path, ack] : std::views::zip(paths, acks)) {
             auto earliest = ack.earliest ? assoc.outstanding_data.find(*ack.earliest) : assoc.outstanding_data.end();
             bool retransmits_earliest = schedule_fast_retransmission && earliest != assoc.outstanding_data.end()
                 && earliest->second.pending_retransmission;
-            if (!has_unacknowledged_data(assoc, paths[i])) {
-                cancel_expiration(Expiration_Key{key, Expiration_Timer_Type::T3_RTX, path_key(paths[i].address)});
+            if (!has_unacknowledged_data(assoc, path)) {
+                cancel_expiration(Expiration_Key{key, Expiration_Timer_Type::T3_RTX, path_key(path.address)});
             } else if ((ack.earliest && sack_acknowledges(sack, *ack.earliest)) || retransmits_earliest) {
-                restart_t3(key, paths[i].address);
+                restart_t3(key, path.address);
             } else if (ack.reneged) {
-                start_t3_if_stopped(key, paths[i].address);
+                start_t3_if_stopped(key, path.address);
             }
         }
     }
@@ -1348,7 +1337,7 @@ void SCTP_Socket::handle_data_packet(const SCTP_Packet& packet, const Associatio
         uint32_t tsn = data.tsn;
         // RFC 9260 6.5: an invalid stream is still acked, but reported and never delivered.
         bool valid_stream = data.stream_identifier < assoc.in_streams;
-        if (tsn_lte(tsn, assoc.last_peer_tsn) || assoc.tsn_ooo_buffer.count(tsn) != 0) {
+        if (tsn_lte(tsn, assoc.last_peer_tsn) || assoc.tsn_ooo_buffer.contains(tsn)) {
             assoc.duplicate_tsns.push_back(tsn);
             saw_duplicate = true;
             continue;

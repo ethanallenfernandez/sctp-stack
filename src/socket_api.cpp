@@ -12,7 +12,6 @@
 #include <algorithm>
 #include <chrono>
 #include <iostream>
-#include <iterator>
 #include <mutex>
 #include <optional>
 #include <ranges>
@@ -183,9 +182,7 @@ void SCTP_Socket::close_associations() {
     std::vector<Association_Key> keys;
     {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
-        for (const Association_Key& key : associations | std::views::keys) {
-            keys.push_back(key);
-        }
+        keys = associations | std::views::keys | std::ranges::to<std::vector>();
     }
     for (const auto& key : keys) {
         sctp_abort(key);
@@ -210,7 +207,7 @@ Sctp_Status SCTP_Socket::sctp_associate(std::string_view ip_address, int port, A
     Association_Key key = peer_key(to_location, static_cast<uint16_t>(port));
 
     std::lock_guard<std::mutex> assoc_lock(associations_mutex);
-    if (associations.count(association_key_for(key)) != 0) {
+    if (associations.contains(association_key_for(key))) {
         return Sctp_Status::ASSOCIATION_EXISTS;
     }
     const Association& assoc = associations.emplace(key, init_new_association(to_location)).first->second;
@@ -265,7 +262,7 @@ Association* SCTP_Socket::find_tcb(const Association_Key& key) {
 }
 
 Association_Key SCTP_Socket::association_key_for(const Association_Key& peer) {
-    if (associations.count(peer) != 0) {
+    if (associations.contains(peer)) {
         return peer;
     }
     auto alias = peer_addresses.find(peer);
