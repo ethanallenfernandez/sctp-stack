@@ -83,11 +83,14 @@ $(BUILD)/fuzz/%: fuzz/%.cpp $(LIB)
 	$(CXX) $(CXXFLAGS) -fsanitize=fuzzer -MMD -MP $< $(LIB) -o $@ $(FUZZ_LDFLAGS) $(LDFLAGS)
 
 # ---- actions ---------------------------------------------------------------
+# Every binary runs even after one fails, so a failing RFC requirement does not
+# hide the rest; the failures are listed at the end.
 test: $(TEST_BINS)
-	@for t in $(TEST_BINS); do \
+	@failed=""; for t in $(TEST_BINS); do \
 		echo "=== $$t"; \
-		$$t || exit 1; \
-	done
+		$$t || failed="$$failed $$t"; \
+	done; \
+	if [ -n "$$failed" ]; then echo; echo "FAILED:$$failed"; exit 1; fi
 
 run: $(BUILD)/examples/loopback
 	@$<

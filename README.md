@@ -27,6 +27,8 @@ src/              implementation + internal headers (not installed)
   checksum.{hpp,cpp}    CRC-32C
 examples/         runnable demos, linked against the library
 tests/            conformance tests, one binary per area
+  rfc*.cpp          a check for every MUST and SHOULD of RFC 9260 and RFC 6951,
+                    traced in rfc_requirements.md
 fuzz/             libFuzzer targets for the packet and State Cookie codecs
 build/            all build output (gitignored, never written in-tree)
 ```
