@@ -7,7 +7,7 @@
 #include <cstdio>
 #include <string>
 #include <vector>
-#include "test_support.hpp"
+#include "support.hpp"
 
 namespace {
 

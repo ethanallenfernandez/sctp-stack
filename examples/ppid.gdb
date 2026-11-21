@@ -136,8 +136,7 @@ echo | the same Delivery.\n
 echo | Watch: p stream_id   p ppid\n
 end
 
-# Not reached over loopback, which never reorders or fills the window. All are in
-# tests/test_ppid.cpp or the partial delivery tests:
+# Not reached over loopback, which never reorders or fills the window:
 #   - assemble_early (socket_handlers.cpp:217) takes the PPID from the B fragment of
 #     a message completed above the Cumulative TSN Ack;
 #   - advance_stream (socket_handlers.cpp:117) releases a held Delivery, PPID and all;

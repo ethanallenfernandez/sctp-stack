@@ -1,6 +1,6 @@
 // SHA-256 and HMAC, authenticating the state cookie. In-tree for the same
 // reason as the CRC-32C: nothing but pthreads is linked. Verified against
-// published vectors in tests/test_hmac.cpp.
+// published vectors in tests/unit/hmac.cpp.
 
 #include "hmac.hpp"
 

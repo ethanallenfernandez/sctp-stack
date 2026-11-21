@@ -12,7 +12,7 @@
 #include <string>
 #include <thread>
 #include <vector>
-#include "test_support.hpp"
+#include "support.hpp"
 
 static int failures = 0;
 

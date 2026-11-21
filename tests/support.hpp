@@ -1,5 +1,5 @@
-#ifndef SCTP_TEST_SUPPORT_HPP
-#define SCTP_TEST_SUPPORT_HPP
+#ifndef SCTP_TESTS_SUPPORT_HPP
+#define SCTP_TESTS_SUPPORT_HPP
 
 // Polling waits for the tests. The library's calls never block.
 

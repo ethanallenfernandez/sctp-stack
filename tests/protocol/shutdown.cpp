@@ -693,13 +693,13 @@ void test_handshake_chunks_while_shutting_down() {
 
 void test_data_outlives_association() {
     std::printf("Received data outlives the association:\n");
-    SCTP_Packet shutdown_ack;
+    SCTP_Packet shutdown_ack{};
     shutdown_ack.chunks.push_back({{SHUTDOWN_ACK, 0, 0}, empty_chunk_value{}});
     auto [r, read] = Access::read_after_teardown(SHUTDOWN_SENT, shutdown_ack, OUR_TAG);
     check(!r.has_association && reported(r, Assoc_Change_State::SHUTDOWN_COMP), "SHUTDOWN ACK completes the shutdown and removes the association");
     check(read == 2, "the DATA that preceded it can still be read");
 
-    SCTP_Packet abort;
+    SCTP_Packet abort{};
     abort.chunks.push_back({{ABORT, 0, 0}, error_chunk_value{}});
     std::tie(r, read) = Access::read_after_teardown(ESTABLISHED, abort, OUR_TAG);
     check(!r.has_association && read == 2, "so can DATA delivered before an ABORT");

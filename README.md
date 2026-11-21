@@ -26,9 +26,17 @@ src/              implementation + internal headers (not installed)
   serialize.{hpp,cpp}   wire codec — byte order lives here
   checksum.{hpp,cpp}    CRC-32C
 examples/         runnable demos, linked against the library
-tests/            conformance tests, one binary per area
-  rfc*.cpp          a check for every MUST and SHOULD of RFC 9260 and RFC 6951,
+tests/            one binary per .cpp, all run by make test
+  rfc/              a check for every MUST and SHOULD of RFC 9260 and RFC 6951,
                     traced in rfc_requirements.md
+  unit/             SHA-256, HMAC, CRC-32C, the wire codec and the CSPRNG against
+                    published vectors and hand-computed bytes
+  protocol/         behaviour without its own MUST or SHOULD row: shutdown,
+                    flow control, heartbeat, PMTU discovery, unrecognized chunks,
+                    UDP encapsulation
+  integration/      real sockets and the event-loop thread
+  interop/          against the Linux kernel's SCTP
+  support.hpp       polling waits for the socket tests
 fuzz/             libFuzzer targets for the packet and State Cookie codecs
 build/            all build output (gitignored, never written in-tree)
 ```
@@ -41,7 +49,7 @@ Public headers are included as `<sctp/socket.hpp>`; internal headers as
 
 ```sh
 make            # library + examples + tests -> build/
-make test       # build and run wire-conformance tests
+make test       # build and run the tests, listing any that fail
 make run        # run the loopback example
 make asan       # rebuild under ASan+UBSan into build/asan, run tests + example
 make tsan       # rebuild under TSan into build/tsan, run tests + example
