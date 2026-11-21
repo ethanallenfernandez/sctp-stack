@@ -4,7 +4,7 @@
 // hash, and a cookie MAC'd with one validates against itself perfectly while
 // being worthless - the CRC-32C polynomial bug again.
 
-#include "hmac.hpp"
+#include "crypto/hmac.hpp"
 
 #include <cstdio>
 #include <cstring>

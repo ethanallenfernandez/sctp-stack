@@ -2,8 +2,8 @@
 // generate_random covering the whole object. Statistical assertions are
 // deliberately absent - any strong enough to matter are strong enough to flake.
 
-#include <sctp/platform.hpp>
-#include "socket_internal.hpp"
+#include <sctp/platform/compat.hpp>
+#include "socket/internal.hpp"
 
 #include <cstdio>
 #include <cstring>

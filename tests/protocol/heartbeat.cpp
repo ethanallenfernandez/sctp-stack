@@ -7,9 +7,9 @@
 // through handle_expiration, so nothing here waits on wall-clock time.
 
 #include <sctp/socket.hpp>
-#include <sctp/platform.hpp>
-#include "serialize.hpp"
-#include "socket_internal.hpp"
+#include <sctp/platform/compat.hpp>
+#include "protocol/serialize.hpp"
+#include "socket/internal.hpp"
 
 #include <chrono>
 #include <cstdio>

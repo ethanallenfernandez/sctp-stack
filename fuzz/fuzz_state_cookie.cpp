@@ -3,8 +3,8 @@
 // parses, serialize back byte for byte; odd, the rest is an INIT, whose cookie
 // must verify and carry the INIT's addresses back intact.
 
-#include <sctp/cookie_auth.hpp>
-#include "serialize.hpp"
+#include <sctp/crypto/cookie_auth.hpp>
+#include "protocol/serialize.hpp"
 
 #include <algorithm>
 #include <cstdlib>

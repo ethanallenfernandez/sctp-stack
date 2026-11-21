@@ -7,24 +7,37 @@ Builds on Linux and Windows from one source tree.
 
 ```
 include/sctp/     public API — what a consumer of the library includes
-  sctp.hpp          protocol types and wire constants (no platform deps)
-  association.hpp   per-association state (the TCB)
-  socket.hpp        SCTP_Socket, the entry point
-  status.hpp        Sctp_Status, what each API call returns
-  platform.hpp      Winsock/POSIX socket compatibility layer
-  send_queue.hpp    outbound scheduling and per-association send gating
-  receive_queue.hpp messages delivered but not yet read by the application
-  expiration_queue.hpp  timer heap
-  notification_queue.hpp, cookie_auth.hpp, wakeup_pair.hpp, ...
+  socket.hpp          SCTP_Socket, the entry point
+  status.hpp          Sctp_Status, what each API call returns
+  protocol/
+    sctp.hpp            protocol types and wire constants (no platform deps)
+    association.hpp     per-association state (the TCB)
+    tsn.hpp             TSN and SSN serial arithmetic
+  queues/
+    send_queue.hpp      outbound scheduling and per-association send gating
+    receive_queue.hpp   messages delivered but not yet read by the application
+    expiration_queue.hpp  timer heap
+    notification_queue.hpp, deliverable.hpp
+  crypto/
+    cookie_auth.hpp     State Cookie signing, verification and secret rotation
+  platform/
+    compat.hpp          Winsock/POSIX socket compatibility layer, CSPRNG
+    wakeup_pair.hpp     interrupts the event loop's poll() from another thread
 src/              implementation + internal headers (not installed)
-  socket_api.cpp        public API, association setup and teardown
-  socket_event_loop.cpp poll loop, send path, flow and congestion gating
-  socket_handlers.cpp   inbound chunks: handshake, DATA, SACK, shutdown, ...
-  socket_timers.cpp     T1/T2/T3/T5, heartbeat, zero window probe, RTO
-  socket_plpmtud.cpp    PMTU discovery (RFC 8899) and ICMP Packet Too Big
-  builders.{hpp,cpp}    outbound packet construction
-  serialize.{hpp,cpp}   wire codec — byte order lives here
-  checksum.{hpp,cpp}    CRC-32C
+  socket/
+    api.cpp             public API, association setup and teardown
+    event_loop.cpp      poll loop, send path, flow and congestion gating
+    handlers.cpp        inbound chunks: handshake, DATA, SACK, shutdown, ...
+    timers.cpp          T1/T2/T3/T5, heartbeat, zero window probe, RTO
+    plpmtud.cpp         PMTU discovery (RFC 8899) and ICMP Packet Too Big
+    internal.hpp        constants and helpers shared by the files above
+  protocol/
+    serialize.{hpp,cpp} wire codec — byte order lives here
+    builders.{hpp,cpp}  outbound packet construction
+    checksum.{hpp,cpp}  CRC-32C
+  queues/             the queues declared in include/sctp/queues/
+  crypto/             SHA-256 and HMAC, Cookie_Auth
+  platform/           Wakeup_Pair
 examples/         runnable demos, linked against the library
 tests/            one binary per .cpp, all run by make test
   rfc/              a check for every MUST and SHOULD of RFC 9260 and RFC 6951,
@@ -41,9 +54,12 @@ fuzz/             libFuzzer targets for the packet and State Cookie codecs
 build/            all build output (gitignored, never written in-tree)
 ```
 
-Public headers are included as `<sctp/socket.hpp>`; internal headers as
-`"serialize.hpp"`. If a header under `src/` ever needs to be included from
-`include/sctp/`, that is a sign the split is wrong.
+A module's public headers live in `include/sctp/<module>/` and its sources and
+internal headers in `src/<module>/`. Modules depend only downward: platform,
+then protocol, then crypto and queues, then socket. Public headers are included
+as `<sctp/queues/send_queue.hpp>`; internal headers by their path under `src/`,
+as `"protocol/serialize.hpp"`. If a header under `src/` ever needs to be
+included from `include/sctp/`, that is a sign the split is wrong.
 
 ## Build
 

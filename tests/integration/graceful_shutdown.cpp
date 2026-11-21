@@ -2,7 +2,7 @@
 // event loops, no packet injected by hand.
 
 #include <sctp/socket.hpp>
-#include <sctp/platform.hpp>
+#include <sctp/platform/compat.hpp>
 
 #include <chrono>
 #include <cstdio>

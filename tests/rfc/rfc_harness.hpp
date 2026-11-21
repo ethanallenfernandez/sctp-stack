@@ -12,11 +12,11 @@
 // section using requirements language.
 
 #include <sctp/socket.hpp>
-#include <sctp/platform.hpp>
-#include "builders.hpp"
-#include "checksum.hpp"
-#include "serialize.hpp"
-#include "socket_internal.hpp"
+#include <sctp/platform/compat.hpp>
+#include "protocol/builders.hpp"
+#include "protocol/checksum.hpp"
+#include "protocol/serialize.hpp"
+#include "socket/internal.hpp"
 
 #include <algorithm>
 #include <chrono>

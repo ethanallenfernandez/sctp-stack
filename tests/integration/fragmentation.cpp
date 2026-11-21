@@ -1,9 +1,9 @@
 // Fragmentation and reassembly of user messages (RFC 9260 6.9): splitting on
 // send, reassembly and partial delivery on receive, and the two end to end.
 
-#include "builders.hpp"
-#include "serialize.hpp"
-#include <sctp/platform.hpp>
+#include "protocol/builders.hpp"
+#include "protocol/serialize.hpp"
+#include <sctp/platform/compat.hpp>
 #include <sctp/socket.hpp>
 
 #include <algorithm>

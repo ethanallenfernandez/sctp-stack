@@ -5,8 +5,8 @@
 // event loop, SACK processing, and retransmission timer together.
 
 #include <sctp/socket.hpp>
-#include "serialize.hpp"
-#include "checksum.hpp"
+#include "protocol/serialize.hpp"
+#include "protocol/checksum.hpp"
 
 #include <chrono>
 #include <cstdio>

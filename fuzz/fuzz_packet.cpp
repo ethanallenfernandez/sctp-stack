@@ -3,7 +3,7 @@
 // over each INIT and INIT ACK. Whatever parses must also serialize and parse
 // back to the same chunks.
 
-#include "serialize.hpp"
+#include "protocol/serialize.hpp"
 
 #include <cstdlib>
 #include <stdexcept>

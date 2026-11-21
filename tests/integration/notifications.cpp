@@ -2,9 +2,9 @@
 // stack produces for ERROR chunks and association lifecycle changes.
 
 #include <sctp/socket.hpp>
-#include <sctp/platform.hpp>
-#include <sctp/notification_queue.hpp>
-#include "serialize.hpp"
+#include <sctp/platform/compat.hpp>
+#include <sctp/queues/notification_queue.hpp>
+#include "protocol/serialize.hpp"
 
 #include <chrono>
 #include <cstdio>

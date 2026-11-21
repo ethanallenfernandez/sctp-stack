@@ -4,8 +4,8 @@
 // guards - this path was never exercised before.
 
 #include <sctp/socket.hpp>
-#include <sctp/utils.hpp>
-#include "serialize.hpp"
+#include <sctp/protocol/tsn.hpp>
+#include "protocol/serialize.hpp"
 
 #include <cstdio>
 #include <cstring>

@@ -8,9 +8,9 @@
 // clock. Sizes are UDP datagram sizes, as in RFC 8899 6.2.2.2.
 
 #include <sctp/socket.hpp>
-#include <sctp/platform.hpp>
-#include "serialize.hpp"
-#include "socket_internal.hpp"
+#include <sctp/platform/compat.hpp>
+#include "protocol/serialize.hpp"
+#include "socket/internal.hpp"
 
 #include <chrono>
 #include <cstdio>

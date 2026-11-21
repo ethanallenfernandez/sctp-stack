@@ -1,9 +1,9 @@
 // End-to-end coverage for the Tier 1 handshake and DATA reliability rules.
 
 #include <sctp/socket.hpp>
-#include <sctp/utils.hpp>
-#include "serialize.hpp"
-#include "socket_internal.hpp"
+#include <sctp/protocol/tsn.hpp>
+#include "protocol/serialize.hpp"
+#include "socket/internal.hpp"
 
 #include <chrono>
 #include <cstdio>

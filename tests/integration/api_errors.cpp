@@ -1,8 +1,8 @@
 // What each API call returns when it cannot do what was asked.
 
 #include <sctp/socket.hpp>
-#include <sctp/platform.hpp>
-#include "socket_internal.hpp"
+#include <sctp/platform/compat.hpp>
+#include "socket/internal.hpp"
 
 #include <cstdio>
 #include <string>

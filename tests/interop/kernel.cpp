@@ -23,7 +23,7 @@
 // net.sctp.udp_port too, except in the phase that sets them apart, and a kernel
 // client binds before connecting.
 
-#include <sctp/platform.hpp>
+#include <sctp/platform/compat.hpp>
 #include <sctp/socket.hpp>
 
 #include <cstdio>

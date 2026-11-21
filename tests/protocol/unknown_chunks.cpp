@@ -3,8 +3,8 @@
 // the reply is read off the send queue, so no event loop or socket I/O runs.
 
 #include <sctp/socket.hpp>
-#include <sctp/platform.hpp>
-#include "serialize.hpp"
+#include <sctp/platform/compat.hpp>
+#include "protocol/serialize.hpp"
 
 #include <algorithm>
 #include <cstdio>

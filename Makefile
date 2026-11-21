@@ -11,7 +11,8 @@ WARN     := -Wall -Wextra
 OPT      ?= -O2
 SANITIZE ?=
 
-# include/ is the public API; src/ holds the internal headers.
+# include/ is the public API; src/ holds the internal headers. Both are split
+# into the same modules, one directory each.
 INCLUDES := -Iinclude -Isrc
 
 CXXFLAGS  = $(CXXSTD) $(WARN) $(OPT) $(SANITIZE) $(INCLUDES) -pthread
@@ -21,7 +22,7 @@ LDFLAGS   = -pthread $(SANITIZE)
 BUILD ?= build
 
 LIB       := $(BUILD)/libsctp.a
-LIB_OBJS  := $(patsubst %.cpp,$(BUILD)/%.o,$(wildcard src/*.cpp))
+LIB_OBJS  := $(patsubst %.cpp,$(BUILD)/%.o,$(wildcard src/*/*.cpp))
 EX_BINS   := $(patsubst %.cpp,$(BUILD)/%,$(wildcard examples/*.cpp))
 TEST_BINS := $(patsubst %.cpp,$(BUILD)/%,$(wildcard tests/*/*.cpp))
 FUZZ_BINS := $(patsubst %.cpp,$(BUILD)/%,$(wildcard fuzz/*.cpp))

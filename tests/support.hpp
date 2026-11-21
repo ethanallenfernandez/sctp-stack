@@ -5,7 +5,7 @@
 // calls never block.
 
 #include <sctp/socket.hpp>
-#include "serialize.hpp"
+#include "protocol/serialize.hpp"
 
 #include <chrono>
 #include <cstdio>

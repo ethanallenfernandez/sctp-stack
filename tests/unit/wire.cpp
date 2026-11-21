@@ -5,10 +5,10 @@
 // output. A loopback test where both ends share a bug cannot detect that bug;
 // that is exactly how the CRC-32C polynomial error survived.
 
-#include "checksum.hpp"
-#include "builders.hpp"
-#include "serialize.hpp"
-#include <sctp/sctp.hpp>
+#include "protocol/checksum.hpp"
+#include "protocol/builders.hpp"
+#include "protocol/serialize.hpp"
+#include <sctp/protocol/sctp.hpp>
 
 #include <algorithm>
 #include <cstdio>

@@ -2,7 +2,7 @@
 // collisions and restarts, State Cookies, tags and path verification.
 
 #include "rfc_harness.hpp"
-#include "hmac.hpp"
+#include "crypto/hmac.hpp"
 
 #include <set>
 

@@ -1,14 +1,14 @@
 #ifndef SCTP_SOCKET_HPP
 #define SCTP_SOCKET_HPP
 
-#include <sctp/platform.hpp>
-#include <sctp/wakeup_pair.hpp>
-#include <sctp/deliverable.hpp>
-#include <sctp/expiration_queue.hpp>
-#include <sctp/send_queue.hpp>
-#include <sctp/cookie_auth.hpp>
-#include <sctp/notification_queue.hpp>
-#include <sctp/receive_queue.hpp>
+#include <sctp/platform/compat.hpp>
+#include <sctp/platform/wakeup_pair.hpp>
+#include <sctp/queues/deliverable.hpp>
+#include <sctp/queues/expiration_queue.hpp>
+#include <sctp/queues/send_queue.hpp>
+#include <sctp/crypto/cookie_auth.hpp>
+#include <sctp/queues/notification_queue.hpp>
+#include <sctp/queues/receive_queue.hpp>
 #include <sctp/status.hpp>
 
 #include <optional>
@@ -20,8 +20,8 @@
 #include <queue>
 #include <atomic>
 #include <unordered_map>
-#include <sctp/sctp.hpp>
-#include <sctp/association.hpp>
+#include <sctp/protocol/sctp.hpp>
+#include <sctp/protocol/association.hpp>
 #include <chrono>
 #include <cstdint>
 

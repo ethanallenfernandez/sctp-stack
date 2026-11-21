@@ -2,9 +2,9 @@
 // send, ordered delivery within a stream and independence between streams on
 // receive, unordered delivery, and the two end to end.
 
-#include "builders.hpp"
-#include "serialize.hpp"
-#include <sctp/platform.hpp>
+#include "protocol/builders.hpp"
+#include "protocol/serialize.hpp"
+#include <sctp/platform/compat.hpp>
 #include <sctp/socket.hpp>
 
 #include <algorithm>
