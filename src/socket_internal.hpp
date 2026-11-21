@@ -104,6 +104,10 @@ inline const Peer_Path& primary(const Association& assoc) {
     return primary(const_cast<Association&>(assoc));
 }
 
+inline void back_off(Peer_Path& path) {
+    path.rto = std::min<std::chrono::microseconds>(path.rto * 2, sctp_parameters::RTO_MAX);
+}
+
 inline Peer_Path make_path(const sockaddr_in& address, bool confirmed) {
     Peer_Path path{address, confirmed};
     path.cwnd = initial_cwnd(pmdcs(path));
@@ -230,6 +234,10 @@ inline size_t bytes_in_flight(const Association& assoc, const Peer_Path* path = 
 inline bool cwnd_open(const Association& assoc, const Peer_Path& path) {
     size_t flight = bytes_in_flight(assoc, &path);
     return path.single_packet_in_flight ? flight == 0 : flight < path.cwnd;
+}
+
+inline bool is_forming(Association_State state) {
+    return state == COOKIE_WAIT || state == COOKIE_ECHOED;
 }
 
 // RFC 9260 6: DATA is sent and SACKs processed in these states...

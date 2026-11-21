@@ -16,6 +16,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include "support.hpp"
 
 using Clock = std::chrono::steady_clock;
 
@@ -174,13 +175,6 @@ struct SCTP_Socket_Test_Access {
 };
 
 namespace {
-
-int failures = 0;
-
-void check(bool cond, const std::string& what) {
-    std::printf("  [%s] %s\n", cond ? "PASS" : "FAIL", what.c_str());
-    if (!cond) failures++;
-}
 
 using Access = SCTP_Socket_Test_Access;
 
@@ -342,7 +336,7 @@ void test_unanswered_probes_end_the_association() {
     Access::establish(stack, key);
 
     // Each round sends a probe, then lets its one-RTO deadline pass.
-    int threshold = Access::tcb(stack, key).error_threshold;
+    int threshold = sctp_parameters::ASSOCIATION_MAX_RETRANS;
     for (int i = 0; i <= threshold; i++) {
         Access::fire_heartbeat_timer(stack, key);
         if (i == 0) {
@@ -736,10 +730,5 @@ int main() {
     test_request_heartbeat();
     test_set_primary();
 
-    if (failures == 0) {
-        std::printf("\nALL TESTS PASSED (0 failures)\n");
-        return 0;
-    }
-    std::printf("\n%d CHECK(S) FAILED\n", failures);
-    return 1;
+    return report();
 }

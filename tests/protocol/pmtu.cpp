@@ -17,6 +17,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include "support.hpp"
 
 using Clock = std::chrono::steady_clock;
 
@@ -116,13 +117,6 @@ struct SCTP_Socket_Test_Access {
 namespace {
 
 using Access = SCTP_Socket_Test_Access;
-
-int failures = 0;
-
-void check(bool cond, const std::string& what) {
-    std::printf("  [%s] %s\n", cond ? "PASS" : "FAIL", what.c_str());
-    if (!cond) failures++;
-}
 
 Plpmtud& plpmtud(SCTP_Socket& stack, const Association_Key& key) {
     return primary(Access::tcb(stack, key)).plpmtud;
@@ -387,10 +381,5 @@ int main() {
     test_raise_timer_searches_again();
     test_packet_too_big();
 
-    if (failures == 0) {
-        std::printf("\nALL TESTS PASSED (0 failures)\n");
-        return 0;
-    }
-    std::printf("\n%d CHECK(S) FAILED\n", failures);
-    return 1;
+    return report();
 }

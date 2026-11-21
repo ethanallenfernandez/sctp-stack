@@ -7,6 +7,7 @@
 #include <string>
 #include <functional>
 #include <map>
+#include <optional>
 #include <deque>
 #include <chrono>
 #include <unordered_map>
@@ -153,7 +154,6 @@ struct Association {
     std::vector<Peer_Path> peer_address_list;
     sockaddr_in primary_path;
     uint16_t error_count;
-    uint16_t error_threshold;
     uint32_t peer_rwnd;
     uint32_t peer_max_rwnd;
     bool zero_window_probe_allowed;
@@ -170,8 +170,7 @@ struct Association {
     uint8_t stale_cookie_retries;
     uint32_t cumulative_tsn_ack;
     std::map<uint32_t, Outstanding_Data, Tsn_Less> outstanding_data;
-    bool has_rtt_measurement_tsn;
-    uint32_t rtt_measurement_tsn;
+    std::optional<uint32_t> rtt_measurement_tsn;
     std::chrono::milliseconds hb_interval;
     // New-DATA packets sent in the current transmission opportunity.
     uint32_t burst_count;

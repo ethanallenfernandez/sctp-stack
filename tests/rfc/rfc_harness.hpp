@@ -102,8 +102,7 @@ inline SCTP_Chunk data_chunk(const data_chunk_value& value, uint8_t extra_flags 
 
 inline SCTP_Chunk sack_chunk(uint32_t cumulative, uint32_t a_rwnd = RWND, std::vector<sack_gap_ack_block> gaps = {},
                              std::vector<uint32_t> duplicates = {}) {
-    return chunk(SACK, sack_chunk_value{cumulative, a_rwnd, static_cast<uint16_t>(gaps.size()),
-                                        static_cast<uint16_t>(duplicates.size()), std::move(gaps), std::move(duplicates)});
+    return chunk(SACK, sack_chunk_value{cumulative, a_rwnd, std::move(gaps), std::move(duplicates)});
 }
 
 inline init_chunk_value init_value(uint32_t tag = PEER_TAG, uint32_t tsn = PEER_TSN, uint32_t a_rwnd = RWND,

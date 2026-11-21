@@ -13,13 +13,7 @@
 #include <vector>
 #include <thread>
 #include <chrono>
-
-static int failures = 0;
-
-static void check(bool cond, const std::string& what) {
-    std::printf("  [%s] %s\n", cond ? "PASS" : "FAIL", what.c_str());
-    if (!cond) failures++;
-}
+#include "support.hpp"
 
 /*--------------------------- tsn_lt truth table ----------------------------*/
 
@@ -49,52 +43,6 @@ namespace {
 constexpr uint16_t SERVER_PORT = 19901;
 constexpr uint16_t CLIENT_PORT = 19902;
 constexpr uint32_t CLIENT_TAG  = 0xC1C1C1C1;
-
-struct RawPeer {
-    sctp_socket_t fd = INVALID_SOCKET;
-    sockaddr_in   server{};
-    sockaddr_in   self{};
-
-    bool open() {
-        fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (fd == INVALID_SOCKET) return false;
-
-        self.sin_family = AF_INET;
-        self.sin_port   = htons(CLIENT_PORT);
-        sctp_parse_ipv4("127.0.0.1", self.sin_addr);
-        if (bind(fd, (sockaddr*)&self, sizeof(self)) == SOCKET_ERROR) return false;
-
-        timeval tv{}; tv.tv_sec = 2;
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
-
-        server.sin_family = AF_INET;
-        server.sin_port   = htons(SERVER_PORT);
-        sctp_parse_ipv4("127.0.0.1", server.sin_addr);
-        return true;
-    }
-
-    void send(const SCTP_Packet& p) {
-        std::vector<uint8_t> w = serialize_sctp_packet(p);
-        sendto(fd, (const char*)w.data(), w.size(), 0,
-               (const sockaddr*)&server, sizeof(server));
-    }
-
-    // Returns false on timeout.
-    bool recv(SCTP_Packet& out) {
-        uint8_t buf[2048];
-        sockaddr_in from{};
-        socklen_t   flen = sizeof(from);
-        int n = recvfrom(fd, (char*)buf, sizeof(buf), 0, (sockaddr*)&from, &flen);
-        if (n <= 0) return false;
-        try { out = deserialize_sctp_packet(buf, (size_t)n); }
-        catch (const std::exception&) { return false; }
-        return true;
-    }
-
-    void close_it() {
-        if (fd != INVALID_SOCKET) { sctp_close_socket(fd); fd = INVALID_SOCKET; }
-    }
-};
 
 SCTP_Packet make_header(uint32_t ver_tag) {
     SCTP_Packet p;
@@ -143,8 +91,8 @@ static void test_out_of_order_delivery(uint32_t base_tsn, const char* label) {
     }
     server.sctp_run();
 
-    RawPeer peer;
-    if (!peer.open()) { check(false, "peer socket setup"); return; }
+    Raw_Peer peer;
+    if (!peer.open(CLIENT_PORT, SERVER_PORT)) { check(false, "peer socket setup"); return; }
 
     // --- handshake -----------------------------------------------------
     SCTP_Packet init = make_header(0);
@@ -161,7 +109,7 @@ static void test_out_of_order_delivery(uint32_t base_tsn, const char* label) {
     SCTP_Packet init_ack;
     if (!peer.recv(init_ack) || init_ack.chunks.empty() ||
         init_ack.chunks[0].chunk_header.type != INIT_ACK) {
-        check(false, "received INIT_ACK"); peer.close_it(); return;
+        check(false, "received INIT_ACK"); peer.close(); return;
     }
     const auto& init_ack_value = std::get<init_chunk_value>(init_ack.chunks[0].chunk_value);
     uint32_t server_tag = init_ack_value.initiate_tag;
@@ -171,7 +119,7 @@ static void test_out_of_order_delivery(uint32_t base_tsn, const char* label) {
     // only thing that lets it rebuild the association.
     std::vector<uint8_t> cookie;
     if (!find_parameter(init_ack_value.optional_parameters, PARAM_STATE_COOKIE, cookie)) {
-        check(false, "INIT_ACK carries a State Cookie"); peer.close_it(); return;
+        check(false, "INIT_ACK carries a State Cookie"); peer.close(); return;
     }
 
     SCTP_Packet cookie_echo = make_header(server_tag);
@@ -184,7 +132,7 @@ static void test_out_of_order_delivery(uint32_t base_tsn, const char* label) {
     SCTP_Packet cookie_ack;
     if (!peer.recv(cookie_ack) || cookie_ack.chunks.empty() ||
         cookie_ack.chunks[0].chunk_header.type != COOKIE_ACK) {
-        check(false, "received COOKIE_ACK"); peer.close_it(); return;
+        check(false, "received COOKIE_ACK"); peer.close(); return;
     }
     check(true, "association established");
 
@@ -217,7 +165,7 @@ static void test_out_of_order_delivery(uint32_t base_tsn, const char* label) {
     std::printf("      delivered: %s\n", got_all.empty() ? "(nothing)" : got_all.c_str());
     check(all_ok, "all 5 chunks delivered once, in TSN order");
 
-    peer.close_it();
+    peer.close();
 }
 
 int main() {
@@ -228,8 +176,5 @@ int main() {
     // Straddles the 32-bit boundary: TSNs run 0xFFFFFFFE, FFFFFFFF, 0, 1, 2.
     test_out_of_order_delivery(0xFFFFFFFE, "across the TSN wrap");
 
-    std::printf("\n%s (%d failure%s)\n",
-                failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
-                failures, failures == 1 ? "" : "s");
-    return failures == 0 ? 0 : 1;
+    return report();
 }

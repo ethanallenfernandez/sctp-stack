@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <string>
 #include <vector>
+#include "support.hpp"
 
 namespace {
 
@@ -75,13 +76,6 @@ struct SCTP_Socket_Test_Access {
 };
 
 namespace {
-
-int failures = 0;
-
-void check(bool cond, const std::string& what) {
-    std::printf("  [%s] %s\n", cond ? "PASS" : "FAIL", what.c_str());
-    if (!cond) failures++;
-}
 
 SCTP_Chunk unknown(uint8_t type, std::vector<uint8_t> body = {0xAA, 0xBB, 0xCC}, uint8_t flags = 0) {
     return {{static_cast<Chunk_Type>(type), flags, 0}, unknown_chunk_value{std::move(body)}};
@@ -198,8 +192,5 @@ int main() {
     test_who_gets_a_report();
     test_report_fits_path();
 
-    std::printf("\n%s (%d failure%s)\n",
-                failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
-                failures, failures == 1 ? "" : "s");
-    return failures == 0 ? 0 : 1;
+    return report();
 }

@@ -57,7 +57,7 @@ void SCTP_Socket::stop_plpmtud(const Association_Key& key, Peer_Path& path) {
 void SCTP_Socket::schedule_plpmtu_probe(const Association_Key& key, Peer_Path& path, std::chrono::microseconds delay) {
     path.plpmtud.probe_outstanding = false;
     path.plpmtud.probe_count = 0;
-    schedule_expiration(probe_timer(key, path), std::chrono::steady_clock::now() + delay, Deliverable{key, {}, SCTP_Packet{}});
+    schedule_expiration(probe_timer(key, path), std::chrono::steady_clock::now() + delay);
 }
 
 void SCTP_Socket::complete_plpmtu_search(const Association_Key& key, Peer_Path& path) {
@@ -65,7 +65,16 @@ void SCTP_Socket::complete_plpmtu_search(const Association_Key& key, Peer_Path& 
     path.plpmtud.confirming = false;
     path.plpmtud.probe_outstanding = false;
     cancel_expiration(probe_timer(key, path));
-    schedule_expiration(raise_timer(key, path), std::chrono::steady_clock::now() + PMTU_RAISE_TIMER, Deliverable{key, {}, SCTP_Packet{}});
+    schedule_expiration(raise_timer(key, path), std::chrono::steady_clock::now() + PMTU_RAISE_TIMER);
+}
+
+void SCTP_Socket::continue_plpmtu_search(const Association_Key& key, Peer_Path& path) {
+    uint32_t next = next_probe_size(path.plpmtud);
+    if (next == 0) {
+        return complete_plpmtu_search(key, path);
+    }
+    path.plpmtud.probed_size = next;
+    schedule_plpmtu_probe(key, path);
 }
 
 // 4.3: losing DATA on a path whose PLPMTU was raised past BASE_PLPMTU may mean
@@ -83,13 +92,8 @@ void SCTP_Socket::check_for_black_hole(const Association_Key& key, Peer_Path& pa
 Deliverable SCTP_Socket::make_plpmtu_probe(const Association_Key& key, const Association& assoc, Peer_Path& path) {
     generate_random(path.plpmtud.probe_nonce);
     path.plpmtud.probe_outstanding = true;
-    return Deliverable{key, path.address, build_plpmtu_probe(
-        ntohs(local_address.sin_port),
-        ntohs(key.address.sin_port),
-        assoc.peer_ver_tag,
-        heartbeat_info(path.plpmtud.probe_nonce, path.address),
-        path.plpmtud.probed_size
-    )};
+    return Deliverable{key, path.address, build_plpmtu_probe(ntohs(local_address.sin_port), ntohs(key.address.sin_port),
+        assoc.peer_ver_tag, heartbeat_info(path.plpmtud.probe_nonce, path.address), path.plpmtud.probed_size)};
 }
 
 void SCTP_Socket::handle_plpmtu_probe_ack(const Association_Key& key, Association& assoc, Peer_Path& path) {
@@ -108,68 +112,46 @@ void SCTP_Socket::handle_plpmtu_probe_ack(const Association_Key& key, Associatio
         return;
     }
     plpmtud.state = Plpmtud_State::SEARCHING;
-    uint32_t next = next_probe_size(plpmtud);
-    if (next == 0) {
-        complete_plpmtu_search(key, path);
-        return;
-    }
-    plpmtud.probed_size = next;
-    schedule_plpmtu_probe(key, path);
+    continue_plpmtu_search(key, path);
 }
 
 void SCTP_Socket::handle_plpmtu_probe_expiration(const Association_Key& location, const sockaddr_in& destination) {
-    Deliverable probe;
-    {
-        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
-        auto association = associations.find(location);
-        if (association == associations.end() || !transmits_data(association->second.state)) {
-            return;
-        }
-        Association& assoc = association->second;
-        Peer_Path* path = find_path(assoc, destination);
-        if (path == nullptr) {
-            return;
-        }
-
-        Plpmtud& plpmtud = path->plpmtud;
-        if (plpmtud.probe_outstanding) {
-            plpmtud.probe_outstanding = false;
-            if (++plpmtud.probe_count >= MAX_PROBES) {
-                plpmtud.probe_count = 0;
-                if (plpmtud.state == Plpmtud_State::BASE) {
-                    plpmtud.state = Plpmtud_State::ERROR;
-                    schedule_expiration(raise_timer(location, *path), std::chrono::steady_clock::now() + PMTU_RAISE_TIMER, Deliverable{location, {}, SCTP_Packet{}});
-                    return;
-                }
-                if (plpmtud.confirming) {
-                    start_plpmtud(location, *path);
-                    return;
-                }
-                plpmtud.search_high = plpmtud.probed_size;
-                uint32_t next = next_probe_size(plpmtud);
-                if (next == 0) {
-                    complete_plpmtu_search(location, *path);
-                    return;
-                }
-                plpmtud.probed_size = next;
-            }
-        } else if (plpmtud.state != Plpmtud_State::BASE && plpmtud.state != Plpmtud_State::SEARCHING && !plpmtud.confirming) {
-            return;
-        }
-
-        probe = make_plpmtu_probe(location, assoc, *path);
-        schedule_expiration(probe_timer(location, *path), std::chrono::steady_clock::now() + PROBE_TIMER, Deliverable{location, {}, SCTP_Packet{}});
+    Association* assoc = find_tcb(location);
+    Peer_Path* path = assoc && transmits_data(assoc->state) ? find_path(*assoc, destination) : nullptr;
+    if (path == nullptr) {
+        return;
     }
-    enqueue_packet(std::move(probe));
+
+    Plpmtud& plpmtud = path->plpmtud;
+    if (plpmtud.probe_outstanding) {
+        plpmtud.probe_outstanding = false;
+        if (++plpmtud.probe_count >= MAX_PROBES) {
+            plpmtud.probe_count = 0;
+            if (plpmtud.state == Plpmtud_State::BASE) {
+                plpmtud.state = Plpmtud_State::ERROR;
+                return schedule_expiration(raise_timer(location, *path), std::chrono::steady_clock::now() + PMTU_RAISE_TIMER);
+            }
+            if (plpmtud.confirming) {
+                return start_plpmtud(location, *path);
+            }
+            plpmtud.search_high = plpmtud.probed_size;
+            uint32_t next = next_probe_size(plpmtud);
+            if (next == 0) {
+                return complete_plpmtu_search(location, *path);
+            }
+            plpmtud.probed_size = next;
+        }
+    } else if (plpmtud.state != Plpmtud_State::BASE && plpmtud.state != Plpmtud_State::SEARCHING && !plpmtud.confirming) {
+        return;
+    }
+
+    enqueue_packet(make_plpmtu_probe(location, *assoc, *path));
+    schedule_expiration(probe_timer(location, *path), std::chrono::steady_clock::now() + PROBE_TIMER);
 }
 
 void SCTP_Socket::handle_pmtu_raise_expiration(const Association_Key& location, const sockaddr_in& destination) {
-    std::lock_guard<std::mutex> assoc_lock(associations_mutex);
-    auto association = associations.find(location);
-    if (association == associations.end() || !transmits_data(association->second.state)) {
-        return;
-    }
-    Peer_Path* path = find_path(association->second, destination);
+    Association* assoc = find_tcb(location);
+    Peer_Path* path = assoc && transmits_data(assoc->state) ? find_path(*assoc, destination) : nullptr;
     if (path == nullptr) {
         return;
     }
@@ -184,13 +166,7 @@ void SCTP_Socket::handle_pmtu_raise_expiration(const Association_Key& location, 
     }
     plpmtud.state = Plpmtud_State::SEARCHING;
     plpmtud.search_high = MAX_PLPMTU + 1;
-    uint32_t next = next_probe_size(plpmtud);
-    if (next == 0) {
-        complete_plpmtu_search(location, *path);
-        return;
-    }
-    plpmtud.probed_size = next;
-    schedule_plpmtu_probe(location, *path);
+    continue_plpmtu_search(location, *path);
 }
 
 // quoted starts at the SCTP common header of the packet the PTB answers. A
@@ -205,11 +181,8 @@ void SCTP_Socket::handle_icmp_ptb(const sockaddr_in& destination, const uint8_t*
 
     std::lock_guard<std::mutex> assoc_lock(associations_mutex);
     Association_Key key = association_key_for(peer_key(destination, peer_port));
-    auto association = associations.find(key);
-    if (association == associations.end() || tag == 0 || tag != association->second.peer_ver_tag) {
-        return;
-    }
-    Peer_Path* path = find_path(association->second, destination);
+    Association* assoc = find_tcb(key);
+    Peer_Path* path = assoc && tag != 0 && tag == assoc->peer_ver_tag ? find_path(*assoc, destination) : nullptr;
     if (path == nullptr || path->plpmtud.state == Plpmtud_State::DISABLED) {
         return;
     }
@@ -224,7 +197,7 @@ void SCTP_Socket::handle_icmp_ptb(const sockaddr_in& destination, const uint8_t*
         cancel_expiration(probe_timer(key, *path));
         plpmtud = Plpmtud{};
         plpmtud.state = Plpmtud_State::ERROR;
-        schedule_expiration(raise_timer(key, *path), std::chrono::steady_clock::now() + PMTU_RAISE_TIMER, Deliverable{key, {}, SCTP_Packet{}});
+        schedule_expiration(raise_timer(key, *path), std::chrono::steady_clock::now() + PMTU_RAISE_TIMER);
         return;
     }
     if (pl_ptb_size < plpmtud.plpmtu) {

@@ -9,15 +9,9 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include "support.hpp"
 
 namespace {
-
-int failures = 0;
-
-void check(bool cond, const std::string& what) {
-    std::printf("  [%s] %s\n", cond ? "PASS" : "FAIL", what.c_str());
-    if (!cond) failures++;
-}
 
 constexpr uint8_t MARKER = 0xAA;
 constexpr int TRIALS = 64;
@@ -149,10 +143,5 @@ int main() {
     test_generate_random();
     test_verification_tag_strategy();
 
-    if (failures == 0) {
-        std::printf("All CSPRNG tests passed\n");
-    } else {
-        std::printf("%d CSPRNG test(s) failed\n", failures);
-    }
-    return failures == 0 ? 0 : 1;
+    return report();
 }

@@ -116,17 +116,9 @@ void Send_Queue::defer(std::chrono::steady_clock::time_point retry_at) {
 
 void Send_Queue::purge(const Association_Key& location) {
     std::lock_guard<std::mutex> lock(mutex);
-    auto purge_one = [&](std::deque<Queued>& queue) {
-        queue.erase(
-            std::remove_if(queue.begin(), queue.end(), [&](const Queued& queued) {
-                return queued.deliverable.location == location;
-            }),
-            queue.end()
-        );
-    };
-    purge_one(control);
-    purge_one(retransmission);
-    purge_one(new_data);
+    for (auto* queue : {&control, &retransmission, &new_data}) {
+        std::erase_if(*queue, [&](const Queued& queued) { return queued.deliverable.location == location; });
+    }
 }
 
 void Send_Queue::remove_acked_retransmissions(const Association_Key& location, const sack_chunk_value& sack) {

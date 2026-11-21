@@ -12,6 +12,7 @@
 #include <string>
 #include <tuple>
 #include <vector>
+#include "support.hpp"
 
 namespace {
 
@@ -140,7 +141,7 @@ struct SCTP_Socket_Test_Access {
         Stack stack(state, cumulative_tsn_ack);
         SCTP_Packet packet;
         packet.header = {PEER_PORT, LOCAL_PORT, OUR_TAG, 0};
-        packet.chunks.push_back({{SACK, 0, 0}, sack_chunk_value{sacked, RWND, 0, 0, {}, {}}});
+        packet.chunks.push_back({{SACK, 0, 0}, sack_chunk_value{sacked, RWND, {}, {}}});
         std::vector<uint8_t> wire = serialize_sctp_packet(packet);
         stack.socket.handle_recv_packet(wire.data(), wire.size(), peer_address());
         return stack.collect();
@@ -296,13 +297,6 @@ struct SCTP_Socket_Test_Access {
 };
 
 namespace {
-
-int failures = 0;
-
-void check(bool cond, const std::string& what) {
-    std::printf("  [%s] %s\n", cond ? "PASS" : "FAIL", what.c_str());
-    if (!cond) failures++;
-}
 
 using Access = SCTP_Socket_Test_Access;
 
@@ -633,16 +627,16 @@ void test_ootb_shutdown_ack() {
 
 void test_sack_acking_unsent() {
     std::printf("SACK acknowledging a TSN never sent (12.3):\n");
-    auto r = Access::deliver(ESTABLISHED, single(SACK, sack_chunk_value{NEXT_TSN, RWND, 0, 0, {}, {}}));
+    auto r = Access::deliver(ESTABLISHED, single(SACK, sack_chunk_value{NEXT_TSN, RWND, {}, {}}));
     check(!r.has_association && reported(r, Assoc_Change_State::COMM_LOST), "a Cumulative TSN Ack past the last TSN sent aborts");
     check(r.sent.size() == 1 && r.sent[0].chunks[0].chunk_header.type == ABORT
           && std::get<error_chunk_value>(r.sent[0].chunks[0].chunk_value).causes.at(0).code == CAUSE_PROTOCOL_VIOLATION,
           "with a Protocol Violation cause");
 
-    r = Access::deliver(ESTABLISHED, single(SACK, sack_chunk_value{NEXT_TSN - 3, RWND, 1, 0, {{2, 3}}, {}}));
+    r = Access::deliver(ESTABLISHED, single(SACK, sack_chunk_value{NEXT_TSN - 3, RWND, {{2, 3}}, {}}));
     check(!r.has_association, "a Gap Ack Block reaching past the last TSN sent aborts");
 
-    r = Access::deliver(ESTABLISHED, single(SACK, sack_chunk_value{NEXT_TSN - 3, RWND, 1, 0, {{1, 2}}, {}}));
+    r = Access::deliver(ESTABLISHED, single(SACK, sack_chunk_value{NEXT_TSN - 3, RWND, {{1, 2}}, {}}));
     check(r.has_association, "a Gap Ack Block ending on the last TSN sent is fine");
 }
 
@@ -777,10 +771,5 @@ int main() {
     test_user_shutdown();
     test_t5_guard();
 
-    if (failures) {
-        std::printf("\n%d check(s) FAILED\n", failures);
-        return 1;
-    }
-    std::printf("\nAll shutdown tests passed\n");
-    return 0;
+    return report();
 }

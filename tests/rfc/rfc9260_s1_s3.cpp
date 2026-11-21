@@ -215,7 +215,7 @@ void s3_2_1_registry() {
     req("9260-15.3-3", unique.size() == types.size(), "parameter types are unique across chunks");
     req("9260-3.2.1-5", PARAM_IPV4_ADDRESS == 5 && PARAM_HEARTBEAT_INFO == 1 && PARAM_STATE_COOKIE == 7 && PARAM_COOKIE_PRESERVATIVE == 9,
         "type 5 is the IPv4 Address everywhere, and the other types match the registry");
-    auto w = serialize_sctp_packet(build_error(1, 2, 3, {error_cause{CAUSE_INVALID_STREAM_ID, {0, 7, 0, 0}}, error_cause{0x1234, {9}}}));
+    auto w = serialize_sctp_packet(build_packet(1, 2, 3, OP_ERROR, error_chunk_value{{error_cause{CAUSE_INVALID_STREAM_ID, {0, 7, 0, 0}}, error_cause{0x1234, {9}}}}));
     size_t c = SCTP_COMMON_HEADER_SIZE + SCTP_CHUNK_HEADER_SIZE;
     bool format = be16(w, c) == CAUSE_INVALID_STREAM_ID && be16(w, c + 2) == 8 && be16(w, c + 8) == 0x1234 && be16(w, c + 10) == 5;
     req("9260-15.4-2", format, "each error cause starts with a 16-bit code and a 16-bit length");
@@ -569,7 +569,7 @@ void s3_3_4_sack() {
     }
     bool fields = false;
     if (sack) {
-        SCTP_Packet one = build_sack(1, 2, 3, sack->cumulative_tsn_ack, sack->a_rwnd, sack->gap_ack_blocks, sack->duplicate_tsns);
+        SCTP_Packet one = build_packet(1, 2, 3, SACK, sack_chunk_value{sack->cumulative_tsn_ack, sack->a_rwnd, sack->gap_ack_blocks, sack->duplicate_tsns});
         auto w = serialize_sctp_packet(one);
         fields = be16(w, 14) == 16 + 4 * sack->gap_ack_blocks.size() + 4 * sack->duplicate_tsns.size()
             && be16(w, 24) == sack->gap_ack_blocks.size() && be16(w, 26) == sack->duplicate_tsns.size();

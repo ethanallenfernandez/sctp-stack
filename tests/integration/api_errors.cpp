@@ -47,13 +47,6 @@ namespace {
 
 using Access = SCTP_Socket_Test_Access;
 
-int failures = 0;
-
-void check(bool cond, const std::string& what) {
-    std::printf("  [%s] %s\n", cond ? "PASS" : "FAIL", what.c_str());
-    if (!cond) failures++;
-}
-
 void expect(Sctp_Status got, Sctp_Status want, const std::string& what) {
     check(got == want, what);
 }
@@ -158,8 +151,5 @@ int main() {
     test_oversized_message();
     test_unread_data_outlives_its_association();
 
-    std::printf("\n%s (%d failure%s)\n",
-                failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
-                failures, failures == 1 ? "" : "s");
-    return failures == 0 ? 0 : 1;
+    return report();
 }

@@ -55,7 +55,6 @@ class Notification_Queue {
     public:
         void enqueue(Notification notification);
         std::optional<Notification> dequeue();
-        void clear();
 
     private:
         std::queue<Notification> queue;

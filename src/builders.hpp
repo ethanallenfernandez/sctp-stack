@@ -6,93 +6,20 @@
 #include <sctp/sctp.hpp>
 #include <sctp/platform.hpp>
 
-SCTP_Packet build_init(
-    uint16_t src_port,
-    uint16_t des_port,
-    uint32_t initiate_tag,
-    uint32_t initial_tsn,
-    uint32_t cookie_preservative_ms = 0,
-    const std::vector<in_addr>& addresses = {});
+SCTP_Packet build_packet(uint16_t src_port, uint16_t des_port, uint32_t tag, Chunk_Type type, Chunk_Value_Type value, uint8_t flag = 0);
 
-SCTP_Packet build_init_ack(
-    uint16_t src_port,
-    uint16_t des_port,
-    uint32_t peer_tag,
-    uint32_t initiate_tag,
-    uint32_t initial_tsn,
-    const std::vector<uint8_t>& cookie,
-    const std::vector<std::vector<uint8_t>>& unrecognized = {},
-    const std::vector<in_addr>& addresses = {});
+SCTP_Packet build_init(uint16_t src_port, uint16_t des_port, uint32_t initiate_tag, uint32_t initial_tsn,
+                       uint32_t cookie_preservative_ms = 0, const std::vector<in_addr>& addresses = {});
 
-SCTP_Packet build_cookie_echo(
-    uint16_t src_port,
-    uint16_t des_port,
-    uint32_t peer_tag,
-    std::vector<uint8_t> cookie,
-    std::vector<error_cause> errors = {});
+SCTP_Packet build_init_ack(uint16_t src_port, uint16_t des_port, uint32_t peer_tag, uint32_t initiate_tag, uint32_t initial_tsn,
+                           const std::vector<uint8_t>& cookie, const std::vector<std::vector<uint8_t>>& unrecognized = {},
+                           const std::vector<in_addr>& addresses = {});
 
-SCTP_Packet build_cookie_ack(uint16_t src_port, uint16_t des_port, uint32_t peer_tag);
-
-SCTP_Packet build_data(
-    uint16_t src_port,
-    uint16_t des_port,
-    uint32_t peer_tag,
-    std::vector<data_chunk_value> chunks);
-
-SCTP_Packet build_sack(
-    uint16_t src_port,
-    uint16_t des_port,
-    uint32_t peer_tag,
-    uint32_t cumulative_tsn_ack,
-    uint32_t a_rwnd,
-    std::vector<sack_gap_ack_block> gaps,
-    std::vector<uint32_t> duplicate_tsns);
-
-SCTP_Packet build_error(
-    uint16_t src_port,
-    uint16_t des_port,
-    uint32_t peer_tag,
-    std::vector<error_cause> causes);
-
-SCTP_Packet build_abort(
-    uint16_t src_port,
-    uint16_t des_port,
-    uint32_t tag,
-    bool reflected,
-    std::vector<error_cause> causes);
-
-SCTP_Packet build_shutdown(
-    uint16_t src_port,
-    uint16_t des_port,
-    uint32_t peer_tag,
-    uint32_t cumulative_tsn_ack);
-
-SCTP_Packet build_shutdown_ack(uint16_t src_port, uint16_t des_port, uint32_t peer_tag);
-
-SCTP_Packet build_shutdown_complete(uint16_t src_port, uint16_t des_port, uint32_t tag, bool reflected);
-
-// The Heartbeat Info is opaque: the sender picks the bytes, the responder
-// echoes back the ones it was given without reading them.
-SCTP_Packet build_heartbeat(
-    uint16_t src_port,
-    uint16_t des_port,
-    uint32_t peer_tag,
-    std::vector<uint8_t> info);
-
-SCTP_Packet build_heartbeat_ack(
-    uint16_t src_port,
-    uint16_t des_port,
-    uint32_t peer_tag,
-    std::vector<uint8_t> info);
+SCTP_Packet build_data(uint16_t src_port, uint16_t des_port, uint32_t peer_tag, std::vector<data_chunk_value> chunks);
 
 // RFC 8899 6.2.1.2: a HEARTBEAT and a PAD chunk filling the UDP datagram to
 // exactly plpmtu bytes. plpmtu is a multiple of 4.
-SCTP_Packet build_plpmtu_probe(
-    uint16_t src_port,
-    uint16_t des_port,
-    uint32_t peer_tag,
-    std::vector<uint8_t> info,
-    uint32_t plpmtu);
+SCTP_Packet build_plpmtu_probe(uint16_t src_port, uint16_t des_port, uint32_t peer_tag, std::vector<uint8_t> info, uint32_t plpmtu);
 
 // Padded wire footprint of one DATA chunk, for callers bundling against PMDCS.
 size_t data_chunk_wire_size(const data_chunk_value& data);

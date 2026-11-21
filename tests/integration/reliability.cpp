@@ -121,9 +121,6 @@ struct SCTP_Socket_Test_Access {
             .chunk_value = sack_chunk_value{
                 .cumulative_tsn_ack = cumulative,
                 .a_rwnd = RWND,
-                .number_of_gap_ack_blocks =
-                    static_cast<uint16_t>(gaps.size()),
-                .number_of_duplicate_tsns = 0,
                 .gap_ack_blocks = std::move(gaps),
                 .duplicate_tsns = {}}};
         stack.handle_sack(SCTP_Common_Header{}, chunk, key, key.address);
@@ -175,230 +172,15 @@ constexpr uint32_t PEER_TAG = 0x10203040;
 constexpr uint32_t PEER_TSN = 0x55667788;
 constexpr uint8_t DATA_I_BIT = 0x08;
 
-int failures = 0;
-
-void check(bool condition, const std::string& description) {
-    std::printf("  [%s] %s\n", condition ? "PASS" : "FAIL",
-                description.c_str());
-    if (!condition) {
-        ++failures;
-    }
-}
-
-struct RawPeer {
-    sctp_socket_t socket = INVALID_SOCKET;
-    sockaddr_in self{};
-    sockaddr_in stack_address{};
-    uint32_t stack_tag = 0;
-
-    bool open() {
-        socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (socket == INVALID_SOCKET) {
-            return false;
-        }
-        self.sin_family = AF_INET;
-        self.sin_port = htons(PEER_PORT);
-        sctp_parse_ipv4("127.0.0.1", self.sin_addr);
-        if (::bind(socket, reinterpret_cast<sockaddr*>(&self), sizeof(self))
-                == SOCKET_ERROR || !sctp_set_nonblocking(socket)) {
-            close();
-            return false;
-        }
-        stack_address.sin_family = AF_INET;
-        stack_address.sin_port = htons(STACK_PORT);
-        sctp_parse_ipv4("127.0.0.1", stack_address.sin_addr);
-        return true;
-    }
-
-    void close() {
-        if (socket != INVALID_SOCKET) {
-            sctp_close_socket(socket);
-            socket = INVALID_SOCKET;
-        }
-    }
-
-    void send(const SCTP_Packet& packet) {
-        std::vector<uint8_t> wire = serialize_sctp_packet(packet);
-        ::sendto(socket, reinterpret_cast<const char*>(wire.data()),
-                 wire.size(), 0,
-                 reinterpret_cast<const sockaddr*>(&stack_address),
-                 sizeof(stack_address));
-    }
-
-    bool receive_until(Chunk_Type type, SCTP_Packet& packet,
-                       Clock::time_point deadline,
-                       std::vector<uint8_t>* raw = nullptr) {
-        while (Clock::now() < deadline) {
-            uint8_t buffer[4096];
-            sockaddr_in from{};
-            socklen_t from_length = sizeof(from);
-            int received = ::recvfrom(
-                socket, reinterpret_cast<char*>(buffer), sizeof(buffer), 0,
-                reinterpret_cast<sockaddr*>(&from), &from_length);
-            if (received > 0) {
-                try {
-                    SCTP_Packet candidate = deserialize_sctp_packet(
-                        buffer, static_cast<size_t>(received));
-                    if (!candidate.chunks.empty()
-                            && candidate.chunks[0].chunk_header.type == type) {
-                        packet = std::move(candidate);
-                        if (raw != nullptr) {
-                            raw->assign(buffer, buffer + received);
-                        }
-                        return true;
-                    }
-                } catch (const std::exception&) {
-                }
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        }
-        return false;
-    }
-
-    SCTP_Packet packet(Chunk_Type type) const {
-        SCTP_Packet result;
-        result.header.src_port = PEER_PORT;
-        result.header.des_port = STACK_PORT;
-        result.header.verification_tag = type == INIT ? 0 : stack_tag;
-        return result;
-    }
-
-    void send_cookie_ack() {
-        SCTP_Packet ack = packet(COOKIE_ACK);
-        ack.chunks.push_back(SCTP_Chunk{
-            .chunk_header = {.type = COOKIE_ACK, .flag = 0, .length = 0},
-            .chunk_value = empty_chunk_value{}});
-        send(ack);
-    }
-
-    bool begin_initiator_handshake(
-            SCTP_Socket& stack, Association_Key& key,
-            SCTP_Packet& cookie_echo, std::vector<uint8_t>* raw = nullptr) {
-        stack.sctp_associate("127.0.0.1", PEER_PORT, key);
-        SCTP_Packet init;
-        if (!receive_until(INIT, init, Clock::now() + std::chrono::seconds(1))) {
-            return false;
-        }
-        stack_tag = std::get<init_chunk_value>(
-            init.chunks[0].chunk_value).initiate_tag;
-
-        // The stack drops an INIT ACK with no State Cookie. Contents are
-        // opaque to the initiator, so filler is enough - and keeping it fixed
-        // lets the retransmission test assert the echo is byte-identical.
-        std::vector<uint8_t> parameters;
-        std::vector<uint8_t> filler(STATE_COOKIE_SIZE, 0xA5);
-        append_parameter(parameters, PARAM_STATE_COOKIE, filler.data(), filler.size());
-
-        SCTP_Packet ack = packet(INIT_ACK);
-        ack.chunks.push_back(SCTP_Chunk{
-            .chunk_header = {.type = INIT_ACK, .flag = 0, .length = 0},
-            .chunk_value = init_chunk_value{
-                .initiate_tag = PEER_TAG,
-                .a_rwnd = RWND,
-                .out_streams = 1,
-                .in_streams = 1,
-                .initial_tsn = PEER_TSN,
-                .optional_parameters = std::move(parameters)}});
-        send(ack);
-        return receive_until(COOKIE_ECHO, cookie_echo,
-                             Clock::now() + std::chrono::seconds(1), raw);
-    }
-
-    bool establish_initiator(SCTP_Socket& stack, Association_Key& key) {
-        SCTP_Packet cookie_echo;
-        if (!begin_initiator_handshake(stack, key, cookie_echo)) {
-            return false;
-        }
-        send_cookie_ack();
-        return await_established(stack, key, 1000) == Sctp_Status::OK;
-    }
-
-    bool establish_responder(SCTP_Socket& stack, Association_Key& key) {
-        SCTP_Packet init = packet(INIT);
-        init.header.verification_tag = 0;
-        init.chunks.push_back(SCTP_Chunk{
-            .chunk_header = {.type = INIT, .flag = 0, .length = 0},
-            .chunk_value = init_chunk_value{
-                .initiate_tag = PEER_TAG,
-                .a_rwnd = RWND,
-                .out_streams = 1,
-                .in_streams = 1,
-                .initial_tsn = PEER_TSN,
-                .optional_parameters = {}}});
-        send(init);
-        SCTP_Packet init_ack;
-        if (!receive_until(INIT_ACK, init_ack,
-                           Clock::now() + std::chrono::seconds(1))) {
-            return false;
-        }
-        const auto& init_ack_value = std::get<init_chunk_value>(
-            init_ack.chunks[0].chunk_value);
-        stack_tag = init_ack_value.initiate_tag;
-
-        // Must come back byte for byte: the stateless responder has nothing
-        // else to rebuild the association from.
-        std::vector<uint8_t> cookie;
-        if (!find_parameter(init_ack_value.optional_parameters,
-                            PARAM_STATE_COOKIE, cookie)) {
-            return false;
-        }
-
-        SCTP_Packet echo = packet(COOKIE_ECHO);
-        echo.chunks.push_back(SCTP_Chunk{
-            .chunk_header = {.type = COOKIE_ECHO, .flag = 0, .length = 0},
-            .chunk_value = cookie_echo_chunk_value{.cookie_data = cookie}});
-        send(echo);
-        SCTP_Packet cookie_ack;
-        if (!receive_until(COOKIE_ACK, cookie_ack,
-                           Clock::now() + std::chrono::seconds(1))) {
-            return false;
-        }
-        key = Association_Key{self};
-        return await_established(stack, key, 1000) == Sctp_Status::OK;
-    }
-
-    void send_data_packet(
-            const std::vector<uint32_t>& tsns, uint8_t flags = 0) {
-        SCTP_Packet data = packet(DATA);
-        for (uint32_t tsn : tsns) {
-            data.chunks.push_back(SCTP_Chunk{
-                .chunk_header = {.type = DATA, .flag = static_cast<uint8_t>(DATA_FLAG_B | DATA_FLAG_E | flags), .length = 0},
-                .chunk_value = data_chunk_value{
-                    .tsn = tsn,
-                    .stream_identifier = 0,
-                    .stream_seq_num = static_cast<uint16_t>(tsn - PEER_TSN),
-                    .payload_protocal = 0,
-                    .user_data = {static_cast<uint8_t>(tsn)}}});
-        }
-        send(data);
-    }
-
-    void send_sack(uint32_t cumulative,
-                   std::vector<sack_gap_ack_block> gaps) {
-        SCTP_Packet sack = packet(SACK);
-        sack.chunks.push_back(SCTP_Chunk{
-            .chunk_header = {.type = SACK, .flag = 0, .length = 0},
-            .chunk_value = sack_chunk_value{
-                .cumulative_tsn_ack = cumulative,
-                .a_rwnd = RWND,
-                .number_of_gap_ack_blocks =
-                    static_cast<uint16_t>(gaps.size()),
-                .number_of_duplicate_tsns = 0,
-                .gap_ack_blocks = std::move(gaps),
-                .duplicate_tsns = {}}});
-        send(sack);
-    }
-};
-
-bool start(SCTP_Socket& stack, RawPeer& peer) {
-    return peer.open() && stack.sctp_bind("127.0.0.1", STACK_PORT)
+bool start(SCTP_Socket& stack, Raw_Peer& peer) {
+    return peer.open(PEER_PORT, STACK_PORT) && stack.sctp_bind("127.0.0.1", STACK_PORT)
         && stack.sctp_run();
 }
 
 void test_t1_cookie() {
     std::printf("T1-cookie retransmission and cancellation:\n");
     SCTP_Socket stack;
-    RawPeer peer;
+    Raw_Peer peer{PEER_TAG, PEER_TSN};
     Association_Key key{};
     check(start(stack, peer), "started raw UDP endpoints");
     SCTP_Packet cookie_echo;
@@ -434,7 +216,7 @@ void test_t1_cookie() {
 void test_t1_cookie_exhaustion() {
     std::printf("T1-cookie exhaustion cleanup:\n");
     SCTP_Socket stack;
-    RawPeer peer;
+    Raw_Peer peer{PEER_TAG, PEER_TSN};
     Association_Key key{};
     check(start(stack, peer), "started raw UDP endpoints");
     SCTP_Packet echo;
@@ -454,7 +236,7 @@ void test_t1_cookie_exhaustion() {
 void test_delayed_sack_packet_counting() {
     std::printf("Packet-granular delayed SACK:\n");
     SCTP_Socket stack;
-    RawPeer peer;
+    Raw_Peer peer{PEER_TAG, PEER_TSN};
     Association_Key key{};
     check(start(stack, peer) && peer.establish_responder(stack, key),
           "established raw responder association");
@@ -493,7 +275,7 @@ void test_delayed_sack_packet_counting() {
 void test_immediate_sack_conditions() {
     std::printf("Immediate SACK conditions:\n");
     SCTP_Socket stack;
-    RawPeer peer;
+    Raw_Peer peer{PEER_TAG, PEER_TSN};
     Association_Key key{};
     check(start(stack, peer) && peer.establish_responder(stack, key),
           "established raw responder association");
@@ -524,7 +306,7 @@ void test_immediate_sack_conditions() {
 void test_fast_retransmit(uint32_t first_tsn, const std::string& label) {
     std::printf("Fast retransmit %s:\n", label.c_str());
     SCTP_Socket stack;
-    RawPeer peer;
+    Raw_Peer peer{PEER_TAG, PEER_TSN};
     Association_Key key{};
     check(start(stack, peer) && peer.establish_initiator(stack, key),
           "established raw initiator association");
@@ -657,8 +439,5 @@ int main() {
     test_fast_retransmit(0xFFFFFFFE, "across TSN wraparound");
     test_htna_reneging_and_pmtu();
 
-    std::printf("\n%s (%d failure%s)\n",
-                failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
-                failures, failures == 1 ? "" : "s");
-    return failures == 0 ? 0 : 1;
+    return report();
 }

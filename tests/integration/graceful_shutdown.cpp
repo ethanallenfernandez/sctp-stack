@@ -25,13 +25,6 @@ namespace {
 
 using Access = SCTP_Socket_Test_Access;
 
-int failures = 0;
-
-void check(bool cond, const std::string& what) {
-    std::printf("  [%s] %s\n", cond ? "PASS" : "FAIL", what.c_str());
-    if (!cond) failures++;
-}
-
 bool start(SCTP_Socket& stack, int port) {
     return stack.sctp_bind("127.0.0.1", port) && stack.sctp_run();
 }
@@ -165,10 +158,5 @@ int main() {
     test_close_aborts();
     test_close_mid_handshake();
 
-    if (failures) {
-        std::printf("\n%d check(s) FAILED\n", failures);
-        return 1;
-    }
-    std::printf("\nAll graceful shutdown tests passed\n");
-    return 0;
+    return report();
 }

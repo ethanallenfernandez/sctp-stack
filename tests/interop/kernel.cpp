@@ -90,13 +90,6 @@ constexpr uint16_t KERNEL_PORT = 9899;
 constexpr uint16_t OUR_PORT = 9900;
 constexpr int TIMEOUT_MS = 5000;
 
-int failures = 0;
-
-void check(bool cond, const std::string& what) {
-    std::printf("  [%s] %s\n", cond ? "PASS" : "FAIL", what.c_str());
-    if (!cond) failures++;
-}
-
 void section(const char* name) {
     std::printf("\n%s\n", name);
 }
@@ -946,10 +939,7 @@ int main() {
         check(snmp_after["SctpOutOfBlues"] == snmp_before["SctpOutOfBlues"], "kernel saw no out-of-the-blue packets");
     }
 
-    std::printf("\n%s (%d failure%s)\n",
-                failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
-                failures, failures == 1 ? "" : "s");
-    return failures == 0 ? 0 : 1;
+    return report();
 }
 
 #endif // _WIN32

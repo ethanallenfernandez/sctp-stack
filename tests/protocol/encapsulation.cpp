@@ -92,13 +92,6 @@ namespace {
 
 using Access = SCTP_Socket_Test_Access;
 
-int failures = 0;
-
-void check(bool cond, const std::string& what) {
-    std::printf("  [%s] %s\n", cond ? "PASS" : "FAIL", what.c_str());
-    if (!cond) failures++;
-}
-
 const Access::Sent* first_with(const std::vector<Access::Sent>& sent, Chunk_Type type) {
     for (const auto& s : sent) {
         if (!s.packet.chunks.empty() && s.packet.chunks[0].chunk_header.type == type) return &s;
@@ -269,39 +262,6 @@ void test_port_per_destination() {
 
 /*------------------------------- over UDP ----------------------------------*/
 
-struct Raw_Peer {
-    sctp_socket_t fd = INVALID_SOCKET;
-    sockaddr_in self{};
-
-    bool open(uint16_t port) {
-        fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (fd == INVALID_SOCKET) return false;
-        self = address("127.0.0.1", port);
-        if (bind(fd, reinterpret_cast<sockaddr*>(&self), sizeof(self)) != 0) return false;
-        timeval timeout{2, 0};
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
-        return true;
-    }
-
-    ~Raw_Peer() {
-        if (fd != INVALID_SOCKET) sctp_close_socket(fd);
-    }
-
-    void send(const SCTP_Packet& packet, uint16_t to_port) {
-        std::vector<uint8_t> wire = serialize_sctp_packet(packet);
-        sockaddr_in to = address("127.0.0.1", to_port);
-        sendto(fd, reinterpret_cast<const char*>(wire.data()), wire.size(), 0, reinterpret_cast<sockaddr*>(&to), sizeof(to));
-    }
-
-    bool recv(SCTP_Packet& out) {
-        uint8_t buffer[2048];
-        int n = recvfrom(fd, reinterpret_cast<char*>(buffer), sizeof(buffer), 0, nullptr, nullptr);
-        if (n <= 0) return false;
-        out = deserialize_sctp_packet(buffer, static_cast<size_t>(n));
-        return true;
-    }
-};
-
 void test_associate_with_udp_port() {
     std::printf("sctp_associate takes the UDP port apart from the SCTP port:\n");
     constexpr uint16_t STACK_PORT = 39801;
@@ -309,7 +269,7 @@ void test_associate_with_udp_port() {
     constexpr uint16_t SECOND_UDP = 39803;
 
     Raw_Peer first, second;
-    if (!first.open(FIRST_UDP) || !second.open(SECOND_UDP)) { check(false, "peer sockets"); return; }
+    if (!first.open(FIRST_UDP, STACK_PORT) || !second.open(SECOND_UDP, STACK_PORT)) { check(false, "peer sockets"); return; }
     SCTP_Socket stack;
     if (!stack.sctp_bind("127.0.0.1", STACK_PORT) || !stack.sctp_run()) { check(false, "stack started"); return; }
 
@@ -327,7 +287,7 @@ void test_associate_with_udp_port() {
     // The INIT ACK comes back from another UDP port, as through a NAT.
     uint32_t our_tag = std::get<init_chunk_value>(init.chunks[0].chunk_value).initiate_tag;
     std::vector<uint8_t> cookie(32, 0xAB);
-    second.send(build_init_ack(PEER_SCTP_PORT, STACK_PORT, our_tag, PEER_TAG, PEER_TSN, cookie), STACK_PORT);
+    second.send(build_init_ack(PEER_SCTP_PORT, STACK_PORT, our_tag, PEER_TAG, PEER_TSN, cookie));
 
     SCTP_Packet echo;
     bool got_echo = second.recv(echo) && !echo.chunks.empty() && echo.chunks[0].chunk_header.type == COOKIE_ECHO;
@@ -335,7 +295,7 @@ void test_associate_with_udp_port() {
     check(got_echo && echo.header.des_port == PEER_SCTP_PORT && echo.header.verification_tag == PEER_TAG,
           "under the SCTP port and the peer's tag");
 
-    second.send(build_cookie_ack(PEER_SCTP_PORT, STACK_PORT, our_tag), STACK_PORT);
+    second.send(build_packet(PEER_SCTP_PORT, STACK_PORT, our_tag, COOKIE_ACK, empty_chunk_value{}));
     check(await_established(stack, key, 2000) == Sctp_Status::OK, "established");
     stack.sctp_close();
 }
@@ -351,8 +311,5 @@ int main() {
     test_port_per_destination();
     test_associate_with_udp_port();
 
-    std::printf("\n%s (%d failure%s)\n",
-                failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
-                failures, failures == 1 ? "" : "s");
-    return failures == 0 ? 0 : 1;
+    return report();
 }

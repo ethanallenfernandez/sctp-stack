@@ -52,6 +52,156 @@ uint32_t read_checksum_le(const uint8_t* p) {
          | static_cast<uint32_t>(p[3]) << 24;
 }
 
+size_t padded(size_t length) {
+    return (length + 3) & ~size_t{3};
+}
+
+// Calls visit(type, tlv, length) on each TLV until it returns false. False if a
+// Length is malformed: below 4 the walk would never advance.
+template <typename Visit>
+bool walk_tlvs(const uint8_t* data, size_t len, Visit visit) {
+    size_t offset = 0;
+    while (offset + SCTP_CHUNK_HEADER_SIZE <= len) {
+        uint16_t length = read16(data + offset + 2);
+        if (length < SCTP_CHUNK_HEADER_SIZE || offset + length > len) {
+            return false;
+        }
+        if (!visit(read16(data + offset), data + offset, length)) {
+            break;
+        }
+        offset += padded(length);
+    }
+    return true;
+}
+
+Chunk_Value_Type deserialize_chunk_value(Chunk_Type type, const uint8_t* data, size_t len) {
+    switch (type) {
+        case INIT:
+        case INIT_ACK:
+            if (len < 16) {
+                throw std::runtime_error("INIT chunk too short");
+            }
+            return init_chunk_value{read32(data), read32(data + 4), read16(data + 8), read16(data + 10), read32(data + 12),
+                                    std::vector<uint8_t>(data + 16, data + len)};
+        case COOKIE_ECHO:
+            return cookie_echo_chunk_value{std::vector<uint8_t>(data, data + len)};
+        case COOKIE_ACK:
+        case SHUTDOWN_ACK:
+        case SHUTDOWN_COMPLETE:
+            return empty_chunk_value{};
+        case SHUTDOWN:
+            if (len != 4) {
+                throw std::runtime_error("SHUTDOWN chunk has wrong length");
+            }
+            return shutdown_chunk_value{read32(data)};
+        case HEARTBEAT:
+        case HEARTBEAT_ACK: {
+            heartbeat_chunk_value heartbeat;
+            if (!find_parameter(std::vector<uint8_t>(data, data + len), PARAM_HEARTBEAT_INFO, heartbeat.info)) {
+                throw std::runtime_error("HEARTBEAT chunk has no Heartbeat Info parameter");
+            }
+            return heartbeat;
+        }
+        case DATA:
+            if (len < 12) {
+                throw std::runtime_error("DATA chunk too short");
+            }
+            return data_chunk_value{read32(data), read16(data + 4), read16(data + 6), read32(data + 8),
+                                    std::vector<uint8_t>(data + 12, data + len)};
+        case SACK: {
+            sack_chunk_value sack;
+            deserialize_sack_chunk(data, len, sack);
+            return sack;
+        }
+        case OP_ERROR:
+        case ABORT: {
+            error_chunk_value error;
+            bool well_formed = walk_tlvs(data, len, [&](uint16_t code, const uint8_t* cause, uint16_t length) {
+                error.causes.push_back(error_cause{code, std::vector<uint8_t>(cause + SCTP_CHUNK_HEADER_SIZE, cause + length)});
+                return true;
+            });
+            if (!well_formed) {
+                throw std::runtime_error("ERROR chunk has a malformed cause");
+            }
+            return error;
+        }
+        default:
+            // RFC 9260 3.2: the upper two type bits decide; the dispatcher acts on them.
+            return unknown_chunk_value{std::vector<uint8_t>(data, data + len)};
+    }
+}
+
+void serialize_chunk(const SCTP_Chunk& chunk, std::vector<uint8_t>& out) {
+    size_t start = out.size();
+    out.resize(start + SCTP_CHUNK_HEADER_SIZE);
+
+    const Chunk_Value_Type& value = chunk.chunk_value;
+    switch (chunk.chunk_header.type) {
+        case INIT:
+        case INIT_ACK: {
+            const auto& init = std::get<init_chunk_value>(value);
+            append32(out, init.initiate_tag);
+            append32(out, init.a_rwnd);
+            append16(out, init.out_streams);
+            append16(out, init.in_streams);
+            append32(out, init.initial_tsn);
+            out.insert(out.end(), init.optional_parameters.begin(), init.optional_parameters.end());
+            break;
+        }
+        case COOKIE_ECHO: {
+            const auto& cookie = std::get<cookie_echo_chunk_value>(value).cookie_data;
+            out.insert(out.end(), cookie.begin(), cookie.end());
+            break;
+        }
+        case COOKIE_ACK:
+        case SHUTDOWN_ACK:
+        case SHUTDOWN_COMPLETE:
+            (void)std::get<empty_chunk_value>(value);
+            break;
+        case SHUTDOWN:
+            append32(out, std::get<shutdown_chunk_value>(value).cumulative_tsn_ack);
+            break;
+        case HEARTBEAT:
+        case HEARTBEAT_ACK: {
+            const auto& info = std::get<heartbeat_chunk_value>(value).info;
+            append_parameter(out, PARAM_HEARTBEAT_INFO, info.data(), info.size());
+            break;
+        }
+        case OP_ERROR:
+        case ABORT:
+            for (const auto& cause : std::get<error_chunk_value>(value).causes) {
+                append_parameter(out, cause.code, cause.info.data(), cause.info.size());
+            }
+            break;
+        case DATA: {
+            const auto& data = std::get<data_chunk_value>(value);
+            append32(out, data.tsn);
+            append16(out, data.stream_identifier);
+            append16(out, data.stream_seq_num);
+            append32(out, data.payload_protocal);
+            out.insert(out.end(), data.user_data.begin(), data.user_data.end());
+            break;
+        }
+        case SACK:
+            serialize_sack_chunk(std::get<sack_chunk_value>(value), out);
+            break;
+        default: {
+            // Lets tests and cause-6 reports put an arbitrary chunk on the wire.
+            const auto& body = std::get<unknown_chunk_value>(value).body;
+            out.insert(out.end(), body.begin(), body.end());
+            break;
+        }
+    }
+
+    // Chunk Length covers the header and body but excludes trailing padding.
+    uint16_t length = static_cast<uint16_t>(out.size() - start);
+    out[start] = chunk.chunk_header.type;
+    out[start + 1] = chunk.chunk_header.flag;
+    out[start + 2] = static_cast<uint8_t>(length >> 8);
+    out[start + 3] = static_cast<uint8_t>(length);
+    out.resize(start + padded(length), 0);
+}
+
 } // namespace
 
 /*------------------- RFC 9260 3.2.1 parameters and 5.1.3 cookie ------------*/
@@ -65,71 +215,47 @@ void append_parameter(std::vector<uint8_t>& out, uint16_t type, const uint8_t* v
     append16(out, type);
     append16(out, static_cast<uint16_t>(total));
     out.insert(out.end(), value, value + len);
-    out.resize(out.size() + ((4 - (total % 4)) % 4), 0);   // padding is not counted in Length
+    out.resize(out.size() + padded(total) - total, 0);   // padding is not counted in Length
 }
 
 bool find_parameter(const std::vector<uint8_t>& params, uint16_t type, std::vector<uint8_t>& value_out) {
-    size_t offset = 0;
-    while (offset + SCTP_CHUNK_HEADER_SIZE <= params.size()) {
-        uint16_t parameter_type = read16(&params[offset]);
-        uint16_t length = read16(&params[offset + 2]);
-
-        // Below 4 the advance stalls and the walk spins forever.
-        if (length < SCTP_CHUNK_HEADER_SIZE || offset + length > params.size()) {
-            return false;
+    bool found = false;
+    walk_tlvs(params.data(), params.size(), [&](uint16_t candidate, const uint8_t* parameter, uint16_t length) {
+        if (candidate == type) {
+            value_out.assign(parameter + SCTP_CHUNK_HEADER_SIZE, parameter + length);
+            found = true;
         }
-        if (parameter_type == type) {
-            value_out.assign(params.begin() + static_cast<std::ptrdiff_t>(offset + SCTP_CHUNK_HEADER_SIZE),
-                             params.begin() + static_cast<std::ptrdiff_t>(offset + length));
-            return true;
-        }
-        offset += (static_cast<size_t>(length) + 3) & ~size_t{3};
-    }
-    return false;
+        return !found;
+    });
+    return found;
 }
 
 std::vector<uint32_t> find_ipv4_addresses(const std::vector<uint8_t>& params) {
     std::vector<uint32_t> out;
-    size_t offset = 0;
-    while (offset + SCTP_CHUNK_HEADER_SIZE <= params.size()) {
-        uint16_t type = read16(&params[offset]);
-        uint16_t length = read16(&params[offset + 2]);
-        if (length < SCTP_CHUNK_HEADER_SIZE || offset + length > params.size()) {
-            break;
-        }
+    walk_tlvs(params.data(), params.size(), [&](uint16_t type, const uint8_t* parameter, uint16_t length) {
         if (type == PARAM_IPV4_ADDRESS && length == 8) {
-            out.push_back(read32(&params[offset + 4]));
+            out.push_back(read32(parameter + 4));
         }
-        offset += (static_cast<size_t>(length) + 3) & ~size_t{3};
-    }
+        return true;
+    });
     return out;
 }
 
 Parameter_Scan scan_parameters(const std::vector<uint8_t>& params, std::initializer_list<uint16_t> recognized) {
     Parameter_Scan scan;
-    size_t offset = 0;
-    while (offset + SCTP_CHUNK_HEADER_SIZE <= params.size()) {
-        uint16_t type = read16(&params[offset]);
-        uint16_t length = read16(&params[offset + 2]);
-        if (length < SCTP_CHUNK_HEADER_SIZE || offset + length > params.size()) {
-            break;
-        }
-        size_t padded = (static_cast<size_t>(length) + 3) & ~size_t{3};
-        auto first = params.begin() + static_cast<std::ptrdiff_t>(offset);
+    const uint8_t* end = params.data() + params.size();
+    walk_tlvs(params.data(), params.size(), [&](uint16_t type, const uint8_t* parameter, uint16_t length) {
         if (std::find(recognized.begin(), recognized.end(), type) != recognized.end()) {
-            scan.recognized.insert(scan.recognized.end(), first, first + static_cast<std::ptrdiff_t>(std::min(padded, params.size() - offset)));
-        } else {
-            if (type & 0x4000) {
-                std::vector<uint8_t> tlv(first, first + length);
-                tlv.resize(padded, 0);
-                scan.reported.push_back(std::move(tlv));
-            }
-            if ((type & 0x8000) == 0) {
-                break;
-            }
+            scan.recognized.insert(scan.recognized.end(), parameter, parameter + std::min(padded(length), static_cast<size_t>(end - parameter)));
+            return true;
         }
-        offset += padded;
-    }
+        if (type & 0x4000) {
+            std::vector<uint8_t> tlv(parameter, parameter + length);
+            tlv.resize(padded(length), 0);
+            scan.reported.push_back(std::move(tlv));
+        }
+        return (type & 0x8000) != 0;
+    });
     return scan;
 }
 
@@ -219,235 +345,31 @@ void sctp_clear_wire_checksum(uint8_t* data) {
 }
 
 SCTP_Packet deserialize_sctp_packet(const uint8_t* data, size_t len) {
+    if (len < SCTP_COMMON_HEADER_SIZE) {
+        throw std::runtime_error("buffer underflow");
+    }
     SCTP_Packet out;
-
-    /*--------------Deserializing Helpers--------------*/
-    size_t offset = 0;
-
-    auto can_read = [&](size_t read_len) {
-        return read_len <= len - offset;   // offset <= len always holds
-    };
-
-    auto read_ptr = [&](size_t read_len) -> const uint8_t* {
-        if (!can_read(read_len))
-            throw std::runtime_error("buffer underflow");
-        const uint8_t* p = data + offset;
-        offset += read_len;
-        return p;
-    };
-    /*--------------------------------------------*/
-
-    const uint8_t* h = read_ptr(SCTP_COMMON_HEADER_SIZE);
-    out.header.src_port         = read16(h + 0);
-    out.header.des_port         = read16(h + 2);
-    out.header.verification_tag = read32(h + 4);
-    out.header.checksum         = read_checksum_le(h + 8);
-
+    out.header = {read16(data), read16(data + 2), read32(data + 4), read_checksum_le(data + SCTP_CHECKSUM_OFFSET)};
+    size_t offset = SCTP_COMMON_HEADER_SIZE;
     while (offset < len) {
-        if (!can_read(SCTP_CHUNK_HEADER_SIZE))
+        if (len - offset < SCTP_CHUNK_HEADER_SIZE) {
             throw std::runtime_error("truncated chunk header");
-
-        const uint8_t* ch_p = read_ptr(SCTP_CHUNK_HEADER_SIZE);
-        SCTP_Chunk_Header ch;
-        ch.type   = static_cast<Chunk_Type>(ch_p[0]);
-        ch.flag   = ch_p[1];
-        ch.length = read16(ch_p + 2);
-
+        }
+        SCTP_Chunk_Header header{static_cast<Chunk_Type>(data[offset]), data[offset + 1], read16(data + offset + 2)};
         // Chunk Length counts the 4-byte header itself, so anything below that
         // is malformed. Without this check the subtraction wraps around.
-        if (ch.length < SCTP_CHUNK_HEADER_SIZE)
-            throw std::runtime_error("chunk length below header size");
-
-        size_t body_len = ch.length - SCTP_CHUNK_HEADER_SIZE;
-        if (!can_read(body_len))
-            throw std::runtime_error("truncated chunk body");
-
-        SCTP_Chunk chunk;
-        chunk.chunk_header = ch;
-
-        const uint8_t* body = read_ptr(body_len);
-        deserialize_chunk_value(ch.type, body, body_len, chunk.chunk_value);
-        if (ch.type == DATA) {
-            std::get<data_chunk_value>(chunk.chunk_value).flags = ch.flag & (DATA_FLAG_U | DATA_FLAG_B | DATA_FLAG_E);
+        if (header.length < SCTP_CHUNK_HEADER_SIZE || header.length > len - offset) {
+            throw std::runtime_error("chunk length out of range");
         }
-
+        SCTP_Chunk chunk{header, deserialize_chunk_value(header.type, data + offset + SCTP_CHUNK_HEADER_SIZE, header.length - SCTP_CHUNK_HEADER_SIZE)};
+        if (header.type == DATA) {
+            std::get<data_chunk_value>(chunk.chunk_value).flags = header.flag & (DATA_FLAG_U | DATA_FLAG_B | DATA_FLAG_E);
+        }
         out.chunks.push_back(std::move(chunk));
-
-        // Padding to 4-byte boundary based on chunk.length. The final chunk in a
-        // packet may omit its padding, so a short read here is not an error.
-        size_t padded = (static_cast<size_t>(ch.length) + 3) & ~size_t{3};
-        size_t pad = padded - ch.length;
-        offset += (pad <= len - offset) ? pad : (len - offset);
+        // The final chunk in a packet may omit its padding.
+        offset = std::min(len, offset + padded(header.length));
     }
     return out;
-}
-
-void deserialize_chunk_value(
-    Chunk_Type type, 
-    const uint8_t* data, 
-    size_t len,
-    Chunk_Value_Type& out
-) {
-    switch (type) {
-        case INIT:
-        case INIT_ACK: {
-            init_chunk_value v;
-            deserialize_init_chunk(data, len, v);
-            out = std::move(v);
-            break;
-        }
-        case COOKIE_ECHO: {
-            cookie_echo_chunk_value v;
-            deserialize_cookie_echo_chunk(data, len, v);
-            out = std::move(v);
-            break;
-        }
-        case COOKIE_ACK:
-        case SHUTDOWN_ACK:
-        case SHUTDOWN_COMPLETE:
-            out = empty_chunk_value{};
-            break;
-        case SHUTDOWN: {
-            shutdown_chunk_value v;
-            deserialize_shutdown_chunk(data, len, v);
-            out = v;
-            break;
-        }
-        case HEARTBEAT:
-        case HEARTBEAT_ACK: {
-            heartbeat_chunk_value v;
-            deserialize_heartbeat_chunk(data, len, v);
-            out = std::move(v);
-            break;
-        }
-        case DATA: {
-            data_chunk_value v;
-            deserialize_data_chunk(data, len, v);
-            out = std::move(v);
-            break;
-        }
-        case SACK: {
-            sack_chunk_value v;
-            deserialize_sack_chunk(data, len, v);
-            out = std::move(v);
-            break;
-        }
-        case OP_ERROR:
-        case ABORT: {
-            error_chunk_value v;
-            deserialize_error_chunk(data, len, v);
-            out = std::move(v);
-            break;
-        }
-        default:
-            // RFC 9260 3.2: the upper two type bits decide; the dispatcher acts on them.
-            out = unknown_chunk_value{std::vector<uint8_t>(data, data + len)};
-            break;
-    }
-}
-
-void deserialize_init_chunk(const uint8_t* data, size_t len, init_chunk_value& out) {
-    if (len < 16)
-        throw std::runtime_error("INIT chunk too short");
-
-    out.initiate_tag = read32(data + 0);
-    out.a_rwnd       = read32(data + 4);
-    out.out_streams  = read16(data + 8);
-    out.in_streams   = read16(data + 10);
-    out.initial_tsn  = read32(data + 12);
-
-    out.optional_parameters.assign(data + 16, data + len);
-}
-
-void deserialize_cookie_echo_chunk(const uint8_t* data, size_t len, cookie_echo_chunk_value& out) {
-    out.cookie_data.assign(data, data + len);
-}
-
-void deserialize_shutdown_chunk(const uint8_t* data, size_t len, shutdown_chunk_value& out) {
-    if (len != 4)
-        throw std::runtime_error("SHUTDOWN chunk has wrong length");
-    out.cumulative_tsn_ack = read32(data);
-}
-
-void deserialize_heartbeat_chunk(const uint8_t* data, size_t len, heartbeat_chunk_value& out) {
-    if (!find_parameter(std::vector<uint8_t>(data, data + len), PARAM_HEARTBEAT_INFO, out.info))
-        throw std::runtime_error("HEARTBEAT chunk has no Heartbeat Info parameter");
-}
-
-void deserialize_error_chunk(const uint8_t* data, size_t len, error_chunk_value& out) {
-    // Throws rather than returning false, matching the other chunk deserializers.
-    size_t offset = 0;
-    while (offset + SCTP_CHUNK_HEADER_SIZE <= len) {
-        uint16_t code = read16(data + offset);
-        uint16_t length = read16(data + offset + 2);
-
-        if (length < SCTP_CHUNK_HEADER_SIZE)
-            throw std::runtime_error("ERROR chunk cause length below header size");
-        if (offset + length > len)
-            throw std::runtime_error("ERROR chunk cause overruns chunk");
-
-        out.causes.push_back(error_cause{
-            code,
-            std::vector<uint8_t>(data + offset + SCTP_CHUNK_HEADER_SIZE, data + offset + length),
-        });
-        offset += (static_cast<size_t>(length) + 3) & ~size_t{3};
-    }
-}
-void deserialize_data_chunk(const uint8_t* data, size_t len, data_chunk_value& out) {
-    if (len < 12)
-        throw std::runtime_error("DATA chunk too short");
-
-    out.tsn               = read32(data + 0);
-    out.stream_identifier = read16(data + 4);
-    out.stream_seq_num    = read16(data + 6);
-    out.payload_protocal  = read32(data + 8);
-
-    out.user_data.assign(data + 12, data + len);
-}
-
-void deserialize_sack_chunk(
-        const uint8_t* data, size_t len, sack_chunk_value& out) {
-    if (len < 12)
-        throw std::runtime_error("SACK chunk too short");
-
-    uint16_t gap_count = read16(data + 8);
-    uint16_t duplicate_count = read16(data + 10);
-    size_t required = 12
-        + static_cast<size_t>(gap_count) * 4
-        + static_cast<size_t>(duplicate_count) * 4;
-    if (required != len)
-        throw std::runtime_error("SACK chunk has inconsistent counts");
-
-    std::vector<sack_gap_ack_block> gap_ack_blocks;
-    gap_ack_blocks.reserve(gap_count);
-    size_t offset = 12;
-    uint16_t previous_end = 0;
-    for (uint16_t i = 0; i < gap_count; ++i) {
-        uint16_t start = read16(data + offset);
-        uint16_t end = read16(data + offset + 2);
-        if (start == 0 || end < start
-                || (i > 0 && start <= previous_end))
-            throw std::runtime_error("SACK chunk has invalid gap ack block");
-        gap_ack_blocks.push_back({start, end});
-        previous_end = end;
-        offset += 4;
-    }
-
-    std::vector<uint32_t> duplicate_tsns;
-    duplicate_tsns.reserve(duplicate_count);
-    for (uint16_t i = 0; i < duplicate_count; ++i) {
-        duplicate_tsns.push_back(read32(data + offset));
-        offset += 4;
-    }
-
-    out = sack_chunk_value{
-        .cumulative_tsn_ack = read32(data + 0),
-        .a_rwnd = read32(data + 4),
-        .number_of_gap_ack_blocks = gap_count,
-        .number_of_duplicate_tsns = duplicate_count,
-        .gap_ack_blocks = std::move(gap_ack_blocks),
-        .duplicate_tsns = std::move(duplicate_tsns),
-    };
 }
 
 std::vector<uint8_t> serialize_sctp_packet(const SCTP_Packet& pkt) {
@@ -464,122 +386,47 @@ std::vector<uint8_t> serialize_sctp_packet(const SCTP_Packet& pkt) {
         serialize_chunk(chunk, out);
     }
 
-    uint32_t checksum = calculate_sctp_checksum(out.data(), out.size());
-    write_checksum_le(out.data() + SCTP_CHECKSUM_OFFSET, checksum);
-
+    write_checksum_le(out.data() + SCTP_CHECKSUM_OFFSET, calculate_sctp_checksum(out.data(), out.size()));
     return out;
 }
 
-void serialize_chunk(const SCTP_Chunk& chunk, std::vector<uint8_t>& out) {
-    size_t start = out.size();
-
-    // Reserve space for header (written later)
-    out.resize(start + SCTP_CHUNK_HEADER_SIZE);
-
-    switch (chunk.chunk_header.type) {
-        case INIT:
-        case INIT_ACK:
-            serialize_init_chunk(std::get<init_chunk_value>(chunk.chunk_value), out);
-            break;
-        case COOKIE_ECHO:
-            serialize_cookie_echo_chunk(std::get<cookie_echo_chunk_value>(chunk.chunk_value), out);
-            break;
-        case COOKIE_ACK:
-        case SHUTDOWN_ACK:
-        case SHUTDOWN_COMPLETE:
-            (void)std::get<empty_chunk_value>(chunk.chunk_value);
-            break;
-        case SHUTDOWN:
-            append32(out, std::get<shutdown_chunk_value>(chunk.chunk_value).cumulative_tsn_ack);
-            break;
-        case HEARTBEAT:
-        case HEARTBEAT_ACK: {
-            const auto& info = std::get<heartbeat_chunk_value>(chunk.chunk_value).info;
-            append_parameter(out, PARAM_HEARTBEAT_INFO, info.data(), info.size());
-            break;
-        }
-        case OP_ERROR:
-        case ABORT:
-            serialize_error_chunk(std::get<error_chunk_value>(chunk.chunk_value), out);
-            break;
-        case DATA:
-            serialize_data_chunk(std::get<data_chunk_value>(chunk.chunk_value), out);
-            break;
-        case SACK:
-            serialize_sack_chunk(std::get<sack_chunk_value>(chunk.chunk_value), out);
-            break;
-        default: {
-            // Lets tests and cause-6 reports put an arbitrary chunk on the wire.
-            const auto& body = std::get<unknown_chunk_value>(chunk.chunk_value).body;
-            out.insert(out.end(), body.begin(), body.end());
-            break;
-        }
+void deserialize_sack_chunk(const uint8_t* data, size_t len, sack_chunk_value& out) {
+    if (len < 12) {
+        throw std::runtime_error("SACK chunk too short");
+    }
+    uint16_t gap_count = read16(data + 8);
+    uint16_t duplicate_count = read16(data + 10);
+    if (12 + 4 * size_t{gap_count} + 4 * size_t{duplicate_count} != len) {
+        throw std::runtime_error("SACK chunk has inconsistent counts");
     }
 
-    // Chunk Length covers the header and body but excludes trailing padding.
-    uint16_t length = static_cast<uint16_t>(out.size() - start);
-
-    out[start + 0] = static_cast<uint8_t>(chunk.chunk_header.type);
-    out[start + 1] = chunk.chunk_header.flag;
-    uint16_t len_be = htons(length);
-    std::memcpy(out.data() + start + 2, &len_be, 2);
-
-    // Pad to 4-byte boundary
-    size_t padded = (static_cast<size_t>(length) + 3) & ~size_t{3};
-    out.resize(start + padded, 0);
-}
-
-void serialize_init_chunk(const init_chunk_value& v, std::vector<uint8_t>& out) {
-    append32(out, v.initiate_tag);
-    append32(out, v.a_rwnd);
-    append16(out, v.out_streams);
-    append16(out, v.in_streams);
-    append32(out, v.initial_tsn);
-
-    out.insert(out.end(),
-               v.optional_parameters.begin(),
-               v.optional_parameters.end());
-}
-
-void serialize_cookie_echo_chunk(const cookie_echo_chunk_value& v, std::vector<uint8_t>& out) {
-    out.insert(out.end(), v.cookie_data.begin(), v.cookie_data.end());
-}
-
-void serialize_error_chunk(const error_chunk_value& v, std::vector<uint8_t>& out) {
-    for (const auto& cause : v.causes) {
-        append_parameter(out, cause.code, cause.info.data(), cause.info.size());
+    sack_chunk_value sack{read32(data), read32(data + 4), {}, {}};
+    const uint8_t* p = data + 12;
+    for (uint16_t i = 0; i < gap_count; ++i, p += 4) {
+        sack_gap_ack_block block{read16(p), read16(p + 2)};
+        if (block.start == 0 || block.end < block.start || (i > 0 && block.start <= sack.gap_ack_blocks.back().end)) {
+            throw std::runtime_error("SACK chunk has invalid gap ack block");
+        }
+        sack.gap_ack_blocks.push_back(block);
     }
+    for (uint16_t i = 0; i < duplicate_count; ++i, p += 4) {
+        sack.duplicate_tsns.push_back(read32(p));
+    }
+    out = std::move(sack);
 }
 
-void serialize_data_chunk(const data_chunk_value& v,std::vector<uint8_t>& out) {
-    append32(out, v.tsn);
-    append16(out, v.stream_identifier);
-    append16(out, v.stream_seq_num);
-    append32(out, v.payload_protocal);
-
-    out.insert(out.end(),
-               v.user_data.begin(),
-               v.user_data.end());
-}
-
-void serialize_sack_chunk(
-        const sack_chunk_value& v, std::vector<uint8_t>& out) {
-    if (v.gap_ack_blocks.size() > UINT16_MAX
-            || v.duplicate_tsns.size() > UINT16_MAX) {
+void serialize_sack_chunk(const sack_chunk_value& v, std::vector<uint8_t>& out) {
+    if (v.gap_ack_blocks.size() > UINT16_MAX || v.duplicate_tsns.size() > UINT16_MAX) {
         throw std::runtime_error("too many SACK entries");
     }
-    if (v.number_of_gap_ack_blocks != v.gap_ack_blocks.size()
-            || v.number_of_duplicate_tsns != v.duplicate_tsns.size()) {
-        throw std::runtime_error("SACK counts do not match entry lists");
-    }
-
     append32(out, v.cumulative_tsn_ack);
     append32(out, v.a_rwnd);
-    append16(out, v.number_of_gap_ack_blocks);
-    append16(out, v.number_of_duplicate_tsns);
+    append16(out, static_cast<uint16_t>(v.gap_ack_blocks.size()));
+    append16(out, static_cast<uint16_t>(v.duplicate_tsns.size()));
     for (const auto& block : v.gap_ack_blocks) {
-        if (block.start == 0 || block.end < block.start)
+        if (block.start == 0 || block.end < block.start) {
             throw std::runtime_error("invalid SACK gap ack block");
+        }
         append16(out, block.start);
         append16(out, block.end);
     }

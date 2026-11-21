@@ -20,24 +20,12 @@ void Expiration_Queue::cancel(const Expiration_Key& key) {
 
 void Expiration_Queue::cancel_all(const Association_Key& location) {
     std::lock_guard<std::mutex> lock(mutex);
-    for (auto it = active.begin(); it != active.end();) {
-        if (it->first.location == location) {
-            it = active.erase(it);
-        } else {
-            ++it;
-        }
-    }
+    std::erase_if(active, [&](const auto& entry) { return entry.first.location == location; });
 }
 
 void Expiration_Queue::cancel_all(const Association_Key& location, Expiration_Timer_Type type) {
     std::lock_guard<std::mutex> lock(mutex);
-    for (auto it = active.begin(); it != active.end();) {
-        if (it->first.location == location && it->first.type == type) {
-            it = active.erase(it);
-        } else {
-            ++it;
-        }
-    }
+    std::erase_if(active, [&](const auto& entry) { return entry.first.location == location && entry.first.type == type; });
 }
 
 bool Expiration_Queue::is_active(const Expiration_Key& key) {
@@ -47,9 +35,7 @@ bool Expiration_Queue::is_active(const Expiration_Key& key) {
 
 void Expiration_Queue::clear() {
     std::lock_guard<std::mutex> lock(mutex);
-    while (!queue.empty()) {
-        queue.pop();
-    }
+    queue = {};
     active.clear();
 }
 

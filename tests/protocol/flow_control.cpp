@@ -18,6 +18,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "support.hpp"
 
 using Clock = std::chrono::steady_clock;
 
@@ -92,7 +93,7 @@ struct SCTP_Socket_Test_Access {
 
     static void deliver_sack(SCTP_Socket& stack, uint16_t peer_port, uint32_t cumulative_tsn_ack, uint32_t a_rwnd,
                              std::vector<sack_gap_ack_block> gaps = {}, std::vector<uint32_t> duplicates = {}) {
-        SCTP_Packet sack = build_sack(peer_port, LOCAL_PORT, OUR_TAG, cumulative_tsn_ack, a_rwnd, std::move(gaps), std::move(duplicates));
+        SCTP_Packet sack = build_packet(peer_port, LOCAL_PORT, OUR_TAG, SACK, sack_chunk_value{cumulative_tsn_ack, a_rwnd, std::move(gaps), std::move(duplicates)});
         std::vector<uint8_t> wire = serialize_sctp_packet(sack);
         stack.handle_recv_packet(wire.data(), wire.size(), peer_address(peer_port));
     }
@@ -168,13 +169,6 @@ struct SCTP_Socket_Test_Access {
 };
 
 namespace {
-
-int failures = 0;
-
-void check(bool cond, const std::string& what) {
-    std::printf("  [%s] %s\n", cond ? "PASS" : "FAIL", what.c_str());
-    if (!cond) failures++;
-}
 
 using Access = SCTP_Socket_Test_Access;
 
@@ -1007,10 +1001,5 @@ int main() {
     test_immediate_sack_bit();
     test_duplicate_tsns_count_in_congestion_avoidance();
 
-    if (failures == 0) {
-        std::printf("\nALL TESTS PASSED (0 failures)\n");
-        return 0;
-    }
-    std::printf("\n%d CHECK(S) FAILED\n", failures);
-    return 1;
+    return report();
 }

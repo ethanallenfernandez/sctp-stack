@@ -16,13 +16,7 @@
 #include <stdexcept>
 #include <vector>
 #include <string>
-
-static int failures = 0;
-
-static void check(bool cond, const std::string& what) {
-    std::printf("  [%s] %s\n", cond ? "PASS" : "FAIL", what.c_str());
-    if (!cond) failures++;
-}
+#include "support.hpp"
 
 static void check_eq_u32(uint32_t got, uint32_t want, const std::string& what) {
     bool ok = (got == want);
@@ -195,8 +189,6 @@ static void test_sack_wire_layout() {
         .chunk_value = sack_chunk_value{
             .cumulative_tsn_ack = 0x11223344,
             .a_rwnd = 0x55667788,
-            .number_of_gap_ack_blocks = 2,
-            .number_of_duplicate_tsns = 1,
             .gap_ack_blocks = {{1, 2}, {5, 7}},
             .duplicate_tsns = {0xAABBCCDD},
         },
@@ -225,10 +217,6 @@ static void test_sack_wire_layout() {
     check_eq_u32(
         sack.cumulative_tsn_ack, 0x11223344,
         "Cumulative TSN Ack decoded");
-    check(sack.number_of_gap_ack_blocks == 2,
-          "Number of Gap Ack Blocks decoded");
-    check(sack.number_of_duplicate_tsns == 1,
-          "Number of Duplicate TSNs decoded");
     check(sack.gap_ack_blocks.size() == 2,
           "Gap Ack Blocks decoded");
     check(sack.duplicate_tsns.size() == 1
@@ -247,44 +235,16 @@ static void test_sack_deserialization_replaces_existing_value() {
     sack_chunk_value sack{
         .cumulative_tsn_ack = 1,
         .a_rwnd = 2,
-        .number_of_gap_ack_blocks = 1,
-        .number_of_duplicate_tsns = 1,
         .gap_ack_blocks = {{1, 1}},
         .duplicate_tsns = {3},
     };
 
     deserialize_sack_chunk(empty_sack_body, sizeof(empty_sack_body), sack);
 
-    check(sack.number_of_gap_ack_blocks == 0,
-          "Number of Gap Ack Blocks is replaced");
-    check(sack.number_of_duplicate_tsns == 0,
-          "Number of Duplicate TSNs is replaced");
     check(sack.gap_ack_blocks.empty(),
           "existing Gap Ack Blocks are cleared");
     check(sack.duplicate_tsns.empty(),
           "existing Duplicate TSNs are cleared");
-}
-
-static void test_sack_count_mismatch_is_rejected() {
-    std::printf("SACK count/list consistency:\n");
-
-    sack_chunk_value sack{
-        .cumulative_tsn_ack = 1,
-        .a_rwnd = 2,
-        .number_of_gap_ack_blocks = 0,
-        .number_of_duplicate_tsns = 0,
-        .gap_ack_blocks = {{1, 1}},
-        .duplicate_tsns = {},
-    };
-    std::vector<uint8_t> body;
-    bool threw = false;
-    try {
-        serialize_sack_chunk(sack, body);
-    } catch (const std::runtime_error&) {
-        threw = true;
-    }
-
-    check(threw, "mismatched RFC count fields are rejected");
 }
 
 static void test_malformed_input_is_rejected() {
@@ -472,15 +432,11 @@ int main() {
     test_data_flags();
     test_sack_wire_layout();
     test_sack_deserialization_replaces_existing_value();
-    test_sack_count_mismatch_is_rejected();
     test_malformed_input_is_rejected();
     test_shutdown_family_wire_layout();
     test_abort_wire_layout();
     test_heartbeat_wire_layout();
     test_unknown_chunk_is_preserved();
 
-    std::printf("\n%s (%d failure%s)\n",
-                failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
-                failures, failures == 1 ? "" : "s");
-    return failures == 0 ? 0 : 1;
+    return report();
 }

@@ -14,8 +14,3 @@ std::optional<Notification> Notification_Queue::dequeue() {
     queue.pop();
     return front;
 }
-
-void Notification_Queue::clear() {
-    std::lock_guard<std::mutex> lock(mutex);
-    queue = {};
-}

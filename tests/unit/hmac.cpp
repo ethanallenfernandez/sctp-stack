@@ -10,10 +10,9 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include "support.hpp"
 
 namespace {
-
-int failures = 0;
 
 std::string to_hex(const uint8_t* data, size_t len) {
     static const char* digits = "0123456789abcdef";
@@ -24,11 +23,6 @@ std::string to_hex(const uint8_t* data, size_t len) {
         out.push_back(digits[data[i] & 0x0F]);
     }
     return out;
-}
-
-void check(bool cond, const std::string& what) {
-    std::printf("  [%s] %s\n", cond ? "PASS" : "FAIL", what.c_str());
-    if (!cond) failures++;
 }
 
 void check_digest(const std::string& got, const std::string& want, const std::string& what) {
@@ -198,10 +192,5 @@ int main() {
     test_cookie_shaped_usage();
     test_constant_time_equal();
 
-    if (failures == 0) {
-        std::printf("\nALL TESTS PASSED (0 failures)\n");
-    } else {
-        std::printf("\n%d FAILURE(S)\n", failures);
-    }
-    return failures == 0 ? 0 : 1;
+    return report();
 }

@@ -36,7 +36,7 @@ tests/            one binary per .cpp, all run by make test
                     UDP encapsulation
   integration/      real sockets and the event-loop thread
   interop/          against the Linux kernel's SCTP
-  support.hpp       polling waits for the socket tests
+  support.hpp       checks, polling waits and a raw UDP peer for the tests
 fuzz/             libFuzzer targets for the packet and State Cookie codecs
 build/            all build output (gitignored, never written in-tree)
 ```

@@ -20,7 +20,6 @@ class Wakeup_Pair {
         void drain();
         sctp_socket_t poll_handle() const { return reader; }
         bool open();
-        bool is_open() const { return reader != INVALID_SOCKET; }
 
     private:
         sctp_socket_t reader{INVALID_SOCKET};

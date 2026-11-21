@@ -14,6 +14,8 @@
 #include <iostream>
 #include <iterator>
 #include <mutex>
+#include <optional>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -181,8 +183,8 @@ void SCTP_Socket::close_associations() {
     std::vector<Association_Key> keys;
     {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
-        for (const auto& entry : associations) {
-            keys.push_back(entry.first);
+        for (const Association_Key& key : associations | std::views::keys) {
+            keys.push_back(key);
         }
     }
     for (const auto& key : keys) {
@@ -205,27 +207,17 @@ Sctp_Status SCTP_Socket::sctp_associate(std::string_view ip_address, int port, A
         return Sctp_Status::INVALID_ADDRESS;
     }
     to_location.sin_port = htons(udp_port.value_or(port));
-
     Association_Key key = peer_key(to_location, static_cast<uint16_t>(port));
-    Association assoc = init_new_association(to_location);
 
-    std::unique_lock<std::mutex> assoc_lock(associations_mutex);
+    std::lock_guard<std::mutex> assoc_lock(associations_mutex);
     if (associations.count(association_key_for(key)) != 0) {
         return Sctp_Status::ASSOCIATION_EXISTS;
     }
-    associations.emplace(key, assoc);
-    assoc_lock.unlock();
-
+    const Association& assoc = associations.emplace(key, init_new_association(to_location)).first->second;
     // sin_port is already network order, so the builder's host-order ports need
     // ntohs, not htons.
-    enqueue_packet(Deliverable{key, assoc.primary_path, build_init(
-        ntohs(local_address.sin_port),
-        ntohs(key.address.sin_port),
-        assoc.this_ver_tag,
-        assoc.next_tsn,
-        0,
-        advertised_addresses()
-    )});
+    enqueue_packet(Deliverable{key, assoc.primary_path, build_init(ntohs(local_address.sin_port), ntohs(key.address.sin_port),
+        assoc.this_ver_tag, assoc.next_tsn, 0, advertised_addresses())});
     out_association_id = key;
     return Sctp_Status::OK;
 }
@@ -244,21 +236,15 @@ Association SCTP_Socket::init_new_association(const sockaddr_in& destination) {
     result.out_streams = LOCAL_OUT_STREAMS;
     result.in_streams = LOCAL_MAX_IN_STREAMS;
     result.next_ssn.assign(result.out_streams, 0);
-    result.error_threshold = sctp_parameters::ASSOCIATION_MAX_RETRANS;
     result.hb_interval = sctp_parameters::HB_INTERVAL;
     result.our_rwnd = RWND;
-
     return result;
 }
 
 // The cookie's other addresses are left to add_peer_addresses, which indexes them.
 Association SCTP_Socket::init_new_association(const State_Cookie& cookie) {
-    Association result{};
-
-    result.peer_address_list = {make_path(cookie_source(cookie), true)};
-    result.primary_path = cookie_source(cookie);
+    Association result = init_new_association(cookie_source(cookie));
     result.state = ESTABLISHED;
-
     result.this_ver_tag = cookie.local_ver_tag;
     result.peer_ver_tag = cookie.peer_ver_tag;
     result.next_tsn = cookie.local_initial_tsn;
@@ -270,12 +256,12 @@ Association SCTP_Socket::init_new_association(const State_Cookie& cookie) {
     result.out_streams = std::min(cookie.local_out_streams, cookie.peer_in_streams);
     result.in_streams = std::min(cookie.local_in_streams, cookie.peer_out_streams);
     result.next_ssn.assign(result.out_streams, 0);
-
-    result.error_threshold = sctp_parameters::ASSOCIATION_MAX_RETRANS;
-    result.hb_interval = sctp_parameters::HB_INTERVAL;
-    result.our_rwnd = RWND;
-
     return result;
+}
+
+Association* SCTP_Socket::find_tcb(const Association_Key& key) {
+    auto it = associations.find(key);
+    return it == associations.end() ? nullptr : &it->second;
 }
 
 Association_Key SCTP_Socket::association_key_for(const Association_Key& peer) {
@@ -298,34 +284,28 @@ void SCTP_Socket::add_peer_addresses(const Association_Key& key, Association& as
 }
 
 void SCTP_Socket::record_arrival(const Association_Key& key, const sockaddr_in& src, in_addr local) {
-    std::lock_guard<std::mutex> assoc_lock(associations_mutex);
-    auto it = associations.find(key);
-    Peer_Path* path = it == associations.end() ? nullptr : find_path(it->second, src);
-    if (path == nullptr) {
-        return;
+    Association* assoc = find_tcb(key);
+    if (Peer_Path* path = assoc ? find_path(*assoc, src) : nullptr) {
+        path->address.sin_port = src.sin_port;
+        path->source = local;
     }
-    path->address.sin_port = src.sin_port;
-    path->source = local;
 }
 
 void SCTP_Socket::forget_peer_addresses(const Association_Key& key) {
-    for (auto it = peer_addresses.begin(); it != peer_addresses.end();) {
-        it = it->second == key ? peer_addresses.erase(it) : std::next(it);
-    }
+    std::erase_if(peer_addresses, [&](const auto& entry) { return entry.second == key; });
 }
 
-void SCTP_Socket::remove_association(const Association_Key& key) {
-    {
-        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
-        auto it = associations.find(key);
-        if (it != associations.end()) {
-            abandon_partial_delivery(key, it->second);
-            associations.erase(it);
-        }
-        forget_peer_addresses(key);
+void SCTP_Socket::remove_association(const Association_Key& key, std::optional<Assoc_Change_State> state) {
+    if (Association* assoc = find_tcb(key)) {
+        abandon_partial_delivery(key, *assoc);
+        associations.erase(key);
     }
+    forget_peer_addresses(key);
     cancel_expirations(key);
     sends.purge(key);
+    if (state) {
+        notify_assoc_change(key, *state);
+    }
 }
 
 void SCTP_Socket::notify_assoc_change(const Association_Key& key, Assoc_Change_State state) {
@@ -346,82 +326,77 @@ void SCTP_Socket::notify_peer_addr_change(const Association_Key& key, const sock
 
 namespace {
     Sctp_Status refusal_in(Association_State state) {
-        return state == COOKIE_WAIT || state == COOKIE_ECHOED ? Sctp_Status::NOT_ESTABLISHED : Sctp_Status::SHUTTING_DOWN;
+        return is_forming(state) ? Sctp_Status::NOT_ESTABLISHED : Sctp_Status::SHUTTING_DOWN;
     }
 }
 
 Sctp_Status SCTP_Socket::sctp_change_heartbeat(const Association_Key& association_id, const sockaddr_in& destination, bool enabled, std::optional<std::chrono::milliseconds> interval) {
     std::lock_guard<std::mutex> assoc_lock(associations_mutex);
-    auto it = associations.find(association_id);
-    if (it == associations.end()) {
+    Association* assoc = find_tcb(association_id);
+    if (assoc == nullptr) {
         return Sctp_Status::NO_ASSOCIATION;
     }
-    Peer_Path* changed = find_path(it->second, destination);
+    Peer_Path* changed = find_path(*assoc, destination);
     if (changed == nullptr) {
         return Sctp_Status::UNKNOWN_DESTINATION;
     }
-    Association& assoc = it->second;
     changed->hb_enabled = enabled;
     if (interval) {
-        assoc.hb_interval = *interval;
+        assoc->hb_interval = *interval;
     }
-    if (!transmits_data(assoc.state)) {
+    if (!transmits_data(assoc->state)) {
         return Sctp_Status::OK;
     }
 
     auto now = std::chrono::steady_clock::now();
-    for (Peer_Path& path : assoc.peer_address_list) {
+    for (Peer_Path& path : assoc->peer_address_list) {
         if (&path != changed && !interval) {
             continue;
         }
         if (!path.hb_outstanding) {
-            plan_next_probe(assoc, path, now);
-            if (probes_for_confirmation(assoc, path)) {
+            plan_next_probe(*assoc, path, now);
+            if (probes_for_confirmation(*assoc, path)) {
                 path.hb_next = now;
             }
         }
-        arm_heartbeat(association_id, assoc, path);
+        arm_heartbeat(association_id, *assoc, path);
     }
-    arm_confirmation_probes(association_id, assoc);
+    arm_confirmation_probes(association_id, *assoc);
     return Sctp_Status::OK;
 }
 
 Sctp_Status SCTP_Socket::sctp_request_heartbeat(const Association_Key& association_id, const sockaddr_in& destination) {
-    Deliverable probe;
-    {
-        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
-        auto it = associations.find(association_id);
-        if (it == associations.end()) {
-            return Sctp_Status::NO_ASSOCIATION;
-        }
-        Peer_Path* path = find_path(it->second, destination);
-        if (path == nullptr) {
-            return Sctp_Status::UNKNOWN_DESTINATION;
-        }
-        if (!transmits_data(it->second.state)) {
-            return refusal_in(it->second.state);
-        }
-        probe = build_probe(association_id, it->second, *path);
-        arm_heartbeat(association_id, it->second, *path);
+    std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+    Association* assoc = find_tcb(association_id);
+    if (assoc == nullptr) {
+        return Sctp_Status::NO_ASSOCIATION;
     }
-    enqueue_packet(std::move(probe));
+    Peer_Path* path = find_path(*assoc, destination);
+    if (path == nullptr) {
+        return Sctp_Status::UNKNOWN_DESTINATION;
+    }
+    if (!transmits_data(assoc->state)) {
+        return refusal_in(assoc->state);
+    }
+    enqueue_packet(build_probe(association_id, *assoc, *path));
+    arm_heartbeat(association_id, *assoc, *path);
     return Sctp_Status::OK;
 }
 
 Sctp_Status SCTP_Socket::sctp_set_primary(const Association_Key& association_id, const sockaddr_in& destination) {
     std::lock_guard<std::mutex> assoc_lock(associations_mutex);
-    auto it = associations.find(association_id);
-    if (it == associations.end()) {
+    Association* assoc = find_tcb(association_id);
+    if (assoc == nullptr) {
         return Sctp_Status::NO_ASSOCIATION;
     }
-    const Peer_Path* path = find_path(it->second, destination);
+    const Peer_Path* path = find_path(*assoc, destination);
     if (path == nullptr) {
         return Sctp_Status::UNKNOWN_DESTINATION;
     }
     if (!path->confirmed) {
         return Sctp_Status::UNCONFIRMED_DESTINATION;
     }
-    it->second.primary_path = path->address;
+    assoc->primary_path = path->address;
     return Sctp_Status::OK;
 }
 
@@ -429,88 +404,62 @@ std::optional<Notification> SCTP_Socket::sctp_recv_notification() {
     return notifications.dequeue();
 }
 
-Sctp_Status SCTP_Socket::sctp_send_data(const sockaddr_in& association_id, const std::vector<uint8_t>& data, uint16_t stream, bool unordered, uint32_t ppid) {
-    Association_Key key{association_id};
-    return sctp_send_data(key, data, stream, unordered, ppid);
-}
-
 Sctp_Status SCTP_Socket::sctp_send_data(const Association_Key& association_id, const std::vector<uint8_t>& data, uint16_t stream, bool unordered, uint32_t ppid) {
-    {
-        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
-        auto it = associations.find(association_id);
-        if (it == associations.end()) {
-            return Sctp_Status::NO_ASSOCIATION;
-        }
-        Association& assoc = it->second;
-        if (assoc.state != ESTABLISHED) {
-            return refusal_in(assoc.state);
-        }
-        if (data.empty()) {
-            return Sctp_Status::EMPTY_MESSAGE;
-        }
-        if (stream >= assoc.out_streams) {
-            return Sctp_Status::INVALID_STREAM;
-        }
-        if (!assoc.outbound.empty() && assoc.outbound_bytes + data.size() > SEND_BUFFER) {
-            return Sctp_Status::QUEUE_FULL;
-        }
-        uint16_t ssn = unordered ? 0 : assoc.next_ssn[stream]++;
-        assoc.outbound.push_back(Outbound_Message{stream, ssn, unordered, data, 0, ppid});
-        assoc.outbound_bytes += data.size();
+    std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+    Association* assoc = find_tcb(association_id);
+    if (assoc == nullptr) {
+        return Sctp_Status::NO_ASSOCIATION;
     }
+    if (assoc->state != ESTABLISHED) {
+        return refusal_in(assoc->state);
+    }
+    if (data.empty()) {
+        return Sctp_Status::EMPTY_MESSAGE;
+    }
+    if (stream >= assoc->out_streams) {
+        return Sctp_Status::INVALID_STREAM;
+    }
+    if (!assoc->outbound.empty() && assoc->outbound_bytes + data.size() > SEND_BUFFER) {
+        return Sctp_Status::QUEUE_FULL;
+    }
+    uint16_t ssn = unordered ? 0 : assoc->next_ssn[stream]++;
+    assoc->outbound.push_back(Outbound_Message{stream, ssn, unordered, data, 0, ppid});
+    assoc->outbound_bytes += data.size();
     wake_event_loop();
     return Sctp_Status::OK;
 }
 
-Sctp_Status SCTP_Socket::sctp_abort(const sockaddr_in& association_id, const std::vector<uint8_t>& reason) {
-    Association_Key key{association_id};
-    return sctp_abort(key, reason);
-}
-
 Sctp_Status SCTP_Socket::sctp_abort(const Association_Key& association_id, const std::vector<uint8_t>& reason) {
-    uint32_t peer_tag;
-    size_t budget;
-    sockaddr_in destination;
-    {
-        std::lock_guard<std::mutex> assoc_lock(associations_mutex);
-        auto it = associations.find(association_id);
-        if (it == associations.end()) {
-            return Sctp_Status::NO_ASSOCIATION;
-        }
-        peer_tag = it->second.peer_ver_tag;
-        budget = amdcs(it->second);
-        destination = data_path(it->second).address;
+    std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+    Association* assoc = find_tcb(association_id);
+    if (assoc == nullptr) {
+        return Sctp_Status::NO_ASSOCIATION;
     }
+    uint32_t peer_tag = assoc->peer_ver_tag;
+    sockaddr_in destination = data_path(*assoc).address;
+    size_t room = amdcs(*assoc) - 2 * SCTP_CHUNK_HEADER_SIZE;
+    std::vector<uint8_t> abort_reason(reason.begin(), reason.begin() + static_cast<long>(std::min(reason.size(), room)));
 
     // Purge first so it drops the queued DATA that MUST NOT accompany the ABORT
     remove_association(association_id);
 
     // In COOKIE_WAIT there is no tag the peer would accept the ABORT under.
-    if (peer_tag == 0) {
-        return Sctp_Status::OK;
+    if (peer_tag != 0) {
+        enqueue_packet(Deliverable{association_id, destination,
+            packet_to(association_id, peer_tag, ABORT, error_chunk_value{{error_cause{CAUSE_USER_INITIATED_ABORT, std::move(abort_reason)}}})});
     }
-
-    std::vector<uint8_t> abort_reason = reason;
-    abort_reason.resize(std::min(abort_reason.size(), budget - 2 * SCTP_CHUNK_HEADER_SIZE));
-
-    enqueue_packet(Deliverable{
-        association_id,
-        destination,
-        build_abort(
-            ntohs(local_address.sin_port),
-            ntohs(association_id.address.sin_port),
-            peer_tag,
-            false,
-            {error_cause{CAUSE_USER_INITIATED_ABORT, std::move(abort_reason)}}
-        )
-    });
     return Sctp_Status::OK;
 }
 
-
-
 size_t SCTP_Socket::sctp_recv_data(std::vector<uint8_t>& buffer, Association_Key* out_association_id, bool* out_partial, uint16_t* out_stream, uint32_t* out_ppid) {
-    auto read = receives.read_any(buffer.data(), buffer.size());
+    return finish_read(receives.read_any(buffer.data(), buffer.size()), out_association_id, out_partial, out_stream, out_ppid);
+}
+
+size_t SCTP_Socket::sctp_recv_data_from(const Association_Key& association_id, std::vector<uint8_t>& buffer, bool* out_partial, uint16_t* out_stream, uint32_t* out_ppid) {
+    return finish_read(receives.read_from(association_id, buffer.data(), buffer.size()), nullptr, out_partial, out_stream, out_ppid);
+}
+
+size_t SCTP_Socket::finish_read(const std::optional<Receive_Queue::Read>& read, Association_Key* out_association_id, bool* out_partial, uint16_t* out_stream, uint32_t* out_ppid) {
     if (!read) {
         return 0;
     }
@@ -526,64 +475,27 @@ size_t SCTP_Socket::sctp_recv_data(std::vector<uint8_t>& buffer, Association_Key
     if (out_ppid) {
         *out_ppid = read->ppid;
     }
+    std::lock_guard<std::mutex> assoc_lock(associations_mutex);
     maybe_send_window_update(read->key);
     return read->bytes;
 }
 
-size_t SCTP_Socket::sctp_recv_data_from(const sockaddr_in& association_id, std::vector<uint8_t>& buffer, bool* out_partial, uint16_t* out_stream, uint32_t* out_ppid) {
-    Association_Key key{association_id};
-    return sctp_recv_data_from(key, buffer, out_partial, out_stream, out_ppid);
-}
-
-size_t SCTP_Socket::sctp_recv_data_from(const Association_Key& association_id, std::vector<uint8_t>& buffer, bool* out_partial, uint16_t* out_stream, uint32_t* out_ppid) {
-    auto read = receives.read_from(association_id, buffer.data(), buffer.size());
-    if (!read) {
-        return 0;
-    }
-    if (out_partial) {
-        *out_partial = read->partial;
-    }
-    if (out_stream) {
-        *out_stream = read->stream;
-    }
-    if (out_ppid) {
-        *out_ppid = read->ppid;
-    }
-    maybe_send_window_update(association_id);
-    return read->bytes;
-}
-
-Sctp_Status SCTP_Socket::sctp_shutdown(const sockaddr_in& association_id) {
-    Association_Key key{association_id};
-    return sctp_shutdown(key);
-}
-
 Sctp_Status SCTP_Socket::sctp_shutdown(const Association_Key& association_id) {
-    std::unique_lock<std::mutex> assoc_lock(associations_mutex);
-    auto it = associations.find(association_id);
-    if (it == associations.end()) {
+    std::lock_guard<std::mutex> assoc_lock(associations_mutex);
+    Association* assoc = find_tcb(association_id);
+    if (assoc == nullptr) {
         return Sctp_Status::NO_ASSOCIATION;
     }
-
     // Before COMMUNICATION UP there is nothing to close gracefully. As Linux does,
     // the TCB goes without a word to the peer and without a notification.
-    switch (it->second.state) {
-        case COOKIE_WAIT:
-        case COOKIE_ECHOED:
-            associations.erase(it);
-            forget_peer_addresses(association_id);
-            assoc_lock.unlock();
-            cancel_expirations(association_id);
-            sends.purge(association_id);
-            return Sctp_Status::OK;
-        case ESTABLISHED:
-            it->second.state = SHUTDOWN_PENDING;
-            break;
-        default:
-            return Sctp_Status::SHUTTING_DOWN;
+    if (is_forming(assoc->state)) {
+        remove_association(association_id);
+        return Sctp_Status::OK;
     }
-    assoc_lock.unlock();
-
+    if (assoc->state != ESTABLISHED) {
+        return Sctp_Status::SHUTTING_DOWN;
+    }
+    assoc->state = SHUTDOWN_PENDING;
     do_next_shutdown_step(association_id);
     return Sctp_Status::OK;
 }

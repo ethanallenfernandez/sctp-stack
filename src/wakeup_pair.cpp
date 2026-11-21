@@ -1,4 +1,4 @@
-// Loopback UDP wakeup pair backing Wakeup_Pair. Failure paths save and restore
+// Loopback UDP wakeup pair backing Wakeup_Pair. The failure path saves and restores
 // the platform error code around close(), which clobbers it.
 
 #include <sctp/wakeup_pair.hpp>
@@ -11,44 +11,15 @@ Wakeup_Pair::~Wakeup_Pair() {
 
 bool Wakeup_Pair::open() {
     close();
-
-    reader = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (reader == INVALID_SOCKET) {
-        return false;
-    }
-    writer = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (writer == INVALID_SOCKET) {
-        int err = sctp_last_error();
-        close();
-        sctp_set_last_error(err);
-        return false;
-    }
-
-    sockaddr_in wakeup_address{};
-    wakeup_address.sin_family = AF_INET;
-    wakeup_address.sin_port = 0;
-    if (!sctp_parse_ipv4("127.0.0.1", wakeup_address.sin_addr) || 
-        bind(
-            reader,
-            reinterpret_cast<const sockaddr*>(&wakeup_address),
-            sizeof(wakeup_address)) == SOCKET_ERROR
-        ) 
-    {
-        int err = sctp_last_error();
-        close();
-        sctp_set_last_error(err);
-        return false;
-    }
-
-    socklen_t address_length = sizeof(wakeup_address);
-    if (getsockname(
-            reader,
-            reinterpret_cast<sockaddr*>(&wakeup_address),
-            &address_length) == SOCKET_ERROR
-            || connect(
-                writer,
-                reinterpret_cast<const sockaddr*>(&wakeup_address),
-                sizeof(wakeup_address)) == SOCKET_ERROR
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t length = sizeof(address);
+    if ((reader = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == INVALID_SOCKET
+            || (writer = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == INVALID_SOCKET
+            || bind(reader, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == SOCKET_ERROR
+            || getsockname(reader, reinterpret_cast<sockaddr*>(&address), &length) == SOCKET_ERROR
+            || connect(writer, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == SOCKET_ERROR
             || !sctp_set_nonblocking(reader)
             || !sctp_set_nonblocking(writer)) {
         int err = sctp_last_error();

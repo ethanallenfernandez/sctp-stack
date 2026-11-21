@@ -19,13 +19,6 @@ constexpr uint32_t OUR_TAG = 0x0A0B0C0D;
 constexpr uint32_t PEER_TAG = 0x11223344;
 constexpr uint16_t PEER_PORT = 40000;
 
-int failures = 0;
-
-void check(bool cond, const std::string& what) {
-    std::printf("  [%s] %s\n", cond ? "PASS" : "FAIL", what.c_str());
-    if (!cond) failures++;
-}
-
 Association_Key peer_key() {
     sockaddr_in src{};
     src.sin_family = AF_INET;
@@ -191,8 +184,5 @@ int main() {
     test_error_while_echoed();
     test_handshake_comm_up();
 
-    std::printf("\n%s (%d failure%s)\n",
-                failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
-                failures, failures == 1 ? "" : "s");
-    return failures == 0 ? 0 : 1;
+    return report();
 }

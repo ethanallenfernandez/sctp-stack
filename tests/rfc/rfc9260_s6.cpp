@@ -447,13 +447,13 @@ void s6_3_rtt() {
         Access::send(s, KB);
         Access::send(s, KB);
         Access::sent(s);
-        bool one_at_a_time = a.has_rtt_measurement_tsn && a.rtt_measurement_tsn == OUR_TSN;
+        bool one_at_a_time = a.rtt_measurement_tsn == OUR_TSN;
         sack(s, OUR_TSN + 1);
         bool measured = primary(a).has_srtt;
         auto first = primary(a).srtt;
         Access::send(s, KB);
         Access::sent(s);
-        bool again = a.has_rtt_measurement_tsn;
+        bool again = a.rtt_measurement_tsn.has_value();
         sack(s, OUR_TSN + 2);
         req("9260-6.3.1-1", measured && again && primary(a).has_srtt, "a new RTT measurement is made each round trip");
         req("9260-6.3.1-2", one_at_a_time, "at most one measurement per round trip");

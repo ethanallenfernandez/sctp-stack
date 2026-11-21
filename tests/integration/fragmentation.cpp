@@ -14,15 +14,6 @@
 #include <vector>
 #include "support.hpp"
 
-static int failures = 0;
-
-static void check(bool condition, const std::string& description) {
-    std::printf("  [%s] %s\n", condition ? "PASS" : "FAIL", description.c_str());
-    if (!condition) {
-        ++failures;
-    }
-}
-
 // RFC 8899 BASE_PLPMTU less the UDP and SCTP common headers.
 constexpr uint32_t PMDCS = 1200 - 8 - 12;
 constexpr size_t FRAGMENT_SIZE = PMDCS - DATA_CHUNK_HEADER_SIZE;
@@ -106,7 +97,7 @@ struct SCTP_Socket_Test_Access {
     }
 
     static void deliver_abort(SCTP_Socket& stack) {
-        std::vector<uint8_t> wire = serialize_sctp_packet(build_abort(PEER_PORT, LOCAL_PORT, OUR_TAG, false, {}));
+        std::vector<uint8_t> wire = serialize_sctp_packet(build_packet(PEER_PORT, LOCAL_PORT, OUR_TAG, ABORT, error_chunk_value{}));
         stack.handle_recv_packet(wire.data(), wire.size(), peer_address());
     }
 
@@ -507,8 +498,5 @@ int main() {
     std::printf("\n");
     test_end_to_end();
 
-    std::printf("\n%s (%d failure%s)\n",
-                failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
-                failures, failures == 1 ? "" : "s");
-    return failures == 0 ? 0 : 1;
+    return report();
 }

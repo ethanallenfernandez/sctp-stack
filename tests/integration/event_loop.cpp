@@ -7,21 +7,11 @@
 #include <ctime>
 #include <string>
 #include <thread>
+#include "support.hpp"
 
 namespace {
 
 using Clock = std::chrono::steady_clock;
-
-int failures = 0;
-
-void check(bool condition, const std::string& description) {
-    std::printf(
-        "  [%s] %s\n", condition ? "PASS" : "FAIL",
-        description.c_str());
-    if (!condition) {
-        ++failures;
-    }
-}
 
 void test_idle_loop_sleeps_and_close_wakes_it() {
     std::printf("Idle event loop blocks in poll:\n");
@@ -60,9 +50,5 @@ void test_idle_loop_sleeps_and_close_wakes_it() {
 int main() {
     test_idle_loop_sleeps_and_close_wakes_it();
 
-    std::printf(
-        "\n%s (%d failure%s)\n",
-        failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
-        failures, failures == 1 ? "" : "s");
-    return failures == 0 ? 0 : 1;
+    return report();
 }

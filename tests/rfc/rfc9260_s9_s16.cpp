@@ -240,7 +240,7 @@ void s10_icmp() {
         Access::establish(s);
         Access::start_heartbeats_for(s);
         Association* a = Access::tcb(s);
-        auto quoted = serialize_sctp_packet(build_heartbeat(LOCAL_PORT, PEER_PORT, PEER_TAG, {1, 2, 3, 4}));
+        auto quoted = serialize_sctp_packet(build_packet(LOCAL_PORT, PEER_PORT, PEER_TAG, HEARTBEAT, heartbeat_chunk_value{{1, 2, 3, 4}}));
         Access::handle_icmp_ptb(s, addr(), quoted, 1020);
         bool used = a && primary(*a).plpmtud.state == Plpmtud_State::ERROR;
         req("9260-10-1", used, "ICMP is handled by the procedures of section 10");
@@ -254,10 +254,10 @@ void s10_icmp() {
         Access::start_heartbeats_for(s);
         Association* a = Access::tcb(s);
         auto before = a ? primary(*a).plpmtud.state : Plpmtud_State::DISABLED;
-        Access::handle_icmp_ptb(s, addr("127.0.0.9"), serialize_sctp_packet(build_heartbeat(LOCAL_PORT, PEER_PORT, PEER_TAG, {1})), 1020);
+        Access::handle_icmp_ptb(s, addr("127.0.0.9"), serialize_sctp_packet(build_packet(LOCAL_PORT, PEER_PORT, PEER_TAG, HEARTBEAT, heartbeat_chunk_value{{1}})), 1020);
         bool unknown = a && primary(*a).plpmtud.state == before;
         req("9260-10-4", unknown, "an ICMP message for no association is ignored");
-        Access::handle_icmp_ptb(s, addr(), serialize_sctp_packet(build_heartbeat(LOCAL_PORT, PEER_PORT, PEER_TAG ^ 1, {1})), 1020);
+        Access::handle_icmp_ptb(s, addr(), serialize_sctp_packet(build_packet(LOCAL_PORT, PEER_PORT, PEER_TAG ^ 1, HEARTBEAT, heartbeat_chunk_value{{1}})), 1020);
         bool wrong_tag = a && primary(*a).plpmtud.state == before;
         req("9260-10-5", wrong_tag, "one whose Verification Tag is not the peer's is discarded");
         req("6951-5.5-1", unknown && wrong_tag, "ICMP that cannot be tied to an association or verified is discarded");
@@ -279,7 +279,7 @@ void s10_icmp() {
         bool bound = Access::bind_real(s);
         Access::establish(s);
         Access::notifications(s);
-        port_unreachable(s, build_heartbeat(LOCAL_PORT, PEER_PORT, PEER_TAG, {1, 2, 3, 4}));
+        port_unreachable(s, build_packet(LOCAL_PORT, PEER_PORT, PEER_TAG, HEARTBEAT, heartbeat_chunk_value{{1, 2, 3, 4}}));
         bool aborted = bound && Access::tcb(s) == nullptr && Access::notified(Access::notifications(s), Assoc_Change_State::COMM_LOST);
         req("9260-10-7", aborted, "Protocol Unreachable is an ABORT with the T bit (UDP Port Unreachable, RFC 6951 5.5)");
         req("9260-10-8", aborted, "the association is aborted on it");
@@ -291,7 +291,7 @@ void s10_icmp() {
         bool bound = Access::bind_real(s, LOCAL_PORT + 1);
         Access::setup(s);
         Access::establish(s);
-        port_unreachable(s, build_heartbeat(LOCAL_PORT, PEER_PORT, PEER_TAG ^ 0xFF, {1, 2, 3, 4}));
+        port_unreachable(s, build_packet(LOCAL_PORT, PEER_PORT, PEER_TAG ^ 0xFF, HEARTBEAT, heartbeat_chunk_value{{1, 2, 3, 4}}));
         req("6951-5.5-1", bound && Access::tcb(s) != nullptr, "ICMP whose quoted tag is not the peer's is silently discarded");
     }
     {

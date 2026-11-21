@@ -127,8 +127,6 @@ struct sack_gap_ack_block {
 struct sack_chunk_value {
     uint32_t cumulative_tsn_ack;
     uint32_t a_rwnd;
-    uint16_t number_of_gap_ack_blocks;
-    uint16_t number_of_duplicate_tsns;
     std::vector<sack_gap_ack_block> gap_ack_blocks;
     std::vector<uint32_t> duplicate_tsns;
 };
