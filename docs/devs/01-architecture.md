@@ -1,0 +1,432 @@
+# 1. Architecture
+
+This document covers how the code is laid out, what owns what, and where each
+public call goes. The later documents look at each subsystem in detail.
+
+- [Module layers](#module-layers)
+- [Directory map](#directory-map)
+- [`SCTP_Socket` and its translation units](#sctp_socket-and-its-translation-units)
+- [Ownership and data model](#ownership-and-data-model)
+- [The TCB (`Association`)](#the-tcb-association)
+- [Identity: keys, aliases and path keys](#identity-keys-aliases-and-path-keys)
+- [Public API to internals](#public-api-to-internals)
+- [Notifications](#notifications)
+- [Design principles](#design-principles)
+
+---
+
+## Module layers
+
+The code is split into five modules. Each module may include only from the
+modules below it.
+
+```mermaid
+flowchart BT
+    platform["<b>platform</b><br/>compat.hpp: Winsock / POSIX shim, CSPRNG<br/>wakeup_pair: interrupts poll()"]
+    protocol["<b>protocol</b><br/>sctp.hpp: wire types and constants<br/>association.hpp: the TCB<br/>tsn.hpp: serial arithmetic<br/>serialize / builders / checksum"]
+    crypto["<b>crypto</b><br/>cookie_auth: sign / verify cookies<br/>hmac: SHA-256, HMAC"]
+    queues["<b>queues</b><br/>send / receive / expiration /<br/>notification queues, Deliverable"]
+    socket["<b>socket</b><br/>SCTP_Socket: API, event loop,<br/>handlers, timers, PLPMTUD"]
+
+    platform --> protocol
+    protocol --> crypto
+    protocol --> queues
+    crypto --> socket
+    queues --> socket
+```
+
+| Rule | Why |
+|---|---|
+| A module's public headers live in `include/sctp/<module>/`, and its sources and private headers in `src/<module>/`. | Consumers get `-Iinclude` only. Internal headers never leak. |
+| Public headers are included as `<sctp/queues/send_queue.hpp>`. Internal ones are included by their path under `src/`, e.g. `"protocol/serialize.hpp"`. | The include style shows straight away whether a header is public. |
+| A header in `include/` must never include one from `src/`. | If it needs to, the public/private split is in the wrong place. |
+| `protocol/sctp.hpp` has no platform dependencies. | The wire types can be used, and fuzzed, without sockets. |
+
+---
+
+## Directory map
+
+```
+include/sctp/
+├── socket.hpp                 SCTP_Socket, the only class a consumer uses
+├── status.hpp                 Sctp_Status: every API return code
+├── protocol/
+│   ├── sctp.hpp               chunk/param/cause enums, chunk value structs, §16 parameters
+│   ├── association.hpp        Association (TCB), Peer_Path, Outstanding_Data, Association_Key
+│   └── tsn.hpp                tsn_lt/gt/..., ssn_gt, sack_acknowledges
+├── queues/
+│   ├── deliverable.hpp        one outbound packet + where it goes
+│   ├── send_queue.hpp         three-tier outbound scheduler
+│   ├── receive_queue.hpp      delivered-but-unread messages
+│   ├── expiration_queue.hpp   timer heap
+│   └── notification_queue.hpp ULP notifications
+├── crypto/cookie_auth.hpp     Cookie_Auth
+└── platform/
+    ├── compat.hpp             sockets, poll, DF, ICMP errors, random_bytes
+    └── wakeup_pair.hpp        loopback UDP pair
+
+src/
+├── socket/
+│   ├── api.cpp                public API, bind/run/close, TCB creation and removal
+│   ├── event_loop.cpp         poll loop, send pass, window gating, bundling
+│   ├── handlers.cpp           every inbound chunk, DATA reception, SACK in and out
+│   ├── timers.cpp             timer dispatch, T1/T2/T3/T5, heartbeats, RTO
+│   ├── plpmtud.cpp            DPLPMTUD and ICMP PTB
+│   └── internal.hpp           constants and helpers shared by the five above
+├── protocol/                  serialize, builders, checksum
+├── queues/                    the four queue implementations
+├── crypto/                    cookie_auth.cpp, hmac.{hpp,cpp}
+└── platform/                  wakeup_pair.cpp
+```
+
+---
+
+## `SCTP_Socket` and its translation units
+
+`SCTP_Socket` is one class whose member functions are spread over five `.cpp`
+files, grouped by concern. They all share `src/socket/internal.hpp`, which
+holds constants such as `SEND_BUFFER` and `T5_SHUTDOWN_GUARD`, plus small
+inline helpers for path selection, window checks and Heartbeat Info encoding.
+
+```mermaid
+flowchart LR
+    subgraph S["class SCTP_Socket"]
+        direction TB
+        api["<b>api.cpp</b><br/>sctp_bind / bindx / run / close<br/>sctp_associate / send / recv / shutdown / abort<br/>heartbeat and primary controls<br/>init_new_association, remove_association<br/>add_peer_addresses, record_arrival"]
+        loop["<b>event_loop.cpp</b><br/>event_loop, run_receiving, run_expire<br/>run_sending, next_packet, packet_sent<br/>send_allowances, refill_new_data, cut_new_data<br/>prepare_data_packet, handle_send_packet<br/>schedule_expirations_after_send"]
+        hnd["<b>handlers.cpp</b><br/>handle_recv_packet, validate_verification_tag<br/>answer_ootb, handle_init / init_ack / cookie_echo<br/>handle_sack, handle_data_packet, make_sack<br/>handle_shutdown*, handle_abort, handle_error<br/>handle_heartbeat / heartbeat_ack"]
+        tmr["<b>timers.cpp</b><br/>handle_expiration (dispatch)<br/>handle_t2 / t3 / t5 / heartbeat / zwp expiration<br/>record_data_sent, restart_t3, update_rto<br/>schedule_pending_retransmission<br/>plan_next_probe, count_path_error"]
+        pmtu["<b>plpmtud.cpp</b><br/>start / stop_plpmtud<br/>handle_plpmtu_probe_ack / expiration<br/>handle_pmtu_raise_expiration<br/>check_for_black_hole, handle_icmp_ptb<br/>run_icmp_errors"]
+    end
+    internal["internal.hpp<br/>pmdcs, amdcs, initial_cwnd<br/>data_path, retransmission_path<br/>cwnd_open, bytes_in_flight<br/>transmits_data / receives_data<br/>heartbeat_info encode/decode"]
+    S --- internal
+```
+
+---
+
+## Ownership and data model
+
+```mermaid
+classDiagram
+    direction LR
+    class SCTP_Socket {
+        running : atomic bool
+        local_address : sockaddr_in
+        udp_socket : socket
+        other_local_addresses : vector of Local_Address
+        associations : map Association_Key to Association
+        peer_addresses : map alias key to primary key
+        associations_mutex : mutex
+        event_loop_thread : thread
+    }
+    class Send_Queue {
+        control : deque
+        retransmission : deque
+        new_data : deque
+        next_send_attempt
+        mutex
+    }
+    class Receive_Queue {
+        pending : map key to Pending messages
+        mutex
+    }
+    class Expiration_Queue {
+        queue : priority_queue
+        active : map key to generation
+        mutex
+    }
+    class Notification_Queue {
+        queue : FIFO of Notification
+        mutex
+    }
+    class Cookie_Auth {
+        current / previous secret
+        generation
+        clock
+    }
+    class Wakeup_Pair {
+        reader
+        writer
+    }
+    class Association {
+        state : Association_State
+        tags, TSNs, windows
+        outstanding_data : TSN map
+        tsn_ooo_buffer : TSN map
+        outbound : deque of Outbound_Message
+        inbound_streams
+        reassembly
+    }
+    class Peer_Path {
+        address, confirmed, active
+        rto, srtt, rttvar
+        cwnd, ssthresh
+        heartbeat state
+    }
+    class Plpmtud {
+        state, plpmtu
+        probed_size, search_high
+    }
+    class Outstanding_Data {
+        data : data_chunk_value
+        gap_acked, retransmitted
+        missing_reports
+        pending_retransmission
+        destination
+    }
+    class Deliverable {
+        location : Association_Key
+        destination : sockaddr_in
+        packet : SCTP_Packet
+        ip_fragment
+        source
+    }
+
+    SCTP_Socket *-- Send_Queue
+    SCTP_Socket *-- Receive_Queue
+    SCTP_Socket *-- Expiration_Queue
+    SCTP_Socket *-- Notification_Queue
+    SCTP_Socket *-- Cookie_Auth
+    SCTP_Socket *-- Wakeup_Pair
+    SCTP_Socket "1" *-- "many" Association
+    Association "1" *-- "1..n" Peer_Path : peer_address_list
+    Association "1" *-- "many" Outstanding_Data
+    Peer_Path *-- Plpmtud
+    Send_Queue o-- Deliverable
+    Expiration_Queue o-- Deliverable : retry packet
+```
+
+Things to notice:
+
+- **The queues are separate from the TCBs.** They are keyed by
+  `Association_Key`, and each has its own mutex. The `Receive_Queue` in
+  particular outlives the TCB, so the application can still read the data a
+  peer sent before a graceful close.
+- **`Deliverable` is the unit of output.** It is one SCTP packet plus the
+  association it belongs to, the destination transport address, an optional
+  source address, and the `ip_fragment` flag (send without DF). Both the send
+  queue and the timer heap hold them: T1 timers keep the INIT or COOKIE ECHO to
+  resend.
+- **`Peer_Path` holds all per-destination state.** That includes the RTO
+  estimator, cwnd and ssthresh, heartbeat bookkeeping, the error counter, and a
+  whole `Plpmtud` search. The association only keeps what is shared across
+  destinations.
+
+---
+
+## The TCB (`Association`)
+
+`include/sctp/protocol/association.hpp`. The fields fall into these groups:
+
+```mermaid
+flowchart TB
+    subgraph A["Association"]
+        direction LR
+        subgraph HS["Handshake and identity"]
+            hs1["this_ver_tag / peer_ver_tag"]
+            hs2["local_tie_tag / peer_tie_tag"]
+            hs3["state"]
+            hs4["init_retransmits / cookie_retransmits<br/>stale_cookie_retries"]
+        end
+        subgraph SEND["Send side"]
+            s1["next_tsn"]
+            s2["cumulative_tsn_ack: peer's ack of our data"]
+            s3["outstanding_data: TSN to Outstanding_Data"]
+            s4["outbound: messages not yet chunked<br/>outbound_bytes"]
+            s5["next_ssn per outbound stream"]
+            s6["peer_rwnd / peer_max_rwnd"]
+            s7["in_fast_recovery / fast_recovery_exit_tsn"]
+            s8["rtt_measurement_tsn"]
+            s9["burst_count, zero window flags"]
+            s10["acked_retransmissions"]
+        end
+        subgraph RECV["Receive side"]
+            r1["last_peer_tsn: our cumulative ack point"]
+            r2["tsn_ooo_buffer: TSN to Held_Chunk"]
+            r3["duplicate_tsns"]
+            r4["reassembly: the open message"]
+            r5["inbound_streams: next_ssn + early"]
+            r6["held_deliveries"]
+            r7["our_rwnd / received_since_sack"]
+            r8["delayed_sack_packet_count"]
+        end
+        subgraph PATHS["Paths and faults"]
+            p1["peer_address_list: Peer_Path"]
+            p2["primary_path"]
+            p3["error_count: association-wide"]
+            p4["hb_interval"]
+        end
+    end
+```
+
+> **Naming trap.** `cumulative_tsn_ack` is the peer's acknowledgement of *our*
+> DATA, which is the send side. `last_peer_tsn` is *our* Cumulative TSN Ack
+> point for the peer's DATA, which is the receive side. The SACKs we send carry
+> `last_peer_tsn`.
+
+---
+
+## Identity: keys, aliases and path keys
+
+Three kinds of key appear everywhere. They are easy to mix up.
+
+```mermaid
+flowchart LR
+    subgraph K["Association_Key"]
+        k1["peer primary IPv4<br/>+ peer SCTP port<br/>(network order)"]
+    end
+    subgraph AL["peer_addresses map"]
+        a1["other peer IPv4 + SCTP port"] -- "maps to" --> k1b["primary Association_Key"]
+    end
+    subgraph PK["path_key()"]
+        p1["peer IPv4 only<br/>port = 0"]
+    end
+    subgraph PP["Peer_Path.address"]
+        pp1["peer IPv4<br/>+ <b>UDP</b> port it last sent from"]
+    end
+
+    K -- "indexes" --> TCB[("associations")]
+    AL -- "association_key_for()" --> K
+    PK -- "names per-destination timers<br/>Expiration_Key.path" --> T[("Expiration_Queue")]
+    PP -- "where packets are sent" --> NET(("sendto"))
+```
+
+| Key | Built by | Holds | Used for |
+|---|---|---|---|
+| `Association_Key` | `peer_key(addr, sctp_port)` | IP of the peer's **primary** address + peer **SCTP** port | Indexing `associations`, `Receive_Queue`, `Send_Queue` purges, `Expiration_Key.location`, notifications |
+| alias in `peer_addresses` | `add_peer_addresses()` | Each non-primary peer IP + SCTP port, mapped to the primary key | `association_key_for()`, so a packet from any peer address finds its TCB |
+| `path_key()` | `internal.hpp` | IP only, port zeroed | `Expiration_Key.path` for per-destination timers (T3-rtx, HEARTBEAT, PLPMTU_PROBE, PMTU_RAISE) |
+| `Peer_Path.address` | learned from INIT / INIT ACK / cookie, refreshed by `record_arrival()` | IP + the **UDP encapsulation port** that address last sent from | The actual `sendto()` destination |
+
+Within one association, two transport addresses are the same destination if
+their IP matches (`same_destination()`). The SCTP port belongs to the
+association; the UDP port is only where to send encapsulated packets. See
+[Paths](07-paths.md#addresses-ports-and-keys).
+
+---
+
+## Public API to internals
+
+Every public call except the receive calls takes `associations_mutex`, works
+on the TCB, and then either enqueues packets or wakes the event loop. Nothing
+in the API does network I/O directly.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant ULP as Application thread
+    participant API as SCTP_Socket API
+    participant TCB as associations (locked)
+    participant SQ as Send_Queue
+    participant W as Wakeup_Pair
+    participant EL as Event loop thread
+
+    ULP->>API: sctp_send_data(key, bytes, stream)
+    API->>TCB: lock associations_mutex
+    API->>TCB: checks, assign SSN, push Outbound_Message
+    API->>W: wake()
+    API-->>ULP: Sctp_Status::OK
+    W-->>EL: poll() returns
+    EL->>TCB: next_packet() cuts DATA, assigns TSNs
+    EL->>SQ: enqueue NEW_DATA, peek, commit
+    EL->>EL: sendto()
+```
+
+| Call | Preconditions / refusals | What it does internally |
+|---|---|---|
+| `sctp_bind(ip, port)` | Not running | Calls `sctp_bindx({ip}, port)`. |
+| `sctp_bindx(ips, port)` | Not running. A wildcard address must be bound alone. | Binds the first address on `udp_socket`, then opens one more non-blocking, DF-set UDP socket per extra address at the same port (`other_local_addresses`). |
+| `sctp_run()` | Not already running | Opens the `Wakeup_Pair` and starts `event_loop()` on a new thread. |
+| `sctp_close()` | Safe to call at any time, and called by the destructor | `close_associations()` ABORTs every TCB and waits up to `CLOSE_DRAIN_TIMEOUT` (100 ms) for the send queue to drain. It then stops and joins the loop, clears the queues and closes the sockets. |
+| `sctp_associate(ip, port, out, udp_port)` | `NOT_RUNNING`, `INVALID_ADDRESS`, `ASSOCIATION_EXISTS` | `init_new_association()` creates a TCB in `COOKIE_WAIT`, then an INIT is enqueued. T1-init is armed when the INIT actually leaves (`schedule_expirations_after_send`). |
+| `sctp_send_data(key, bytes, stream, unordered, ppid)` | `NO_ASSOCIATION`, `NOT_ESTABLISHED`, `SHUTTING_DOWN`, `EMPTY_MESSAGE`, `INVALID_STREAM`, `QUEUE_FULL` | Assigns an SSN (ordered only), appends an `Outbound_Message`, and wakes the loop. No TSN is assigned yet: see [late TSN assignment](05-outbound.md#late-tsn-assignment). |
+| `sctp_recv_data(buf, ...)` / `sctp_recv_data_from(key, buf, ...)` | Returns 0 when there is nothing to read | Reads at most one message from `Receive_Queue`, then takes the lock to call `maybe_send_window_update()`. |
+| `sctp_shutdown(key)` | `NO_ASSOCIATION`, `SHUTTING_DOWN` | While the association is still forming, the TCB is dropped without a word. Otherwise the state becomes `SHUTDOWN_PENDING` and `do_next_shutdown_step()` runs. |
+| `sctp_abort(key, reason)` | `NO_ASSOCIATION` | `remove_association()` first, which purges queued DATA. Then an ABORT with a User-Initiated Abort cause is enqueued, truncated to fit the AMDCS. Nothing is sent in `COOKIE_WAIT` because there is no peer tag yet. |
+| `sctp_recv_notification()` | none | Pops `Notification_Queue`. |
+| `sctp_change_heartbeat(key, dest, enabled, interval)` | `NO_ASSOCIATION`, `UNKNOWN_DESTINATION` | Toggles `hb_enabled` on one path. A new interval applies to all paths. Re-plans and re-arms HEARTBEAT timers. |
+| `sctp_request_heartbeat(key, dest)` | `+ NOT_ESTABLISHED / SHUTTING_DOWN` | Enqueues a HEARTBEAT immediately and arms that path's timer. |
+| `sctp_set_primary(key, dest)` | `+ UNCONFIRMED_DESTINATION` | Sets `primary_path`. |
+
+`Sctp_Status` values are defined in `include/sctp/status.hpp`.
+
+---
+
+## Notifications
+
+`Notification_Queue` is a mutex-guarded FIFO. Each `Notification` carries
+the `Association_Key` and a variant payload.
+
+```mermaid
+flowchart LR
+    subgraph AC["SCTP_ASSOC_CHANGE"]
+        up["COMM_UP"]
+        lost["COMM_LOST"]
+        rs["RESTART"]
+        sc["SHUTDOWN_COMP"]
+        cant["CANT_STR_ASSOC"]
+    end
+    subgraph PA["SCTP_PEER_ADDR_CHANGE"]
+        conf["ADDR_CONFIRMED"]
+        unr["ADDR_UNREACHABLE"]
+        av["ADDR_AVAILABLE"]
+    end
+    subgraph RE["SCTP_REMOTE_ERROR"]
+        re["every cause of an ERROR chunk, raw"]
+    end
+
+    ce["COOKIE ECHO accepted, new TCB<br/>or Table 12 case B/D while forming"] --> up
+    ca["COOKIE ACK in COOKIE_ECHOED"] --> up
+    ab["ABORT received, established"] --> lost
+    viol["protocol violation: we ABORT"] --> lost
+    errs["Association.Max.Retrans exceeded<br/>T3 / heartbeat / T2"] --> lost
+    t5["T5 shutdown guard"] --> lost
+    caseA["COOKIE ECHO case A: peer restart"] --> rs
+    sack["SHUTDOWN ACK or SHUTDOWN COMPLETE"] --> sc
+    t1["T1 retransmits exhausted"] --> cant
+    iar["INIT ACK refused"] --> cant
+    abf["ABORT while forming"] --> cant
+    stale["Stale cookie retries exhausted"] --> cant
+    hback["HEARTBEAT ACK on unconfirmed path"] --> conf
+    pe["path error_count above Path.Max.Retrans"] --> unr
+    clr["any ack on an inactive path"] --> av
+    err["ERROR chunk, not consumed by<br/>stale-cookie recovery"] --> re
+```
+
+Two teardowns deliberately produce **no** notification. `sctp_abort()` is
+asked for by the ULP, so it already knows. `sctp_shutdown()` before the
+association is established drops the TCB silently, as Linux does.
+
+---
+
+## Design principles
+
+These choices recur throughout the code. Knowing them makes most functions
+easier to read.
+
+1. **One lock over all TCBs.** `associations_mutex` guards `associations` and
+   `peer_addresses`, so a handler never needs to think about lock order between
+   associations. The queues each have a small internal mutex, so the
+   application can read data and notifications without contending for the big
+   lock. See [Concurrency](02-concurrency.md).
+2. **Only the event loop sends.** The API and the handlers *enqueue*
+   `Deliverable`s, and `run_sending()` is the only caller of `sendto()`. It
+   runs `sendto()` outside every lock.
+3. **TSNs are assigned late.** A message is cut into DATA chunks, and given its
+   TSNs, only when a packet can actually carry it under the current cwnd and
+   rwnd. At most one new-DATA packet per association is built ahead of time, so
+   TSNs go on the wire in order.
+4. **Packets are rebuilt rather than replayed** whenever their content depends
+   on current state: a resent SHUTDOWN carries the current Cumulative TSN Ack,
+   and retransmissions are re-bundled per destination. INIT and COOKIE ECHO are
+   the exception: their bytes are fixed, so the T1 timer keeps the packet itself.
+5. **Timers are cancelled by generation, not by removal.** Each `schedule()`
+   stamps a new generation, and a stale heap entry is discarded when it reaches
+   the top. See [Timers](06-timers.md#the-expiration-queue).
+6. **The responder holds no state before COOKIE ECHO.** Everything it needs
+   is in the signed State Cookie. See [Cookies](10-cookies-and-crypto.md).
+7. **Received data outlives the TCB.** `Receive_Queue` is keyed separately, so
+   a graceful close does not discard data the ULP has not read yet.
+8. **No machinery beyond the RFC.** There is no logger framework and no
+   configuration system. Errors go to `std::cerr`, and tunables are `constexpr`
+   in `sctp.hpp` (the §16 values) and `internal.hpp`.
