@@ -462,8 +462,8 @@ const char* state_name(std::optional<Assoc_Change_State> s) {
     return "?";
 }
 
-void expect_change(SCTP_Socket& stack, Assoc_Change_State want, const std::string& what) {
-    auto got = next_assoc_change(stack);
+void expect_change(SCTP_Socket& stack, Assoc_Change_State want, const std::string& what, Association_Key* src = nullptr) {
+    auto got = next_assoc_change(stack, src);
     check(got == want, what + " (got " + state_name(got) + ")");
 }
 
@@ -685,7 +685,7 @@ void phase_heartbeat(SCTP_Socket& stack, const Association_Key& key, int fd) {
 }
 
 void phase_teardowns(SCTP_Socket& stack, int listener) {
-    Association_Key key;
+    Association_Key key{};
     int fd;
 
     section("We shut down");
@@ -770,9 +770,8 @@ void phase_kernel_initiates(SCTP_Socket& stack) {
     sockaddr_in peer = loopback(OUR_PORT);
     int r = ::connect(fd, reinterpret_cast<sockaddr*>(&peer), sizeof peer);
     check(r == 0, std::string("kernel connect() completes (") + (r == 0 ? "ok" : std::strerror(errno)) + ")");
-    Association_Key key;
-    expect_change(stack, Assoc_Change_State::COMM_UP, "COMM_UP");
-    key = Association_Key{loopback(KERNEL_PORT)};
+    Association_Key key{};
+    expect_change(stack, Assoc_Change_State::COMM_UP, "COMM_UP", &key);
     if (r != 0) { ::close(fd); return; }
     wire_kernel_initiates(tap);
 
@@ -814,7 +813,7 @@ void phase_distinct_ports(SCTP_Socket& stack) {
         if (listener >= 0) ::close(listener);
         return;
     }
-    Association_Key key;
+    Association_Key key{};
     stack.sctp_associate("127.0.0.1", LISTEN_PORT, key, KERNEL_PORT);
     bool up = await_established(stack, key, TIMEOUT_MS) == Sctp_Status::OK;
     int fd = up ? ::accept(listener, nullptr, nullptr) : -1;
@@ -841,10 +840,9 @@ void phase_distinct_ports(SCTP_Socket& stack) {
     int r = ::bind(fd, reinterpret_cast<sockaddr*>(&self), sizeof self) == 0
         ? ::connect(fd, reinterpret_cast<sockaddr*>(&peer), sizeof peer) : -1;
     check(r == 0, "kernel connects from SCTP port 5002 through UDP port 9899");
-    expect_change(stack, Assoc_Change_State::COMM_UP, "COMM_UP");
+    expect_change(stack, Assoc_Change_State::COMM_UP, "COMM_UP", &key);
     if (r == 0) {
         set_timeouts(fd, TIMEOUT_MS);
-        key = Association_Key{loopback(CLIENT_PORT)};
         auto in = pattern(4000, 9);
         std::vector<uint8_t> got;
         check(kernel_send(fd, in) && our_recv(stack, key, got) && got == in, "we receive it, keyed on SCTP port 5002");
@@ -903,7 +901,7 @@ int main() {
         return 1;
     }
 
-    Association_Key key;
+    Association_Key key{};
     int fd;
     {
         Wire_Tap tap;

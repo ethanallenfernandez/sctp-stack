@@ -26,11 +26,11 @@ sockaddr_in address(const char* ip, uint16_t port) {
 
 struct SCTP_Socket_Test_Access {
     static Association_Key insert(SCTP_Socket& stack, Association_State state) {
-        Association_Key key = peer_key(address("127.0.0.1", 5000), 5000);
-        Association assoc = stack.init_new_association(key.address);
+        Association assoc = stack.init_new_association(address("127.0.0.1", 5000), 5000);
         assoc.state = state;
         assoc.peer_ver_tag = 0x01020304;
-        stack.associations.insert_or_assign(key, assoc);
+        Association_Key key{stack.next_association_id++};
+        stack.add_peer_addresses(key, stack.associations.insert_or_assign(key, assoc).first->second, {address("127.0.0.1", 5000)});
         return key;
     }
 
@@ -54,7 +54,7 @@ void expect(Sctp_Status got, Sctp_Status want, const std::string& what) {
 void test_associate() {
     std::printf("Associate:\n");
     SCTP_Socket stack;
-    Association_Key key;
+    Association_Key key{};
     expect(stack.sctp_associate("127.0.0.1", 5000, key), Sctp_Status::NOT_RUNNING, "before run");
     if (!stack.sctp_bind("127.0.0.1", STACK_PORT) || !stack.sctp_run()) {
         check(false, "stack started");
@@ -79,21 +79,21 @@ void test_before_established() {
         return;
     }
 
-    Association_Key key;
+    Association_Key key{};
     expect(stack.sctp_associate("127.0.0.1", SILENT_PORT, key), Sctp_Status::OK, "associate");
-    Association_Key again;
+    Association_Key again{};
     expect(stack.sctp_associate("127.0.0.1", SILENT_PORT, again), Sctp_Status::ASSOCIATION_EXISTS, "associate to the same peer again");
     expect(stack.sctp_associate("127.0.0.1", SILENT_PORT, again, SILENT_PORT + 1), Sctp_Status::ASSOCIATION_EXISTS,
            "even through another UDP port");
     expect(stack.sctp_send_data(key, {1, 2, 3}), Sctp_Status::NOT_ESTABLISHED, "send");
-    expect(stack.sctp_request_heartbeat(key, key.address), Sctp_Status::NOT_ESTABLISHED, "request a heartbeat");
+    expect(stack.sctp_request_heartbeat(key, address("127.0.0.1", SILENT_PORT)), Sctp_Status::NOT_ESTABLISHED, "request a heartbeat");
     expect(stack.sctp_shutdown(key), Sctp_Status::OK, "shutdown drops the TCB");
 
     expect(stack.sctp_send_data(key, {1, 2, 3}), Sctp_Status::NO_ASSOCIATION, "send once it is gone");
     expect(stack.sctp_abort(key), Sctp_Status::NO_ASSOCIATION, "abort once it is gone");
     expect(stack.sctp_shutdown(key), Sctp_Status::NO_ASSOCIATION, "shutdown once it is gone");
-    expect(stack.sctp_change_heartbeat(key, key.address, false), Sctp_Status::NO_ASSOCIATION, "change heartbeat once it is gone");
-    expect(stack.sctp_set_primary(key, key.address), Sctp_Status::NO_ASSOCIATION, "set primary once it is gone");
+    expect(stack.sctp_change_heartbeat(key, address("127.0.0.1", SILENT_PORT), false), Sctp_Status::NO_ASSOCIATION, "change heartbeat once it is gone");
+    expect(stack.sctp_set_primary(key, address("127.0.0.1", SILENT_PORT)), Sctp_Status::NO_ASSOCIATION, "set primary once it is gone");
     stack.sctp_close();
     sctp_close_socket(silent);
 }
@@ -137,7 +137,7 @@ void test_established() {
     expect(stack.sctp_send_data(key, {1}), Sctp_Status::SHUTTING_DOWN, "send in SHUTDOWN-PENDING");
     expect(stack.sctp_shutdown(key), Sctp_Status::SHUTTING_DOWN, "shutdown in SHUTDOWN-PENDING");
     Access::set_state(stack, key, SHUTDOWN_SENT);
-    expect(stack.sctp_request_heartbeat(key, key.address), Sctp_Status::SHUTTING_DOWN, "request a heartbeat in SHUTDOWN-SENT");
+    expect(stack.sctp_request_heartbeat(key, address("127.0.0.1", 5000)), Sctp_Status::SHUTTING_DOWN, "request a heartbeat in SHUTDOWN-SENT");
     expect(stack.sctp_abort(key), Sctp_Status::OK, "abort");
 }
 

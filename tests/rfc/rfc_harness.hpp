@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -67,8 +68,8 @@ inline sockaddr_in addr(const char* ip = PEER_IP, uint16_t port = PEER_PORT) {
     return out;
 }
 
-inline Association_Key key(const char* ip = PEER_IP, uint16_t port = PEER_PORT) {
-    return Association_Key{addr(ip, port)};
+inline Peer_Key peer(const char* ip = PEER_IP, uint16_t port = PEER_PORT) {
+    return peer_key(addr(ip, port), port);
 }
 
 inline in_addr ipv4(const char* ip) {
@@ -208,12 +209,42 @@ struct Sent {
 } // namespace rfc
 
 struct SCTP_Socket_Test_Access {
+    // The last association each socket held for each peer address, so a check
+    // that a removed association left nothing behind still looks under its id.
+    static inline std::map<std::pair<const SCTP_Socket*, uint64_t>, Association_Key> known;
+
+    static uint64_t peer_id(const Peer_Key& p) {
+        return uint64_t{p.address.sin_addr.s_addr} << 16 | p.address.sin_port;
+    }
+
+    static void forget_known(SCTP_Socket& s) {
+        std::erase_if(known, [&](const auto& entry) { return entry.first.first == &s; });
+    }
+
     static void setup(SCTP_Socket& s) {
+        forget_known(s);
         s.local_address = rfc::addr("127.0.0.1", rfc::LOCAL_PORT);
     }
 
-    static Association* tcb(SCTP_Socket& s, const Association_Key& k = rfc::key()) {
-        auto it = s.associations.find(k);
+    // The association s holds for this peer, or else the last it held.
+    static Association_Key key(SCTP_Socket& s, const char* ip = rfc::PEER_IP, uint16_t port = rfc::PEER_PORT) {
+        auto slot = std::pair{static_cast<const SCTP_Socket*>(&s), peer_id(rfc::peer(ip, port))};
+        Association_Key live = s.association_at(rfc::peer(ip, port));
+        if (live != Association_Key{}) {
+            known[slot] = live;
+            return live;
+        }
+        auto found = known.find(slot);
+        return found == known.end() ? Association_Key{} : found->second;
+    }
+
+    // An id of 0 stands for the default peer's association.
+    static Association_Key resolve(SCTP_Socket& s, Association_Key k) {
+        return k != Association_Key{} ? k : key(s);
+    }
+
+    static Association* tcb(SCTP_Socket& s, Association_Key k = {}) {
+        auto it = s.associations.find(resolve(s, k));
         return it == s.associations.end() ? nullptr : &it->second;
     }
 
@@ -226,8 +257,12 @@ struct SCTP_Socket_Test_Access {
     static Association& establish(SCTP_Socket& s, Association_State state = ESTABLISHED,
                                   std::vector<const char*> others = {}, uint32_t peer_rwnd = RWND) {
         setup(s);
-        Association_Key k = rfc::key();
-        Association assoc = s.init_new_association(k.address);
+        Association_Key k{s.next_association_id++};
+        if (Association* existing = s.find_tcb(s.association_at(rfc::peer()))) {
+            k = s.association_at(rfc::peer());
+            s.forget_peer_addresses(k, *existing);
+        }
+        Association assoc = s.init_new_association(rfc::addr(), rfc::PEER_PORT);
         assoc.state = state;
         assoc.this_ver_tag = rfc::OUR_TAG;
         assoc.peer_ver_tag = rfc::PEER_TAG;
@@ -240,7 +275,7 @@ struct SCTP_Socket_Test_Access {
         assoc.in_streams = 10;
         assoc.next_ssn.assign(10, 0);
         auto& tcb = s.associations.insert_or_assign(k, assoc).first->second;
-        std::vector<sockaddr_in> addresses;
+        std::vector<sockaddr_in> addresses{rfc::addr()};
         for (const char* ip : others) {
             addresses.push_back(rfc::addr(ip));
         }
@@ -249,6 +284,7 @@ struct SCTP_Socket_Test_Access {
             path.confirmed = true;
             path.data_sent_at = rfc::Clock::now();
         }
+        key(s);
         return tcb;
     }
 
@@ -292,23 +328,23 @@ struct SCTP_Socket_Test_Access {
     }
 
     static Expiration_Key timer(const Association_Key& k, Expiration_Timer_Type type, const char* ip = nullptr) {
-        return Expiration_Key{k, type, ip ? path_key(rfc::addr(ip)) : Association_Key{}};
+        return Expiration_Key{k, type, ip ? path_key(rfc::addr(ip)) : Peer_Key{}};
     }
 
-    static bool armed(SCTP_Socket& s, Expiration_Timer_Type type, const char* ip = nullptr, const Association_Key& k = rfc::key()) {
-        return s.expirations.is_active(timer(k, type, ip));
+    static bool armed(SCTP_Socket& s, Expiration_Timer_Type type, const char* ip = nullptr, Association_Key k = {}) {
+        return s.expirations.is_active(timer(resolve(s, k), type, ip));
     }
 
     // The running timer's generation, 0 if none: a restart changes it.
-    static uint64_t generation(SCTP_Socket& s, Expiration_Timer_Type type, const char* ip = nullptr, const Association_Key& k = rfc::key()) {
-        auto live = s.expirations.active.find(timer(k, type, ip));
+    static uint64_t generation(SCTP_Socket& s, Expiration_Timer_Type type, const char* ip = nullptr, Association_Key k = {}) {
+        auto live = s.expirations.active.find(timer(resolve(s, k), type, ip));
         return live == s.expirations.active.end() ? 0 : live->second;
     }
 
     // Time until the timer would fire, or nullopt if it is not running.
     static std::optional<std::chrono::milliseconds> remaining(SCTP_Socket& s, Expiration_Timer_Type type, const char* ip = nullptr,
-                                                              const Association_Key& k = rfc::key()) {
-        Expiration_Key wanted = timer(k, type, ip);
+                                                              Association_Key k = {}) {
+        Expiration_Key wanted = timer(resolve(s, k), type, ip);
         auto live = s.expirations.active.find(wanted);
         if (live == s.expirations.active.end()) {
             return std::nullopt;
@@ -330,8 +366,8 @@ struct SCTP_Socket_Test_Access {
 
     // Fires the running timer of this type (on this path), as if its time had
     // come, leaving every other timer as it was. False if none was running.
-    static bool fire(SCTP_Socket& s, Expiration_Timer_Type type, const char* ip = nullptr, const Association_Key& k = rfc::key()) {
-        Expiration_Key wanted = timer(k, type, ip);
+    static bool fire(SCTP_Socket& s, Expiration_Timer_Type type, const char* ip = nullptr, Association_Key k = {}) {
+        Expiration_Key wanted = timer(resolve(s, k), type, ip);
         auto live = s.expirations.active.find(wanted);
         if (live == s.expirations.active.end()) {
             return false;
@@ -387,13 +423,14 @@ struct SCTP_Socket_Test_Access {
         s.running.store(true);
         s.sctp_associate(ip, rfc::PEER_PORT, k);
         s.running.store(false);
+        key(s, ip);
         return k;
     }
 
     // We initiate: INIT out, INIT ACK in, COOKIE ECHO out, COOKIE ACK in.
     // Returns what was sent at each step.
     struct Initiated {
-        Association_Key key;
+        Association_Key key{};
         rfc::Sent init;
         rfc::Sent echo;
         rfc::Sent after_ack;
@@ -441,16 +478,17 @@ struct SCTP_Socket_Test_Access {
         chunks.insert(chunks.end(), bundled.begin(), bundled.end());
         receive(s, rfc::packet(r.our_tag, chunks), src);
         r.cookie_ack = sent(s);
+        key(s);
         return r;
     }
 
     // Our next new DATA: queued by the ULP, cut when windows allow.
     static Sctp_Status send(SCTP_Socket& s, std::vector<uint8_t> bytes, uint16_t stream = 0, bool unordered = false, uint32_t ppid = 0) {
-        return s.sctp_send_data(rfc::key(), bytes, stream, unordered, ppid);
+        return s.sctp_send_data(key(s), bytes, stream, unordered, ppid);
     }
 
     static size_t read(SCTP_Socket& s, std::vector<uint8_t>& buffer, bool* partial = nullptr, uint16_t* stream = nullptr) {
-        return s.sctp_recv_data_from(rfc::key(), buffer, partial, stream);
+        return s.sctp_recv_data_from(key(s), buffer, partial, stream);
     }
 
     static Cookie_Auth& cookies(SCTP_Socket& s) {
@@ -459,7 +497,7 @@ struct SCTP_Socket_Test_Access {
 
     static uint32_t receive_window(SCTP_Socket& s) {
         Association* a = tcb(s);
-        return a ? s.receive_window(rfc::key(), *a) : 0;
+        return a ? s.receive_window(key(s), *a) : 0;
     }
 
     static void handle_icmp_ptb(SCTP_Socket& s, const sockaddr_in& to, const std::vector<uint8_t>& quoted, uint32_t mtu) {
@@ -483,7 +521,7 @@ struct SCTP_Socket_Test_Access {
         return !s.other_local_addresses.empty() && s.local_address.sin_port != 0;
     }
 
-    static Peer_Path* path(SCTP_Socket& s, const char* ip, const Association_Key& k = rfc::key()) {
+    static Peer_Path* path(SCTP_Socket& s, const char* ip, Association_Key k = {}) {
         Association* a = tcb(s, k);
         return a ? find_path(*a, rfc::addr(ip)) : nullptr;
     }
@@ -493,16 +531,17 @@ struct SCTP_Socket_Test_Access {
         return a && same_destination(data_path(*a).address, rfc::addr(ip));
     }
 
-    static void start_heartbeats_for(SCTP_Socket& s, const Association_Key& k = rfc::key()) {
-        s.start_heartbeats(k, *tcb(s, k));
+    static void start_heartbeats_for(SCTP_Socket& s, Association_Key k = {}) {
+        s.start_heartbeats(resolve(s, k), *tcb(s, k));
     }
 
     static void schedule_retransmission(SCTP_Socket& s) {
-        s.schedule_pending_retransmission(rfc::key());
+        s.schedule_pending_retransmission(key(s));
     }
 
     // Real sockets, for what only the kernel can produce: ICMP errors and UDP headers.
     static bool bind_real(SCTP_Socket& s, uint16_t port = rfc::LOCAL_PORT) {
+        forget_known(s);
         return s.sctp_bind("127.0.0.1", port);
     }
 

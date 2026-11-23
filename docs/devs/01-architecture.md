@@ -8,7 +8,7 @@ public call goes. The later documents look at each subsystem in detail.
 - [`SCTP_Socket` and its translation units](#sctp_socket-and-its-translation-units)
 - [Ownership and data model](#ownership-and-data-model)
 - [The TCB (`Association`)](#the-tcb-association)
-- [Identity: keys, aliases and path keys](#identity-keys-aliases-and-path-keys)
+- [Identity: association ids and peer addresses](#identity-association-ids-and-peer-addresses)
 - [Public API to internals](#public-api-to-internals)
 - [Notifications](#notifications)
 - [Design principles](#design-principles)
@@ -52,7 +52,7 @@ include/sctp/
 ├── status.hpp                 Sctp_Status: every API return code
 ├── protocol/
 │   ├── sctp.hpp               chunk/param/cause enums, chunk value structs, §16 parameters
-│   ├── association.hpp        Association (TCB), Peer_Path, Outstanding_Data, Association_Key
+│   ├── association.hpp        Association (TCB), Peer_Path, Outstanding_Data, Association_Key, Peer_Key
 │   └── tsn.hpp                tsn_lt/gt/..., ssn_gt, sack_acknowledges
 ├── queues/
 │   ├── deliverable.hpp        one outbound packet + where it goes
@@ -115,7 +115,8 @@ classDiagram
         udp_socket : socket
         other_local_addresses : vector of Local_Address
         associations : map Association_Key to Association
-        peer_addresses : map alias key to primary key
+        peer_addresses : map Peer_Key to Association_Key
+        next_association_id : uint32
         associations_mutex : mutex
         event_loop_thread : thread
     }
@@ -223,6 +224,7 @@ flowchart TB
     subgraph A["Association"]
         direction LR
         subgraph HS["Handshake and identity"]
+            hs0["peer_port: the peer's SCTP port"]
             hs1["this_ver_tag / peer_ver_tag"]
             hs2["local_tie_tag / peer_tie_tag"]
             hs3["state"]
@@ -266,37 +268,47 @@ flowchart TB
 
 ---
 
-## Identity: keys, aliases and path keys
+## Identity: association ids and peer addresses
 
-Three kinds of key appear everywhere. They are easy to mix up.
+Identity and lookup are kept apart. An association is named by an opaque
+id, and every transport address of the peer maps to that id.
 
 ```mermaid
 flowchart LR
-    subgraph K["Association_Key"]
-        k1["peer primary IPv4<br/>+ peer SCTP port<br/>(network order)"]
+    subgraph IN["inbound packet"]
+        src["UDP source IP<br/>+ SCTP source port"]
     end
-    subgraph AL["peer_addresses map"]
-        a1["other peer IPv4 + SCTP port"] -- "maps to" --> k1b["primary Association_Key"]
-    end
-    subgraph PK["path_key()"]
-        p1["peer IPv4 only<br/>port = 0"]
-    end
-    subgraph PP["Peer_Path.address"]
-        pp1["peer IPv4<br/>+ <b>UDP</b> port it last sent from"]
-    end
-
-    K -- "indexes" --> TCB[("associations")]
-    AL -- "association_key_for()" --> K
-    PK -- "names per-destination timers<br/>Expiration_Key.path" --> T[("Expiration_Queue")]
-    PP -- "where packets are sent" --> NET(("sendto"))
+    src -- "peer_key()" --> PK["Peer_Key<br/>peer IPv4 + SCTP port"]
+    PK -- "peer_addresses<br/>association_at()" --> ID["Association_Key<br/>id"]
+    ID -- "associations" --> TCB[("TCB")]
+    ID -- "names it in" --> Q["Send_Queue, Receive_Queue,<br/>Expiration_Key.location,<br/>notifications, the ULP's handle"]
+    TCB -- "peer_address_list" --> PP["Peer_Path.address<br/>peer IPv4 + UDP port: where to send"]
+    PP -- "path_key()" --> PATH["Peer_Key, port 0<br/>Expiration_Key.path"]
 ```
 
-| Key | Built by | Holds | Used for |
-|---|---|---|---|
-| `Association_Key` | `peer_key(addr, sctp_port)` | IP of the peer's **primary** address + peer **SCTP** port | Indexing `associations`, `Receive_Queue`, `Send_Queue` purges, `Expiration_Key.location`, notifications |
-| alias in `peer_addresses` | `add_peer_addresses()` | Each non-primary peer IP + SCTP port, mapped to the primary key | `association_key_for()`, so a packet from any peer address finds its TCB |
-| `path_key()` | `internal.hpp` | IP only, port zeroed | `Expiration_Key.path` for per-destination timers (T3-rtx, HEARTBEAT, PLPMTU_PROBE, PMTU_RAISE) |
-| `Peer_Path.address` | learned from INIT / INIT ACK / cookie, refreshed by `record_arrival()` | IP + the **UDP encapsulation port** that address last sent from | The actual `sendto()` destination |
+| Name | Holds | Used for |
+|---|---|---|
+| `Association_Key` | `enum class Association_Key : uint32_t`, drawn from `next_association_id`: starts at 1 and is never reused, and `Association_Key{}` (0) names no association. A scoped enum rather than a plain `uint32_t`, so a tag, TSN or PPID cannot be passed where an id belongs, and `std::hash` works without a custom hasher. | The association's identity: `associations`, `Receive_Queue`, `Send_Queue` (`Deliverable.location`), `Expiration_Key.location`, `Notification.src`, and the handle the ULP gets from `sctp_associate` or a COMM UP notification |
+| `Peer_Key` from `peer_key(addr, sctp_port)` | peer IPv4 + peer **SCTP** port. The UDP port is dropped. | Key of `peer_addresses`, which maps **every** peer address, the first one included, to its association. `association_at()` looks it up and returns id 0 if the address is unknown. |
+| `Peer_Key` from `path_key(addr)` | peer IPv4 only, port 0 | `Expiration_Key.path`, naming one destination for per-path timers (T3-rtx, HEARTBEAT, PLPMTU_PROBE, PMTU_RAISE) |
+| `Peer_Path.address` | peer IPv4 + the **UDP encapsulation port** it last sent from | The `sendto()` destination. Not a key. |
+
+Lifecycle of the mapping:
+
+- **Created**: `sctp_associate()` and a valid COOKIE ECHO with no matching TCB
+  draw a fresh id, then call `add_peer_addresses()`, which maps each address
+  (the first included) to it. INIT ACK, collision (case B) and restart (case A)
+  add addresses in the same way.
+- **Removed**: `forget_peer_addresses(key, assoc)` walks the TCB's own
+  address list. It removes an entry only if the entry still maps to this
+  association, so an address another association already held is never taken
+  from it. `remove_association()` and a restart call it.
+- **The primary is a path choice, not an identity.** `sctp_set_primary()`
+  changes `primary_path` only. The id does not change.
+- **The peer's SCTP port** is stored on the TCB (`Association::peer_port`, host
+  order). Every packet the association originates is addressed to it.
+- **Passive associations**: a ULP that did not call `sctp_associate` learns the
+  id from the COMM UP notification's `src`.
 
 Within one association, two transport addresses are the same destination if
 their IP matches (`same_destination()`). The SCTP port belongs to the
@@ -338,7 +350,7 @@ sequenceDiagram
 | `sctp_bindx(ips, port)` | Not running. A wildcard address must be bound alone. | Binds the first address on `udp_socket`, then opens one more non-blocking, DF-set UDP socket per extra address at the same port (`other_local_addresses`). |
 | `sctp_run()` | Not already running | Opens the `Wakeup_Pair` and starts `event_loop()` on a new thread. |
 | `sctp_close()` | Safe to call at any time, and called by the destructor | `close_associations()` ABORTs every TCB and waits up to `CLOSE_DRAIN_TIMEOUT` (100 ms) for the send queue to drain. It then stops and joins the loop, clears the queues and closes the sockets. |
-| `sctp_associate(ip, port, out, udp_port)` | `NOT_RUNNING`, `INVALID_ADDRESS`, `ASSOCIATION_EXISTS` | `init_new_association()` creates a TCB in `COOKIE_WAIT`, then an INIT is enqueued. T1-init is armed when the INIT actually leaves (`schedule_expirations_after_send`). |
+| `sctp_associate(ip, port, out, udp_port)` | `NOT_RUNNING`, `INVALID_ADDRESS`, `ASSOCIATION_EXISTS` (the address already maps to an association) | Draws a fresh id, `init_new_association()` creates a TCB in `COOKIE_WAIT` and the address is mapped to the id, then an INIT is enqueued. T1-init is armed when the INIT actually leaves (`schedule_expirations_after_send`). |
 | `sctp_send_data(key, bytes, stream, unordered, ppid)` | `NO_ASSOCIATION`, `NOT_ESTABLISHED`, `SHUTTING_DOWN`, `EMPTY_MESSAGE`, `INVALID_STREAM`, `QUEUE_FULL` | Assigns an SSN (ordered only), appends an `Outbound_Message`, and wakes the loop. No TSN is assigned yet: see [late TSN assignment](05-outbound.md#late-tsn-assignment). |
 | `sctp_recv_data(buf, ...)` / `sctp_recv_data_from(key, buf, ...)` | Returns 0 when there is nothing to read | Reads at most one message from `Receive_Queue`, then takes the lock to call `maybe_send_window_update()`. |
 | `sctp_shutdown(key)` | `NO_ASSOCIATION`, `SHUTTING_DOWN` | While the association is still forming, the TCB is dropped without a word. Otherwise the state becomes `SHUTDOWN_PENDING` and `do_next_shutdown_step()` runs. |

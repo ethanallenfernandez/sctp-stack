@@ -84,7 +84,7 @@ bool pair_up(SCTP_Socket& a, int a_port, SCTP_Socket& b, int b_port, Association
         return false;
     }
     a.sctp_associate("127.0.0.1", b_port, a_to_b);
-    b_to_a = a.get_this_association_key();
+    b_to_a = accepted_association(b, 3000);
     return await_established(a, a_to_b, 3000) == Sctp_Status::OK
         && await_established(b, b_to_a, 3000) == Sctp_Status::OK;
 }
@@ -142,7 +142,7 @@ void test_close_mid_handshake() {
     if (!start(a, 39719)) {
         check(false, "stack started"); return;
     }
-    Association_Key key;
+    Association_Key key{};
     a.sctp_associate("127.0.0.1", 39720, key);
 
     auto started = Clock::now();

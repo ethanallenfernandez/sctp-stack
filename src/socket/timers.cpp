@@ -117,8 +117,8 @@ void SCTP_Socket::handle_t2_expiration(const Association_Key& location) {
         return remove_association(location, Assoc_Change_State::COMM_LOST);
     }
     enqueue_packet(Deliverable{location, path.address, assoc->state == SHUTDOWN_SENT
-        ? packet_to(location, assoc->peer_ver_tag, SHUTDOWN, shutdown_chunk_value{assoc->last_peer_tsn})
-        : packet_to(location, assoc->peer_ver_tag, SHUTDOWN_ACK, empty_chunk_value{})});
+        ? packet_to(*assoc, SHUTDOWN, shutdown_chunk_value{assoc->last_peer_tsn})
+        : packet_to(*assoc, SHUTDOWN_ACK, empty_chunk_value{})});
     restart_t2(location);
 }
 
@@ -130,10 +130,10 @@ void SCTP_Socket::handle_t5_expiration(const Association_Key& location) {
     if (assoc == nullptr || (assoc->state != SHUTDOWN_SENT && assoc->state != SHUTDOWN_ACK_SENT)) {
         return;
     }
-    uint32_t peer_tag = assoc->peer_ver_tag;
     sockaddr_in destination = data_path(*assoc).address;
+    SCTP_Packet abort = packet_to(*assoc, ABORT, error_chunk_value{});
     remove_association(location, Assoc_Change_State::COMM_LOST);
-    enqueue_packet(Deliverable{location, destination, packet_to(location, peer_tag, ABORT, error_chunk_value{})});
+    enqueue_packet(Deliverable{location, destination, std::move(abort)});
 }
 
 // The timed-out chunks are moved to the path they will be retransmitted on,
@@ -251,7 +251,7 @@ Deliverable SCTP_Socket::build_probe(const Association_Key& key, const Associati
     generate_random(path.hb_nonce);
     path.hb_outstanding = true;
     path.hb_sent_at = std::chrono::steady_clock::now();
-    return Deliverable{key, path.address, packet_to(key, assoc.peer_ver_tag, HEARTBEAT, heartbeat_chunk_value{heartbeat_info(path.hb_nonce, path.address)})};
+    return Deliverable{key, path.address, packet_to(assoc, HEARTBEAT, heartbeat_chunk_value{heartbeat_info(path.hb_nonce, path.address)})};
 }
 
 void SCTP_Socket::arm_heartbeat(const Association_Key& key, const Association& assoc, const Peer_Path& path) {
@@ -366,6 +366,6 @@ void SCTP_Socket::schedule_pending_retransmission(const Association_Key& key, bo
             break;
         }
     }
-    enqueue_packet(Deliverable{key, to.address, build_data(ntohs(local_address.sin_port), ntohs(key.address.sin_port), assoc.peer_ver_tag,
+    enqueue_packet(Deliverable{key, to.address, build_data(ntohs(local_address.sin_port), assoc.peer_port, assoc.peer_ver_tag,
         std::move(bundle)), packet_size > limit}, Send_Priority::RETRANSMISSION);
 }

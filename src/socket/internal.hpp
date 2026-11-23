@@ -56,15 +56,15 @@ inline bool same_destination(const sockaddr_in& a, const sockaddr_in& b) {
     return a.sin_addr.s_addr == b.sin_addr.s_addr;
 }
 
-inline Association_Key path_key(const sockaddr_in& address) {
+inline Peer_Key path_key(const sockaddr_in& address) {
     sockaddr_in destination{};
     destination.sin_family = AF_INET;
     destination.sin_addr = address.sin_addr;
-    return Association_Key{destination};
+    return Peer_Key{destination};
 }
 
-inline Association_Key peer_key(const sockaddr_in& address, uint16_t sctp_port) {
-    Association_Key key = path_key(address);
+inline Peer_Key peer_key(const sockaddr_in& address, uint16_t sctp_port) {
+    Peer_Key key = path_key(address);
     key.address.sin_port = htons(sctp_port);
     return key;
 }
@@ -193,7 +193,7 @@ inline sockaddr_in cookie_source(const State_Cookie& cookie) {
     return source;
 }
 
-inline Association_Key cookie_key(const State_Cookie& cookie) {
+inline Peer_Key cookie_key(const State_Cookie& cookie) {
     return peer_key(cookie_source(cookie), cookie.sctp_src_port);
 }
 

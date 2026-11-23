@@ -92,7 +92,7 @@ void s7_1_and_7_2() {
         Association& a = Access::establish(s, ESTABLISHED, {"127.0.0.2"});
         Peer_Path& one = a.peer_address_list[0];
         Peer_Path& two = a.peer_address_list[1];
-        s.sctp_set_primary(key(), addr("127.0.0.2"));
+        s.sctp_set_primary(Access::key(s), addr("127.0.0.2"));
         fill(s, 8);
         uint32_t one_before = one.cwnd, two_before = two.cwnd;
         sack(s, OUR_TSN + 1);
@@ -504,7 +504,7 @@ void s8_5_tags() {
     {
         SCTP_Socket s;
         Access::establish(s);
-        s.sctp_abort(key());
+        s.sctp_abort(Access::key(s));
         auto out = Access::sent(s);
         const Deliverable* abort = out.with(ABORT);
         SCTP_Socket t;

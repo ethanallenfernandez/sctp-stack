@@ -322,7 +322,7 @@ void SCTP_Socket::refill_new_data(Send_Allowances& allowances) {
         std::vector<data_chunk_value> chunks = assoc ? cut_new_data(*assoc, allowance) : std::vector<data_chunk_value>{};
         if (!chunks.empty()) {
             sends.enqueue(Deliverable{key, data_path(*assoc).address,
-                build_data(ntohs(local_address.sin_port), ntohs(key.address.sin_port), assoc->peer_ver_tag, std::move(chunks))}, Send_Priority::NEW_DATA);
+                build_data(ntohs(local_address.sin_port), assoc->peer_port, assoc->peer_ver_tag, std::move(chunks))}, Send_Priority::NEW_DATA);
         }
     }
 }

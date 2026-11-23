@@ -72,21 +72,25 @@ struct SCTP_Socket_Test_Access {
         association.cumulative_tsn_ack = tsn - 1;
     }
 
-    static Association_Key add_test_association(
-            SCTP_Socket& stack, uint32_t cumulative_tsn_ack) {
+    static sockaddr_in test_address() {
         sockaddr_in address{};
         address.sin_family = AF_INET;
         address.sin_port = htons(29999);
         sctp_parse_ipv4("127.0.0.1", address.sin_addr);
-        Association_Key key{address};
-        Association association = stack.init_new_association(key.address);
+        return address;
+    }
+
+    static Association_Key add_test_association(
+            SCTP_Socket& stack, uint32_t cumulative_tsn_ack) {
+        Association association = stack.init_new_association(test_address(), 29999);
         association.state = ESTABLISHED;
         association.peer_ver_tag = 0x10203040;
         association.cumulative_tsn_ack = cumulative_tsn_ack;
         association.next_tsn = cumulative_tsn_ack + 1;
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
-        association.primary_path = key.address;
-        stack.associations.insert_or_assign(key, std::move(association));
+        association.primary_path = test_address();
+        Association_Key key{stack.next_association_id++};
+        stack.add_peer_addresses(key, stack.associations.insert_or_assign(key, std::move(association)).first->second, {test_address()});
         return key;
     }
 
@@ -123,7 +127,7 @@ struct SCTP_Socket_Test_Access {
                 .a_rwnd = RWND,
                 .gap_ack_blocks = std::move(gaps),
                 .duplicate_tsns = {}}};
-        stack.handle_sack(SCTP_Common_Header{}, chunk, key, key.address);
+        stack.handle_sack(SCTP_Common_Header{}, chunk, key, test_address());
     }
 
     static void enter_fast_recovery(
@@ -159,7 +163,7 @@ struct SCTP_Socket_Test_Access {
 
     static uint64_t t3_generation(
             SCTP_Socket& stack, const Association_Key& key) {
-        auto live = stack.expirations.active.find(Expiration_Key{key, Expiration_Timer_Type::T3_RTX, path_key(key.address)});
+        auto live = stack.expirations.active.find(Expiration_Key{key, Expiration_Timer_Type::T3_RTX, path_key(test_address())});
         return live == stack.expirations.active.end() ? 0 : live->second;
     }
 };
@@ -224,7 +228,7 @@ void test_t1_cookie_exhaustion() {
     check(began, "association reached COOKIE_ECHOED");
     if (began) {
         SCTP_Socket_Test_Access::exhaust_cookie_timer(
-            stack, key, Deliverable{key, key.address, echo});
+            stack, key, Deliverable{key, peer.self, echo});
         check(!SCTP_Socket_Test_Access::has_association(stack, key),
               "eighth retry exhaustion removed the association");
         check(SCTP_Socket_Test_Access::association_work_is_gone(stack, key),

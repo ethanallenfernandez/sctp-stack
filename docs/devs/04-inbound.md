@@ -35,7 +35,7 @@ flowchart TD
     crc -- "yes" --> parse{"deserialize_sctp_packet()"}
     parse -- "throws" --> drop
     parse -- "ok" --> lock["lock associations_mutex"]
-    lock --> find["find association<br/>key, then aliases, then INIT addresses"]
+    lock --> find["find association<br/>by source address, then INIT addresses"]
     find --> tag{"validate_verification_tag()"}
     tag -- "false: answered or dropped" --> stop(["return"])
     tag -- "true" --> unk["strip unrecognized chunk types<br/>by upper two bits, collect reports"]
@@ -66,18 +66,17 @@ therefore never touches association state and never contends for the lock.
 
 ```mermaid
 flowchart LR
-    a["peer_key(src, header.src_port)"] --> b{"in associations?"}
-    b -- "yes" --> k(["key"])
-    b -- "no" --> c{"in peer_addresses alias map?"}
-    c -- "yes" --> k2(["primary key"])
-    c -- "no" --> d{"packet leads with<br/>INIT or INIT ACK?"}
-    d -- "no" --> k3(["key, no TCB"])
-    d -- "yes" --> e["for each address the chunk lists<br/>(source + IPv4 parameters):<br/>association_key_for(address)"]
-    e -- "one has a TCB" --> k4(["that key"])
+    a["peer_key(src, header.src_port)<br/>UDP port dropped"] --> b{"association_at():<br/>in peer_addresses?"}
+    b -- "yes" --> k(["its id"])
+    b -- "no" --> d{"packet leads with<br/>INIT or INIT ACK?"}
+    d -- "no" --> k3(["id 0: no TCB"])
+    d -- "yes" --> e["for each address the chunk lists<br/>(source + IPv4 parameters):<br/>association_at(address)"]
+    e -- "one maps to a TCB" --> k4(["that id"])
     e -- "none" --> k3
 ```
 
-The last step means that an INIT or INIT ACK sent from a peer address we have
+Every peer address is in `peer_addresses`, so one lookup covers all of them.
+The INIT step means that an INIT or INIT ACK sent from a peer address we have
 not seen yet still finds the TCB, as long as it lists an address we know.
 That is how a restart or collision arriving from an alternate address is
 matched to the existing association.

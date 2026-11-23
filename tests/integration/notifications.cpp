@@ -5,6 +5,7 @@
 #include <sctp/platform/compat.hpp>
 #include <sctp/queues/notification_queue.hpp>
 #include "protocol/serialize.hpp"
+#include "socket/internal.hpp"
 
 #include <chrono>
 #include <cstdio>
@@ -19,19 +20,19 @@ constexpr uint32_t OUR_TAG = 0x0A0B0C0D;
 constexpr uint32_t PEER_TAG = 0x11223344;
 constexpr uint16_t PEER_PORT = 40000;
 
-Association_Key peer_key() {
+sockaddr_in peer_address() {
     sockaddr_in src{};
     src.sin_family = AF_INET;
     src.sin_port = htons(PEER_PORT);
     sctp_parse_ipv4("127.0.0.1", src.sin_addr);
-    return Association_Key{src};
+    return src;
 }
 
 Notification event(Notification_Type type) {
     if (type == Notification_Type::SCTP_ASSOC_CHANGE) {
-        return Notification{type, peer_key(), Assoc_Change{Assoc_Change_State::COMM_UP}};
+        return Notification{type, Association_Key{1}, Assoc_Change{Assoc_Change_State::COMM_UP}};
     }
-    return Notification{type, peer_key(), Remote_Error{{error_cause{CAUSE_PROTOCOL_VIOLATION, {}}}}};
+    return Notification{type, Association_Key{1}, Remote_Error{{error_cause{CAUSE_PROTOCOL_VIOLATION, {}}}}};
 }
 
 bool is_assoc_change(const std::optional<Notification>& n, Assoc_Change_State state) {
@@ -43,21 +44,26 @@ bool is_assoc_change(const std::optional<Notification>& n, Assoc_Change_State st
 
 struct SCTP_Socket_Test_Access {
     static void add_association(SCTP_Socket& stack, Association_State state) {
-        Association_Key key = peer_key();
-        Association assoc = stack.init_new_association(key.address);
+        Association assoc = stack.init_new_association(peer_address(), PEER_PORT);
         assoc.state = state;
         assoc.this_ver_tag = OUR_TAG;
         assoc.peer_ver_tag = PEER_TAG;
-        assoc.primary_path = key.address;
-        stack.associations.insert_or_assign(key, assoc);
+        assoc.primary_path = peer_address();
+        Association_Key key{stack.next_association_id++};
+        stack.add_peer_addresses(key, stack.associations.insert_or_assign(key, assoc).first->second, {peer_address()});
+    }
+
+    // Id 0 once the association is gone.
+    static Association_Key key(SCTP_Socket& stack) {
+        return stack.association_at(peer_key(peer_address(), PEER_PORT));
     }
 
     static void set_state(SCTP_Socket& stack, Association_State state) {
-        stack.associations.at(peer_key()).state = state;
+        stack.associations.at(key(stack)).state = state;
     }
 
     static bool has_association(SCTP_Socket& stack) {
-        return stack.associations.count(peer_key()) != 0;
+        return stack.associations.count(key(stack)) != 0;
     }
 
     static size_t queued_sends(SCTP_Socket& stack) {
@@ -70,7 +76,7 @@ struct SCTP_Socket_Test_Access {
         packet.chunks.push_back({{OP_ERROR, 0, 0}, std::move(error)});
         stack.local_address.sin_port = htons(9899);
         std::vector<uint8_t> wire = serialize_sctp_packet(packet);
-        stack.handle_recv_packet(wire.data(), wire.size(), peer_key().address);
+        stack.handle_recv_packet(wire.data(), wire.size(), peer_address());
     }
 };
 
@@ -113,7 +119,7 @@ void test_remote_error() {
     check(n && n->type == Notification_Type::SCTP_REMOTE_ERROR, "one REMOTE_ERROR");
     if (n && n->type == Notification_Type::SCTP_REMOTE_ERROR) {
         const auto& causes = std::get<Remote_Error>(n->payload).causes;
-        check(n->src == peer_key(), "keyed on the sender");
+        check(n->src != Association_Key{} && n->src == Access::key(stack), "keyed on the sender's association");
         check(causes.size() == 2 && causes[0].code == CAUSE_INVALID_STREAM_ID
                   && causes[0].info == std::vector<uint8_t>{0x00, 0x05, 0x00, 0x00}
                   && causes[1].code == 0x0100,
@@ -163,7 +169,7 @@ void test_handshake_comm_up() {
         return;
     }
 
-    Association_Key key;
+    Association_Key key{};
     client.sctp_associate("127.0.0.1", 47102, key);
     auto client_event = notification_wait(client, 5000);
     auto server_event = notification_wait(server, 5000);

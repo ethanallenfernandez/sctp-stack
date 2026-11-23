@@ -47,7 +47,7 @@ struct Remote_Error {
 
 struct Notification {
     Notification_Type type;
-    Association_Key src;
+    Association_Key src{};
     std::variant<Assoc_Change, Remote_Error, Peer_Addr_Change> payload;
 };
 

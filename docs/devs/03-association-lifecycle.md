@@ -232,10 +232,10 @@ becomes the association named in the cookie.
 flowchart TD
     ce["COOKIE ECHO"] --> ver["Cookie_Auth::verify()"]
     ver -- "INVALID" --> drop(["discard packet"])
-    ver -- "VALID or STALE" --> key["key = association_key_for(cookie_key(cookie))"]
+    ver -- "VALID or STALE" --> key["key = association_at(cookie_key(cookie))"]
     key --> ex{"TCB exists?"}
     ex -- "no, STALE" --> stale1["ERROR Stale Cookie<br/>discard rest"]
-    ex -- "no, VALID" --> new["new TCB, ESTABLISHED<br/>COMM_UP, heartbeats<br/>COOKIE ACK"]
+    ex -- "no, VALID" --> new["new TCB under a fresh id, ESTABLISHED<br/>COMM_UP, heartbeats<br/>COOKIE ACK"]
     ex -- "yes" --> cmp["compare cookie tags with TCB:<br/>L = local tag match<br/>P = peer tag match<br/>T = tie-tags match (non-zero)"]
     cmp --> st2{"STALE and not (L and P)?"}
     st2 -- "no" --> d{"L and P"}
@@ -244,7 +244,7 @@ flowchart TD
     d -- "no" --> a{"not L, not P, T"}
     a -- "yes: case A" --> A{"SHUTDOWN_ACK_SENT?"}
     A -- "yes" --> A1["resend SHUTDOWN ACK under old tag<br/>ERROR Cookie Received While Shutting Down<br/>discard rest"]
-    A -- "no" --> A2["peer restart:<br/>cancel timers, purge queues, drop aliases<br/>abandon partial delivery<br/>TCB = init_new_association(cookie)<br/>RESTART"]
+    A -- "no" --> A2["peer restart:<br/>cancel timers, purge queues, unmap addresses<br/>abandon partial delivery<br/>TCB = init_new_association(cookie), same id<br/>RESTART"]
     a -- "no" --> b{"L only"}
     b -- "yes: case B" --> B["collision: adopt peer tag, TSN, rwnd<br/>clear receive-side state<br/>if forming: ESTABLISHED, COMM_UP<br/>else: re-arm confirmation probes"]
     b -- "no: case C, other" --> drop2(["discard packet"])
@@ -307,7 +307,7 @@ sequenceDiagram
     Note over B: handle_init, default branch:<br/>no new addresses<br/>generate tie-tags once: Lt, Pt
     B->>Z: INIT ACK [Pn] fresh tag Ln, cookie(Ln, Pn, Lt, Pt)
     Z->>B: COOKIE ECHO [Ln]
-    Note over B: Ln≠Lo, Pn≠Po, tie-tags match: case A<br/>cancel timers, purge send queue,<br/>forget aliases, abandon partial delivery<br/>TCB = init_new_association(cookie)
+    Note over B: Ln≠Lo, Pn≠Po, tie-tags match: case A<br/>cancel timers, purge send queue,<br/>unmap old addresses, abandon partial delivery<br/>TCB = init_new_association(cookie), same id
     B-->>B: notification RESTART
     B->>Z: COOKIE ACK [Pn]
 ```
@@ -401,7 +401,7 @@ Every teardown goes through this function, in this order:
 
 ```mermaid
 flowchart LR
-    a["abandon_partial_delivery()<br/>drop the half-delivered message<br/>from Receive_Queue"] --> b["erase TCB"] --> c["forget_peer_addresses()<br/>drop aliases"] --> d["cancel_expirations()<br/>every timer of the association"] --> e["Send_Queue::purge()"] --> f["notify ASSOC_CHANGE<br/>if a state was given"]
+    a["abandon_partial_delivery()<br/>drop the half-delivered message<br/>from Receive_Queue"] --> c["forget_peer_addresses()<br/>unmap its addresses"] --> b["erase TCB"] --> d["cancel_expirations()<br/>every timer of the association"] --> e["Send_Queue::purge()"] --> f["notify ASSOC_CHANGE<br/>if a state was given"]
 ```
 
 Any ABORT is enqueued **after** `remove_association()` returns. Otherwise the

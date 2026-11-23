@@ -409,11 +409,10 @@ void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockad
     }
 
     std::lock_guard<std::mutex> assoc_lock(associations_mutex);
-    Association_Key key = association_key_for(peer_key(src, in_pkt.header.src_port));
+    Association_Key key = association_at(peer_key(src, in_pkt.header.src_port));
     if (!associations.contains(key)) {
         for (const sockaddr_in& address : init_addresses(in_pkt, src)) {
-            Association_Key listed = association_key_for(peer_key(address, in_pkt.header.src_port));
-            if (associations.contains(listed)) {
+            if (Association_Key listed = association_at(peer_key(address, in_pkt.header.src_port)); associations.contains(listed)) {
                 key = listed;
                 break;
             }
@@ -740,8 +739,8 @@ void SCTP_Socket::reply(const SCTP_Common_Header& header, const Association_Key&
     enqueue_packet(Deliverable{key, destination, build_packet(header.des_port, header.src_port, tag, type, std::move(value), flag)});
 }
 
-SCTP_Packet SCTP_Socket::packet_to(const Association_Key& key, uint32_t tag, Chunk_Type type, Chunk_Value_Type value, uint8_t flag) const {
-    return build_packet(ntohs(local_address.sin_port), ntohs(key.address.sin_port), tag, type, std::move(value), flag);
+SCTP_Packet SCTP_Socket::packet_to(const Association& assoc, Chunk_Type type, Chunk_Value_Type value, uint8_t flag) const {
+    return build_packet(ntohs(local_address.sin_port), assoc.peer_port, assoc.peer_ver_tag, type, std::move(value), flag);
 }
 
 bool SCTP_Socket::handle_cookie_echo(
@@ -759,14 +758,15 @@ bool SCTP_Socket::handle_cookie_echo(
         return false;
     }
 
-    key = association_key_for(cookie_key(cookie));
+    key = association_at(cookie_key(cookie));
     auto it = associations.find(key);
     if (it == associations.end()) {
         if (result == Cookie_Result::STALE) {
             reply(header, key, src, cookie.peer_ver_tag, OP_ERROR, error_chunk_value{{stale_cookie_cause(staleness_us)}});
             return false;
         }
-        auto created = associations.insert_or_assign(key, init_new_association(cookie));
+        key = Association_Key{next_association_id++};
+        auto created = associations.emplace(key, init_new_association(cookie));
         add_peer_addresses(key, created.first->second, cookie_addresses(cookie));
         notify_assoc_change(key, Assoc_Change_State::COMM_UP);
         start_heartbeats(key, created.first->second);
@@ -807,7 +807,7 @@ bool SCTP_Socket::handle_cookie_echo(
         }
         cancel_expirations(key);
         sends.purge(key);
-        forget_peer_addresses(key);
+        forget_peer_addresses(key, tcb);
         abandon_partial_delivery(key, tcb);
         tcb = init_new_association(cookie);
         add_peer_addresses(key, tcb, cookie_addresses(cookie));
@@ -875,7 +875,7 @@ void SCTP_Socket::handle_error(const SCTP_Common_Header&, const SCTP_Chunk& chun
     assoc->peer_ver_tag = 0;
     assoc->init_retransmits = 0;
     assoc->cookie_retransmits = 0;
-    enqueue_packet(Deliverable{key, primary(*assoc).address, build_init(ntohs(local_address.sin_port), ntohs(key.address.sin_port),
+    enqueue_packet(Deliverable{key, primary(*assoc).address, build_init(ntohs(local_address.sin_port), assoc->peer_port,
         assoc->this_ver_tag, assoc->next_tsn, staleness_ms + std::min(staleness_ms, 1000U), advertised_addresses())});
 }
 
@@ -912,12 +912,12 @@ void SCTP_Socket::do_next_shutdown_step(const Association_Key& key) {
     SCTP_Packet packet;
     switch (assoc->state) {
         case SHUTDOWN_PENDING:
-            packet = packet_to(key, assoc->peer_ver_tag, SHUTDOWN, shutdown_chunk_value{assoc->last_peer_tsn});
+            packet = packet_to(*assoc, SHUTDOWN, shutdown_chunk_value{assoc->last_peer_tsn});
             assoc->state = SHUTDOWN_SENT;
             schedule_expiration(Expiration_Key{key, Expiration_Timer_Type::T5_SHUTDOWN_GUARD}, std::chrono::steady_clock::now() + T5_SHUTDOWN_GUARD);
             break;
         case SHUTDOWN_RECEIVED:
-            packet = packet_to(key, assoc->peer_ver_tag, SHUTDOWN_ACK, empty_chunk_value{});
+            packet = packet_to(*assoc, SHUTDOWN_ACK, empty_chunk_value{});
             assoc->state = SHUTDOWN_ACK_SENT;
             break;
         default:
@@ -1298,7 +1298,7 @@ SCTP_Packet SCTP_Socket::make_sack(const Association_Key& key, Association& asso
     assoc.our_rwnd = window;
     assoc.received_since_sack = 0;
 
-    SCTP_Packet sack_packet = packet_to(key, assoc.peer_ver_tag, SACK, sack_chunk_value{assoc.last_peer_tsn, window, std::move(gaps), std::move(assoc.duplicate_tsns)});
+    SCTP_Packet sack_packet = packet_to(assoc, SACK, sack_chunk_value{assoc.last_peer_tsn, window, std::move(gaps), std::move(assoc.duplicate_tsns)});
     assoc.duplicate_tsns.clear();
     assoc.delayed_sack_packet_count = 0;
     return sack_packet;
@@ -1391,7 +1391,7 @@ void SCTP_Socket::handle_data_packet(const SCTP_Packet& packet, const Associatio
     bool shutdown_sent = assoc.state == SHUTDOWN_SENT;
     SCTP_Packet shutdown;
     if (shutdown_sent) {
-        shutdown = packet_to(key, assoc.peer_ver_tag, SHUTDOWN, shutdown_chunk_value{assoc.last_peer_tsn});
+        shutdown = packet_to(assoc, SHUTDOWN, shutdown_chunk_value{assoc.last_peer_tsn});
         if (!assoc.tsn_ooo_buffer.empty() || !assoc.duplicate_tsns.empty() || dropped) {
             shutdown.chunks.push_back(std::move(make_sack(key, assoc).chunks[0]));
         }

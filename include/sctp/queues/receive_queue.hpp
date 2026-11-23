@@ -24,7 +24,7 @@ class Receive_Queue {
 
     public:
         struct Read {
-            Association_Key key;
+            Association_Key key{};
             size_t bytes;
             // More of this message remains, queued or yet to arrive.
             bool partial;
@@ -57,9 +57,9 @@ class Receive_Queue {
         };
 
         // Caller must hold `mutex`. Erases the entry once it is empty.
-        Read read_locked(std::unordered_map<Association_Key, Pending, Association_Hash>::iterator it, uint8_t* out, size_t capacity);
+        Read read_locked(std::unordered_map<Association_Key, Pending>::iterator it, uint8_t* out, size_t capacity);
 
-        std::unordered_map<Association_Key, Pending, Association_Hash> pending;
+        std::unordered_map<Association_Key, Pending> pending;
         std::mutex mutex;
 };
 

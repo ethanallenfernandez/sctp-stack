@@ -295,7 +295,7 @@ void s5_1_2_addresses() {
     {
         SCTP_Socket s;
         Access::respond(s, init_value(), {}, addr("127.0.0.7"));
-        Association* a = Access::tcb(s, key("127.0.0.7"));
+        Association* a = Access::tcb(s, Access::key(s, "127.0.0.7"));
         req("9260-5.1.2-1", a && a->peer_address_list.size() == 1 && same_destination(a->peer_address_list[0].address, addr("127.0.0.7")),
             "with no address parameters, the source is the only destination, with the SCTP source port");
     }
@@ -730,7 +730,7 @@ void s5_3_tags() {
     Access::fire(s, Expiration_Timer_Type::HEARTBEAT, PEER_IP);
     Access::sent(s);
     req("9260-5.3.1-2", a && a->this_ver_tag == tag && a->peer_ver_tag == PEER_TAG, "the tags do not change over the association's life");
-    s.sctp_abort(key());
+    s.sctp_abort(Access::key(s));
     Access::sent(s);
     Access::associate(s);
     uint32_t again = init_tag(Access::sent(s));

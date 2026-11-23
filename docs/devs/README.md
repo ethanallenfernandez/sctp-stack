@@ -69,7 +69,7 @@ the caller's thread.
 | 4 | [Inbound path](04-inbound.md) | Packet validation, tag rules, OOTB handling, dispatch, DATA reception, reassembly, ordering, SACK generation | `src/socket/handlers.cpp` |
 | 5 | [Outbound path and congestion control](05-outbound.md) | Send queue tiers, late TSN assignment, bundling and fragmentation, SACK processing, cwnd/rwnd, fast retransmit, T3-rtx | `event_loop.cpp`, `handlers.cpp`, `timers.cpp`, `src/queues/send_queue.cpp` |
 | 6 | [Timers](06-timers.md) | The generation-stamped timer heap, every timer type, RTO estimation, back-off, error counters | `src/queues/expiration_queue.cpp`, `timers.cpp` |
-| 7 | [Paths, multi-homing and encapsulation](07-paths.md) | Keys and aliases, path selection, confirmation, heartbeats, failover, multiple local addresses, UDP ports | `src/socket/internal.hpp`, `timers.cpp`, `api.cpp` |
+| 7 | [Paths, multi-homing and encapsulation](07-paths.md) | Peer address lookup, path selection, confirmation, heartbeats, failover, multiple local addresses, UDP ports | `src/socket/internal.hpp`, `timers.cpp`, `api.cpp` |
 | 8 | [PMTU discovery](08-pmtu.md) | DPLPMTUD state machine, search, black holes, ICMP Packet Too Big, PMDCS/AMDCS | `src/socket/plpmtud.cpp` |
 | 9 | [Wire format](09-wire-format.md) | In-memory packet model, codec, checksum byte order, TLVs, builders, serial arithmetic | `src/protocol/` |
 | 10 | [State cookies and crypto](10-cookies-and-crypto.md) | Cookie layout, signing and verification, secret rotation, tie-tags, randomness | `src/crypto/` |

@@ -44,12 +44,12 @@ sockaddr_in peer_address() {
 } // namespace
 
 struct SCTP_Socket_Test_Access {
-    static void establish(SCTP_Socket& stack, const Association_Key& key) {
+    static Association_Key establish(SCTP_Socket& stack, const sockaddr_in& peer = peer_address()) {
         stack.local_address.sin_family = AF_INET;
         stack.local_address.sin_port = htons(LOCAL_PORT);
         sctp_parse_ipv4("127.0.0.1", stack.local_address.sin_addr);
 
-        Association assoc = stack.init_new_association(key.address);
+        Association assoc = stack.init_new_association(peer, ntohs(peer.sin_port));
         assoc.this_ver_tag = OUR_TAG;
         assoc.peer_ver_tag = PEER_TAG;
         assoc.state = ESTABLISHED;
@@ -58,9 +58,12 @@ struct SCTP_Socket_Test_Access {
         assoc.last_peer_tsn = 0;
         assoc.peer_rwnd = 1 << 20;
         assoc.peer_max_rwnd = 1 << 20;
-        assoc.primary_path = key.address;
-        stack.associations.insert_or_assign(key, assoc);
-        stack.start_heartbeats(key, stack.associations.at(key));
+        assoc.primary_path = peer;
+        Association_Key key{stack.next_association_id++};
+        Association& tcb = stack.associations.insert_or_assign(key, assoc).first->second;
+        stack.add_peer_addresses(key, tcb, {peer});
+        stack.start_heartbeats(key, tcb);
+        return key;
     }
 
     static void deliver(SCTP_Socket& stack, const SCTP_Packet& packet) {
@@ -74,11 +77,11 @@ struct SCTP_Socket_Test_Access {
     }
 
     static void fire_t3(SCTP_Socket& stack, const Association_Key& key) {
-        stack.handle_t3_expiration(key, key.address);
+        stack.handle_t3_expiration(key, peer_address());
     }
 
     static bool timer_armed(SCTP_Socket& stack, const Association_Key& key, Expiration_Timer_Type type) {
-        return stack.expirations.is_active(Expiration_Key{key, type, path_key(key.address)});
+        return stack.expirations.is_active(Expiration_Key{key, type, path_key(peer_address())});
     }
 
     static std::vector<Deliverable> drain(SCTP_Socket& stack) {
@@ -133,7 +136,7 @@ size_t datagram_size(const Deliverable& deliverable) {
 
 // Fires the probe timer and returns the probe it sent, if one.
 std::optional<Deliverable> probe_now(SCTP_Socket& stack, const Association_Key& key) {
-    Access::fire(stack, key, Expiration_Timer_Type::PLPMTU_PROBE, key.address);
+    Access::fire(stack, key, Expiration_Timer_Type::PLPMTU_PROBE, peer_address());
     for (const auto& deliverable : Access::drain(stack)) {
         if (is_probe(deliverable)) {
             return deliverable;
@@ -166,8 +169,7 @@ std::vector<uint8_t> quoted_header(uint32_t tag) {
 void test_probe_format() {
     std::printf("Probe packets (RFC 8899 6.2.1.2, 6.2.2.2):\n");
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
 
     check(plpmtud(stack, key).state == Plpmtud_State::BASE, "a confirmed path enters BASE once established");
     check(pmdcs(primary(Access::tcb(stack, key))) == 1180, "PMDCS is BASE_PLPMTU less the UDP and common headers");
@@ -187,8 +189,7 @@ void test_probe_format() {
 void test_search_climbs_to_max() {
     std::printf("Searching from BASE_PLPMTU (RFC 8899 5.2, 5.3):\n");
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
 
     auto base = probe_now(stack, key);
     if (!base) { check(false, "BASE probe sent"); return; }
@@ -206,15 +207,14 @@ void test_search_climbs_to_max() {
     check(!Access::timer_armed(stack, key, Expiration_Timer_Type::PLPMTU_PROBE), "no probes in SEARCH_COMPLETE");
     check(Access::timer_armed(stack, key, Expiration_Timer_Type::PMTU_RAISE), "PMTU_RAISE_TIMER runs");
 
-    Access::fire(stack, key, Expiration_Timer_Type::PMTU_RAISE, key.address);
+    Access::fire(stack, key, Expiration_Timer_Type::PMTU_RAISE, peer_address());
     check(plpmtud(stack, key).state == Plpmtud_State::SEARCH_COMPLETE, "at MAX_PLPMTU there is nothing to raise to");
 }
 
 void test_lost_probes_narrow_the_search() {
     std::printf("Unacknowledged probes (RFC 8899 5.1.2 MAX_PROBES, 6.2.1.2):\n");
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
     auto base = probe_now(stack, key);
     if (!base) { check(false, "BASE probe sent"); return; }
     acknowledge(stack, *base);
@@ -241,8 +241,7 @@ void test_lost_probes_narrow_the_search() {
 void test_base_failure_is_an_error() {
     std::printf("BASE_PLPMTU never acknowledged (RFC 8899 5.2 ERROR):\n");
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
     for (int i = 0; i < 4; ++i) {
         probe_now(stack, key);
     }
@@ -250,15 +249,14 @@ void test_base_failure_is_an_error() {
     check(pmdcs(primary(Access::tcb(stack, key))) == 1180, "PMDCS stays at BASE");
     check(!probe_now(stack, key).has_value(), "no probes in ERROR");
 
-    Access::fire(stack, key, Expiration_Timer_Type::PMTU_RAISE, key.address);
+    Access::fire(stack, key, Expiration_Timer_Type::PMTU_RAISE, peer_address());
     check(plpmtud(stack, key).state == Plpmtud_State::BASE, "PMTU_RAISE_TIMER tries BASE again");
 }
 
 void test_amdcs_is_the_smallest_pmdcs() {
     std::printf("AMDCS (RFC 9260 7.3 point 2, 6.9):\n");
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
     complete_search(stack, key);
 
     Association& assoc = Access::tcb(stack, key);
@@ -281,8 +279,7 @@ void test_amdcs_is_the_smallest_pmdcs() {
 void test_black_hole_and_ip_fragmentation() {
     std::printf("Black hole detection and resending a chunk too big for the path (RFC 8899 4.3, RFC 9260 6.9):\n");
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
     complete_search(stack, key);
 
     Access::api(stack).sctp_send_data(key, std::vector<uint8_t>(1444, 'x'));
@@ -314,8 +311,7 @@ void test_black_hole_and_ip_fragmentation() {
 void test_raise_timer_searches_again() {
     std::printf("PMTU_RAISE_TIMER (RFC 8899 5.1.1):\n");
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
     auto base = probe_now(stack, key);
     if (!base) { check(false, "BASE probe sent"); return; }
     acknowledge(stack, *base);
@@ -326,7 +322,7 @@ void test_raise_timer_searches_again() {
     check(plpmtud(stack, key).state == Plpmtud_State::SEARCH_COMPLETE && plpmtud(stack, key).plpmtu == 1200,
           "every larger size lost: SEARCH_COMPLETE at 1200");
 
-    Access::fire(stack, key, Expiration_Timer_Type::PMTU_RAISE, key.address);
+    Access::fire(stack, key, Expiration_Timer_Type::PMTU_RAISE, peer_address());
     auto probe = probe_now(stack, key);
     check(plpmtud(stack, key).state == Plpmtud_State::SEARCHING && probe && datagram_size(*probe) == 1480,
           "on expiry the search starts over from MAX_PLPMTU");
@@ -335,8 +331,7 @@ void test_raise_timer_searches_again() {
 void test_packet_too_big() {
     std::printf("ICMP Packet Too Big (RFC 9260 10 ICMP5-7, RFC 8899 4.6):\n");
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
     auto base = probe_now(stack, key);
     if (!base) { check(false, "BASE probe sent"); return; }
     acknowledge(stack, *base);

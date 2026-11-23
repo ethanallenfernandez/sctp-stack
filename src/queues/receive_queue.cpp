@@ -32,7 +32,7 @@ std::optional<Receive_Queue::Read> Receive_Queue::read_from(const Association_Ke
     return read_locked(it, out, capacity);
 }
 
-Receive_Queue::Read Receive_Queue::read_locked(std::unordered_map<Association_Key, Pending, Association_Hash>::iterator it, uint8_t* out, size_t capacity) {
+Receive_Queue::Read Receive_Queue::read_locked(std::unordered_map<Association_Key, Pending>::iterator it, uint8_t* out, size_t capacity) {
     Message& front = it->second.messages.front();
     size_t count = std::min(capacity, front.bytes.size() - front.offset);
     std::copy_n(front.bytes.begin() + static_cast<long>(front.offset), count, out);

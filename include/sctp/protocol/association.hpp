@@ -146,6 +146,8 @@ struct Peer_Path {
 };
 
 struct Association {
+    // The peer's SCTP port, host order.
+    uint16_t peer_port;
     uint32_t peer_ver_tag;
     uint32_t this_ver_tag;
     uint32_t local_tie_tag;
@@ -195,17 +197,22 @@ struct Association {
     std::vector<Delivery> held_deliveries;
 };
 
-// The peer's primary address and its SCTP port.
-struct Association_Key {
+// Names one association while it lives and while its received data waits to
+// be read. Never reused; 0 names none.
+enum class Association_Key : uint32_t {};
+
+// A peer transport address: IPv4 address and SCTP port, network order. With
+// the port 0, one destination within an association.
+struct Peer_Key {
     sockaddr_in address;
 
-    bool operator==(const Association_Key& other) const {
+    bool operator==(const Peer_Key& other) const {
         return address.sin_addr.s_addr == other.address.sin_addr.s_addr && address.sin_port == other.address.sin_port;
     }
 };
 
-struct Association_Hash {
-    size_t operator()(const Association_Key& k) const {
+struct Peer_Key_Hash {
+    size_t operator()(const Peer_Key& k) const {
         return std::hash<uint64_t>()(uint64_t{k.address.sin_addr.s_addr} << 16 | k.address.sin_port);
     }
 };

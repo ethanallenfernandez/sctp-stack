@@ -519,7 +519,7 @@ void s6_4_multihoming() {
     {
         SCTP_Socket s;
         Access::establish(s, ESTABLISHED, {"127.0.0.2"});
-        s.sctp_set_primary(key(), addr("127.0.0.2"));
+        s.sctp_set_primary(Access::key(s), addr("127.0.0.2"));
         Access::send(s, KB);
         const Deliverable* d = nullptr;
         auto out = Access::sent(s);
@@ -567,7 +567,7 @@ void s6_4_multihoming() {
             Access::send(s, KB);
         }
         Access::sent(s);
-        s.sctp_set_primary(key(), addr("127.0.0.2"));
+        s.sctp_set_primary(Access::key(s), addr("127.0.0.2"));
         for (int i = 0; i < 3; ++i) {
             sack(s, OUR_TSN - 1, RWND, {{2, static_cast<uint16_t>(2 + i)}});
         }

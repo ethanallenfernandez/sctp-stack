@@ -7,11 +7,13 @@
 #include <sctp/socket.hpp>
 #include "protocol/serialize.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <optional>
 #include <string>
 #include <thread>
+#include <variant>
 #include <vector>
 
 inline int failures = 0;
@@ -86,6 +88,23 @@ inline std::optional<Notification> notification_wait(SCTP_Socket& socket, int ti
     std::optional<Notification> notification;
     wait_until([&] { return (notification = socket.sctp_recv_notification()).has_value(); }, timeout_ms);
     return notification;
+}
+
+// The association a peer started, from the COMM UP that announced it. Id 0 on
+// timeout. Notifications before it are dropped.
+inline Association_Key accepted_association(SCTP_Socket& socket, int timeout_ms) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    for (;;) {
+        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+        std::optional<Notification> n = notification_wait(socket, static_cast<int>(std::max<int64_t>(remaining.count(), 1)));
+        if (!n) {
+            return {};
+        }
+        const auto* change = std::get_if<Assoc_Change>(&n->payload);
+        if (change && change->state == Assoc_Change_State::COMM_UP) {
+            return n->src;
+        }
+    }
 }
 
 // SCTP over UDP by hand, from 127.0.0.1 at open's port to the stack at
@@ -225,8 +244,8 @@ struct Raw_Peer {
         if (!receive_until(COOKIE_ACK, cookie_ack, std::chrono::steady_clock::now() + std::chrono::seconds(1))) {
             return false;
         }
-        key = Association_Key{self};
-        return await_established(stack, key, 1000) == Sctp_Status::OK;
+        key = accepted_association(stack, 1000);
+        return key != Association_Key{} && await_established(stack, key, 1000) == Sctp_Status::OK;
     }
 
     // One single-chunk message per TSN, on stream 0 in TSN order.

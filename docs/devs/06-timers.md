@@ -48,9 +48,9 @@ flowchart LR
 
 ```cpp
 struct Expiration_Key {
-    Association_Key location;     // which association
+    Association_Key location;     // which association (its id)
     Expiration_Timer_Type type;
-    Association_Key path{};       // path_key(destination) for per-path timers, else zero
+    Peer_Key path{};              // path_key(destination) for per-path timers, else zero
 };
 ```
 

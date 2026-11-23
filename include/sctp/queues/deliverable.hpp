@@ -9,7 +9,7 @@
 #include <sctp/protocol/sctp.hpp>
 
 struct Deliverable {
-    Association_Key location;
+    Association_Key location{};
     sockaddr_in destination;
     SCTP_Packet packet;
     // Sent without DF: it holds a chunk cut before its path's PMTU fell, and

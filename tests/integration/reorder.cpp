@@ -147,7 +147,7 @@ static void test_out_of_order_delivery(uint32_t base_tsn, const char* label) {
     peer.send(make_data(server_tag, base_tsn + 3, 3, "four"));
     peer.send(make_data(server_tag, base_tsn + 4, 4, "five"));
 
-    Association_Key key{peer.self};
+    Association_Key key = accepted_association(server, 1000);
     const char* expect[] = {"one", "two", "three", "four", "five"};
     std::string got_all;
     bool all_ok = true;

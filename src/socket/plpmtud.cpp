@@ -92,7 +92,7 @@ void SCTP_Socket::check_for_black_hole(const Association_Key& key, Peer_Path& pa
 Deliverable SCTP_Socket::make_plpmtu_probe(const Association_Key& key, const Association& assoc, Peer_Path& path) {
     generate_random(path.plpmtud.probe_nonce);
     path.plpmtud.probe_outstanding = true;
-    return Deliverable{key, path.address, build_plpmtu_probe(ntohs(local_address.sin_port), ntohs(key.address.sin_port),
+    return Deliverable{key, path.address, build_plpmtu_probe(ntohs(local_address.sin_port), assoc.peer_port,
         assoc.peer_ver_tag, heartbeat_info(path.plpmtud.probe_nonce, path.address), path.plpmtud.probed_size)};
 }
 
@@ -180,7 +180,7 @@ void SCTP_Socket::handle_icmp_ptb(const sockaddr_in& destination, const uint8_t*
     uint32_t tag = read_be32(quoted + 4);
 
     std::lock_guard<std::mutex> assoc_lock(associations_mutex);
-    Association_Key key = association_key_for(peer_key(destination, peer_port));
+    Association_Key key = association_at(peer_key(destination, peer_port));
     Association* assoc = find_tcb(key);
     Peer_Path* path = assoc && tag != 0 && tag == assoc->peer_ver_tag ? find_path(*assoc, destination) : nullptr;
     if (path == nullptr || path->plpmtud.state == Plpmtud_State::DISABLED) {

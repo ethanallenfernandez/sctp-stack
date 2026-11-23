@@ -45,7 +45,7 @@ struct Send_Allowance {
 // new ones are dropped, as if lost on the wire.
 constexpr size_t MAX_QUEUED_CONTROL = 256;
 
-using Send_Allowances = std::unordered_map<Association_Key, Send_Allowance, Association_Hash>;
+using Send_Allowances = std::unordered_map<Association_Key, Send_Allowance>;
 
 class Send_Queue {
     friend struct SCTP_Socket_Test_Access;

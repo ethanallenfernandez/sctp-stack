@@ -40,7 +40,7 @@ sockaddr_in rebound(const sockaddr_in& at, uint16_t udp_port) {
     return out;
 }
 
-Association_Key key_of(const sockaddr_in& at, uint16_t sctp_port = PEER_SCTP_PORT) {
+Peer_Key key_of(const sockaddr_in& at, uint16_t sctp_port = PEER_SCTP_PORT) {
     return peer_key(at, sctp_port);
 }
 
@@ -72,8 +72,13 @@ struct SCTP_Socket_Test_Access {
         return out;
     }
 
-    static Association* tcb(SCTP_Socket& stack, const Association_Key& key) {
-        auto it = stack.associations.find(key);
+    static Association_Key association_at(SCTP_Socket& stack, const Peer_Key& peer) {
+        std::lock_guard<std::mutex> lock(stack.associations_mutex);
+        return stack.association_at(peer);
+    }
+
+    static Association* tcb(SCTP_Socket& stack, const Peer_Key& peer) {
+        auto it = stack.associations.find(stack.association_at(peer));
         return it == stack.associations.end() ? nullptr : &it->second;
     }
 
@@ -159,7 +164,7 @@ void test_keyed_on_sctp_port() {
     Access::receive(stack, A, value.initiate_tag, {{{COOKIE_ECHO, 0, 0}, cookie_echo_chunk_value{cookie}}});
     sent = Access::drain(stack);
     check(Access::tcb(stack, key_of(A)) != nullptr, "TCB keyed on address and SCTP port");
-    check(Access::tcb(stack, Association_Key{A}) == nullptr, "not on the UDP port");
+    check(Access::tcb(stack, Peer_Key{A}) == nullptr, "not on the UDP port");
     check(sent_to(first_with(sent, COOKIE_ACK), A), "COOKIE ACK goes to the UDP port");
     check(udp_port_of(stack, A) == PEER_UDP_PORT, "the path holds the UDP port");
 }
@@ -273,9 +278,9 @@ void test_associate_with_udp_port() {
     SCTP_Socket stack;
     if (!stack.sctp_bind("127.0.0.1", STACK_PORT) || !stack.sctp_run()) { check(false, "stack started"); return; }
 
-    Association_Key key;
+    Association_Key key{};
     stack.sctp_associate("127.0.0.1", PEER_SCTP_PORT, key, FIRST_UDP);
-    check(ntohs(key.address.sin_port) == PEER_SCTP_PORT, "the key names the SCTP port");
+    check(key != Association_Key{} && Access::association_at(stack, key_of(address("127.0.0.1"))) == key, "found by address and SCTP port");
 
     SCTP_Packet init;
     bool got_init = first.recv(init) && !init.chunks.empty() && init.chunks[0].chunk_header.type == INIT;

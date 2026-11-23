@@ -69,23 +69,25 @@ struct SCTP_Socket_Test_Access {
 
     struct Stack {
         SCTP_Socket socket;
-        Association_Key key{peer_address()};
+        Association_Key key{};
 
         Stack(Association_State state, uint32_t cumulative_tsn_ack) {
             socket.local_address.sin_family = AF_INET;
             socket.local_address.sin_port = htons(LOCAL_PORT);
             sctp_parse_ipv4("127.0.0.1", socket.local_address.sin_addr);
 
-            Association assoc = socket.init_new_association(key.address);
+            Association assoc = socket.init_new_association(peer_address(), PEER_PORT);
             assoc.this_ver_tag = OUR_TAG;
             assoc.peer_ver_tag = PEER_TAG;
             assoc.state = state;
             assoc.next_tsn = NEXT_TSN;
             assoc.cumulative_tsn_ack = cumulative_tsn_ack;
             assoc.last_peer_tsn = LAST_PEER_TSN;
-            assoc.primary_path = key.address;
-            socket.associations.insert_or_assign(key, assoc);
-            socket.start_heartbeats(key, socket.associations.at(key));
+            assoc.primary_path = peer_address();
+            key = Association_Key{socket.next_association_id++};
+            Association& tcb = socket.associations.insert_or_assign(key, assoc).first->second;
+            socket.add_peer_addresses(key, tcb, {peer_address()});
+            socket.start_heartbeats(key, tcb);
         }
 
         void add_outstanding(uint32_t tsn, bool gap_acked) {
@@ -114,9 +116,9 @@ struct SCTP_Socket_Test_Access {
                 socket.sends.commit(*pending);
             }
             result.t2_armed = socket.expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::T2_SHUTDOWN});
-            result.t3_armed = socket.expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::T3_RTX, path_key(key.address)});
+            result.t3_armed = socket.expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::T3_RTX, path_key(peer_address())});
             result.t5_armed = socket.expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::T5_SHUTDOWN_GUARD});
-            result.heartbeat_armed = socket.expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::HEARTBEAT, path_key(key.address)});
+            result.heartbeat_armed = socket.expirations.is_active(Expiration_Key{key, Expiration_Timer_Type::HEARTBEAT, path_key(peer_address())});
             while (auto notification = socket.notifications.dequeue()) {
                 result.notifications.push_back(*notification);
             }
@@ -205,7 +207,7 @@ struct SCTP_Socket_Test_Access {
 
     static Result user_shutdown(Association_State state) {
         Stack stack(state, NEXT_TSN - 1);
-        stack.socket.enqueue_packet(Deliverable{stack.key, stack.key.address, SCTP_Packet{{}, {{{INIT, 0, 0}, init_chunk_value{}}}}});
+        stack.socket.enqueue_packet(Deliverable{stack.key, peer_address(), SCTP_Packet{{}, {{{INIT, 0, 0}, init_chunk_value{}}}}});
         stack.socket.schedule_expiration(Expiration_Key{stack.key, Expiration_Timer_Type::T1_INIT},
             std::chrono::steady_clock::now() + std::chrono::seconds(1), Deliverable{});
         stack.socket.sctp_shutdown(stack.key);
@@ -268,15 +270,15 @@ struct SCTP_Socket_Test_Access {
         Stack stack(state, NEXT_TSN - 1);
         data_chunk_value data{NEXT_TSN, 0, 0, 0, {'h', 'i'}};
         stack.socket.associations.at(stack.key).next_tsn = NEXT_TSN + 1;
-        stack.socket.record_data_sent(stack.key, stack.key.address, data, std::chrono::steady_clock::now());
-        stack.socket.handle_t3_expiration(stack.key, stack.key.address);
+        stack.socket.record_data_sent(stack.key, peer_address(), data, std::chrono::steady_clock::now());
+        stack.socket.handle_t3_expiration(stack.key, peer_address());
         return stack.collect();
     }
 
     static Result heartbeat_expires(Association_State state) {
         Stack stack(state, NEXT_TSN - 1);
-        stack.socket.expirations.cancel(Expiration_Key{stack.key, Expiration_Timer_Type::HEARTBEAT, path_key(stack.key.address)});
-        stack.socket.handle_heartbeat_expiration(stack.key, stack.key.address);
+        stack.socket.expirations.cancel(Expiration_Key{stack.key, Expiration_Timer_Type::HEARTBEAT, path_key(peer_address())});
+        stack.socket.handle_heartbeat_expiration(stack.key, peer_address());
         return stack.collect();
     }
 

@@ -204,23 +204,26 @@ Sctp_Status SCTP_Socket::sctp_associate(std::string_view ip_address, int port, A
         return Sctp_Status::INVALID_ADDRESS;
     }
     to_location.sin_port = htons(udp_port.value_or(port));
-    Association_Key key = peer_key(to_location, static_cast<uint16_t>(port));
+    uint16_t peer_port = static_cast<uint16_t>(port);
 
     std::lock_guard<std::mutex> assoc_lock(associations_mutex);
-    if (associations.contains(association_key_for(key))) {
+    if (associations.contains(association_at(peer_key(to_location, peer_port)))) {
         return Sctp_Status::ASSOCIATION_EXISTS;
     }
-    const Association& assoc = associations.emplace(key, init_new_association(to_location)).first->second;
-    // sin_port is already network order, so the builder's host-order ports need
+    Association_Key key{next_association_id++};
+    Association& assoc = associations.emplace(key, init_new_association(to_location, peer_port)).first->second;
+    add_peer_addresses(key, assoc, {to_location});
+    // sin_port is already network order, so the builder's host-order port needs
     // ntohs, not htons.
-    enqueue_packet(Deliverable{key, assoc.primary_path, build_init(ntohs(local_address.sin_port), ntohs(key.address.sin_port),
+    enqueue_packet(Deliverable{key, assoc.primary_path, build_init(ntohs(local_address.sin_port), assoc.peer_port,
         assoc.this_ver_tag, assoc.next_tsn, 0, advertised_addresses())});
     out_association_id = key;
     return Sctp_Status::OK;
 }
 
-Association SCTP_Socket::init_new_association(const sockaddr_in& destination) {
+Association SCTP_Socket::init_new_association(const sockaddr_in& destination, uint16_t peer_port) {
     Association result{};
+    result.peer_port = peer_port;
 
     result.peer_address_list = {make_path(destination, true)};
     result.primary_path = destination;
@@ -240,7 +243,7 @@ Association SCTP_Socket::init_new_association(const sockaddr_in& destination) {
 
 // The cookie's other addresses are left to add_peer_addresses, which indexes them.
 Association SCTP_Socket::init_new_association(const State_Cookie& cookie) {
-    Association result = init_new_association(cookie_source(cookie));
+    Association result = init_new_association(cookie_source(cookie), cookie.sctp_src_port);
     result.state = ESTABLISHED;
     result.this_ver_tag = cookie.local_ver_tag;
     result.peer_ver_tag = cookie.peer_ver_tag;
@@ -261,12 +264,9 @@ Association* SCTP_Socket::find_tcb(const Association_Key& key) {
     return it == associations.end() ? nullptr : &it->second;
 }
 
-Association_Key SCTP_Socket::association_key_for(const Association_Key& peer) {
-    if (associations.contains(peer)) {
-        return peer;
-    }
-    auto alias = peer_addresses.find(peer);
-    return alias == peer_addresses.end() ? peer : alias->second;
+Association_Key SCTP_Socket::association_at(const Peer_Key& peer) {
+    auto found = peer_addresses.find(peer);
+    return found == peer_addresses.end() ? Association_Key{} : found->second;
 }
 
 void SCTP_Socket::add_peer_addresses(const Association_Key& key, Association& assoc, const std::vector<sockaddr_in>& addresses) {
@@ -274,9 +274,7 @@ void SCTP_Socket::add_peer_addresses(const Association_Key& key, Association& as
         if (find_path(assoc, address) == nullptr) {
             assoc.peer_address_list.push_back(make_path(address, false));
         }
-        if (!same_destination(address, key.address)) {
-            peer_addresses.emplace(peer_key(address, ntohs(key.address.sin_port)), key);
-        }
+        peer_addresses.emplace(peer_key(address, assoc.peer_port), key);
     }
 }
 
@@ -288,16 +286,22 @@ void SCTP_Socket::record_arrival(const Association_Key& key, const sockaddr_in& 
     }
 }
 
-void SCTP_Socket::forget_peer_addresses(const Association_Key& key) {
-    std::erase_if(peer_addresses, [&](const auto& entry) { return entry.second == key; });
+// An address another association already held stays that association's.
+void SCTP_Socket::forget_peer_addresses(const Association_Key& key, const Association& assoc) {
+    for (const Peer_Path& path : assoc.peer_address_list) {
+        auto found = peer_addresses.find(peer_key(path.address, assoc.peer_port));
+        if (found != peer_addresses.end() && found->second == key) {
+            peer_addresses.erase(found);
+        }
+    }
 }
 
 void SCTP_Socket::remove_association(const Association_Key& key, std::optional<Assoc_Change_State> state) {
     if (Association* assoc = find_tcb(key)) {
         abandon_partial_delivery(key, *assoc);
+        forget_peer_addresses(key, *assoc);
         associations.erase(key);
     }
-    forget_peer_addresses(key);
     cancel_expirations(key);
     sends.purge(key);
     if (state) {
@@ -317,7 +321,9 @@ void SCTP_Socket::abandon_partial_delivery(const Association_Key& key, const Ass
 
 void SCTP_Socket::notify_peer_addr_change(const Association_Key& key, const sockaddr_in& address, Peer_Addr_State state) {
     sockaddr_in transport_address = address;
-    transport_address.sin_port = key.address.sin_port;
+    if (const Association* assoc = find_tcb(key)) {
+        transport_address.sin_port = htons(assoc->peer_port);
+    }
     notifications.enqueue(Notification{Notification_Type::SCTP_PEER_ADDR_CHANGE, key, Peer_Addr_Change{transport_address, state}});
 }
 
@@ -436,14 +442,14 @@ Sctp_Status SCTP_Socket::sctp_abort(const Association_Key& association_id, const
     sockaddr_in destination = data_path(*assoc).address;
     size_t room = amdcs(*assoc) - 2 * SCTP_CHUNK_HEADER_SIZE;
     std::vector<uint8_t> abort_reason(reason.begin(), reason.begin() + static_cast<long>(std::min(reason.size(), room)));
+    SCTP_Packet abort = packet_to(*assoc, ABORT, error_chunk_value{{error_cause{CAUSE_USER_INITIATED_ABORT, std::move(abort_reason)}}});
 
     // Purge first so it drops the queued DATA that MUST NOT accompany the ABORT
     remove_association(association_id);
 
     // In COOKIE_WAIT there is no tag the peer would accept the ABORT under.
     if (peer_tag != 0) {
-        enqueue_packet(Deliverable{association_id, destination,
-            packet_to(association_id, peer_tag, ABORT, error_chunk_value{{error_cause{CAUSE_USER_INITIATED_ABORT, std::move(abort_reason)}}})});
+        enqueue_packet(Deliverable{association_id, destination, std::move(abort)});
     }
     return Sctp_Status::OK;
 }

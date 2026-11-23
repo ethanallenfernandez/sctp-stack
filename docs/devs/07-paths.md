@@ -41,15 +41,16 @@ flowchart LR
 How that peer is represented:
 
 ```
-associations        key = {192.0.2.1, SCTP 5000}           ← primary address + SCTP port
-peer_addresses      {198.51.100.7, SCTP 5000} → {192.0.2.1, SCTP 5000}
+associations        id 7 → TCB (peer_port = 5000)
+peer_addresses      {192.0.2.1,    SCTP 5000} → id 7       ← every peer address, keyed by IP + SCTP port
+                    {198.51.100.7, SCTP 5000} → id 7
 
 Association.peer_address_list
   [0] Peer_Path{ address = 192.0.2.1:40001    confirmed, source = 10.0.0.1 }
   [1] Peer_Path{ address = 198.51.100.7:40777 confirmed, source = 10.0.1.1 }
                          └── sin_port is the UDP port, not the SCTP port
 
-per-path timers     Expiration_Key{ location = key, type, path = {198.51.100.7, port 0} }
+per-path timers     Expiration_Key{ location = id 7, type, path = {198.51.100.7, port 0} }
 ```
 
 Two `sockaddr_in` values are the same destination when their IPs match
@@ -71,7 +72,7 @@ flowchart TD
         r2["COOKIE ECHO: path[0] = INIT source, CONFIRMED<br/>the rest UNCONFIRMED"]
         r1 --> r2
     end
-    i2 & r2 --> add["add_peer_addresses():<br/>append missing paths (make_path)<br/>alias each non-primary IP in peer_addresses"]
+    i2 & r2 --> add["add_peer_addresses():<br/>append missing paths (make_path)<br/>map every address to the id in peer_addresses"]
 ```
 
 `transport_addresses(src, params)` always puts the packet's source first, then
@@ -336,7 +337,7 @@ RFC 6951 puts SCTP inside UDP. The UDP port and the SCTP port are separate:
 | | SCTP port | UDP port |
 |---|---|---|
 | Ours | `local_address.sin_port`. Our SCTP port **is** our UDP port. | same |
-| Peer | in `Association_Key`, fixed for the association | per path in `Peer_Path.address.sin_port`, learned |
+| Peer | `Association::peer_port`, fixed for the association, and part of every `Peer_Key` | per path in `Peer_Path.address.sin_port`, learned |
 
 - `sctp_associate(ip, port, out, udp_port)`: `port` is the peer's SCTP port.
   `udp_port` (default: the same as `port`) is where to send the INIT.

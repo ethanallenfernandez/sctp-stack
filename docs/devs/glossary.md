@@ -63,7 +63,7 @@
 |---|---|
 | `cumulative_tsn_ack` vs `last_peer_tsn` | The peer's ack of **our** DATA (send side), vs **our** ack point for the peer's DATA (receive side). The SACKs we send carry `last_peer_tsn`. |
 | `this_ver_tag` vs `peer_ver_tag` | Tag the peer puts on packets **to us**, vs tag we put on packets **to the peer**. |
-| `Association_Key` vs `path_key()` vs `Peer_Path.address` | Primary IP + SCTP port (association identity), vs IP only (per-path timer identity), vs IP + **UDP** port (where to send). See [Architecture](01-architecture.md#identity-keys-aliases-and-path-keys). |
+| `Association_Key` vs `Peer_Key` vs `Peer_Path.address` | Opaque id naming the association, vs a peer IP + SCTP port (`peer_key`, to find the association) or IP only (`path_key`, per-path timers), vs IP + **UDP** port (where to send). See [Architecture](01-architecture.md#identity-association-ids-and-peer-addresses). |
 | `zero_window_probe_allowed` vs `zero_window_probing` | Permission to send the next probe (set by its timer), vs a probe is outstanding (changes how T3 reacts). |
 | `retransmitted` vs `fast_retransmitted` vs `pending_retransmission` | Sent more than once, vs already fast-retransmitted (not again), vs marked to be sent again. |
 | `transmits_data()` vs `receives_data()` | States that send DATA and process SACKs, vs states that accept DATA and send SACKs. They differ in `SHUTDOWN_SENT` and `SHUTDOWN_RECEIVED`. |

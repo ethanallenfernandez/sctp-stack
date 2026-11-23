@@ -65,10 +65,6 @@ public:
     Sctp_Status sctp_request_heartbeat(const Association_Key& association_id, const sockaddr_in& destination);
     // Refused for an UNCONFIRMED destination, which nothing may be sent to.
     Sctp_Status sctp_set_primary(const Association_Key& association_id, const sockaddr_in& destination);
-    
-    inline Association_Key get_this_association_key() {
-        return Association_Key{local_address};
-    }
 
 private:
     std::atomic<bool> running{false};
@@ -82,10 +78,10 @@ private:
     // Bound beside local_address, at its port.
     std::vector<Local_Address> other_local_addresses;
     Wakeup_Pair wakeup;
-    std::unordered_map<Association_Key, Association, Association_Hash> associations;
-    // A peer's transport addresses other than the one its association is keyed
-    // on. Keys, here and in associations, carry the peer's SCTP port.
-    std::unordered_map<Association_Key, Association_Key, Association_Hash> peer_addresses;
+    std::unordered_map<Association_Key, Association> associations;
+    // Every transport address of every peer, to its association.
+    std::unordered_map<Peer_Key, Association_Key, Peer_Key_Hash> peer_addresses;
+    uint32_t next_association_id{1};
     std::mutex associations_mutex;
     Send_Queue sends;
     Receive_Queue receives;
@@ -125,11 +121,12 @@ private:
     void notify_peer_addr_change(const Association_Key& key, const sockaddr_in& address, Peer_Addr_State state);
     // Empty when only one address is bound.
     std::vector<in_addr> advertised_addresses() const;
-    Association init_new_association(const sockaddr_in& destination);
+    Association init_new_association(const sockaddr_in& destination, uint16_t peer_port);
     Association init_new_association(const State_Cookie& cookie);
 
     Association* find_tcb(const Association_Key& key);
-    Association_Key association_key_for(const Association_Key& peer);
+    // Id 0 if no association has this address.
+    Association_Key association_at(const Peer_Key& peer);
     // Purges what the association has queued, then reports state if given.
     void remove_association(const Association_Key& key, std::optional<Assoc_Change_State> state = std::nullopt);
     // src is where a packet that passed the tag check came from, local the
@@ -137,7 +134,7 @@ private:
     void record_arrival(const Association_Key& key, const sockaddr_in& src, in_addr local);
     // Appends the addresses the association lacks, as UNCONFIRMED, and maps each to key.
     void add_peer_addresses(const Association_Key& key, Association& assoc, const std::vector<sockaddr_in>& addresses);
-    void forget_peer_addresses(const Association_Key& key);
+    void forget_peer_addresses(const Association_Key& key, const Association& assoc);
     // For a TCB being discarded or reset.
     void abandon_partial_delivery(const Association_Key& key, const Association& assoc);
     Send_Allowances send_allowances();
@@ -203,8 +200,8 @@ private:
     void maybe_send_window_update(const Association_Key& key);
     // Sent back the way header came, under tag.
     void reply(const SCTP_Common_Header& header, const Association_Key& key, const sockaddr_in& destination, uint32_t tag, Chunk_Type type, Chunk_Value_Type value, uint8_t flag = 0);
-    // From our port to key's.
-    SCTP_Packet packet_to(const Association_Key& key, uint32_t tag, Chunk_Type type, Chunk_Value_Type value, uint8_t flag = 0) const;
+    // From our port to the peer's, under its tag.
+    SCTP_Packet packet_to(const Association& assoc, Chunk_Type type, Chunk_Value_Type value, uint8_t flag = 0) const;
     void report_unrecognized_chunks(const SCTP_Common_Header& header, const Association_Key& key, const sockaddr_in& src, std::vector<error_cause> causes);
 };
 

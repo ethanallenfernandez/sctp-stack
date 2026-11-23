@@ -41,12 +41,12 @@ sockaddr_in peer_address(uint16_t port) {
 } // namespace
 
 struct SCTP_Socket_Test_Access {
-    static void establish(SCTP_Socket& stack, const Association_Key& key, uint32_t cwnd, uint32_t peer_rwnd) {
+    static Association_Key establish(SCTP_Socket& stack, const sockaddr_in& peer, uint32_t cwnd, uint32_t peer_rwnd) {
         stack.local_address.sin_family = AF_INET;
         stack.local_address.sin_port = htons(LOCAL_PORT);
         sctp_parse_ipv4("127.0.0.1", stack.local_address.sin_addr);
 
-        Association assoc = stack.init_new_association(key.address);
+        Association assoc = stack.init_new_association(peer, ntohs(peer.sin_port));
         assoc.this_ver_tag = OUR_TAG;
         assoc.peer_ver_tag = PEER_TAG;
         assoc.state = ESTABLISHED;
@@ -56,12 +56,14 @@ struct SCTP_Socket_Test_Access {
         primary(assoc).cwnd = cwnd;
         assoc.peer_rwnd = peer_rwnd;
         primary(assoc).data_sent_at = Clock::now();
-        assoc.primary_path = key.address;
-        stack.associations.insert_or_assign(key, assoc);
+        assoc.primary_path = peer;
+        Association_Key key{stack.next_association_id++};
+        stack.add_peer_addresses(key, stack.associations.insert_or_assign(key, assoc).first->second, {peer});
+        return key;
     }
 
-    static Association new_association(SCTP_Socket& stack, const Association_Key& key) {
-        return stack.init_new_association(key.address);
+    static Association new_association(SCTP_Socket& stack, const sockaddr_in& peer) {
+        return stack.init_new_association(peer, ntohs(peer.sin_port));
     }
 
     static std::optional<SCTP_Packet> transmit(SCTP_Socket& stack) {
@@ -128,9 +130,9 @@ struct SCTP_Socket_Test_Access {
         stack.send_allowances();
     }
 
-    // T3-rtx is kept per destination: the association's only one here.
+    // T3-rtx is kept per destination: the association's only one, 127.0.0.1, here.
     static Expiration_Key timer_key(const Association_Key& key, Expiration_Timer_Type type) {
-        return Expiration_Key{key, type, type == Expiration_Timer_Type::T3_RTX ? path_key(key.address) : Association_Key{}};
+        return Expiration_Key{key, type, type == Expiration_Timer_Type::T3_RTX ? path_key(peer_address(0)) : Peer_Key{}};
     }
 
     static void fire(SCTP_Socket& stack, const Association_Key& key, Expiration_Timer_Type type) {
@@ -195,8 +197,7 @@ void test_cwnd_limits_new_data() {
     std::printf("Rule B: new DATA stops once flightsize reaches cwnd:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 2400, 65535);
+    Association_Key key = Access::establish(stack, peer_address(40000), 2400, 65535);
     for (int i = 0; i < 4; ++i) {
         stack.sctp_send_data(key, MESSAGE);
     }
@@ -216,8 +217,7 @@ void test_rwnd_limits_new_data() {
     std::printf("Rule A and 6.2.1 B: rwnd is spent as DATA goes out:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 4380, 1500);
+    Association_Key key = Access::establish(stack, peer_address(40000), 4380, 1500);
     stack.sctp_send_data(key, MESSAGE);
     stack.sctp_send_data(key, MESSAGE);
 
@@ -236,10 +236,8 @@ void test_associations_are_gated_independently() {
     std::printf("A closed window holds back only its own association:\n");
 
     SCTP_Socket stack;
-    Association_Key closed{peer_address(40000)};
-    Association_Key open{peer_address(40001)};
-    Access::establish(stack, closed, 4380, 0);
-    Access::establish(stack, open, 4380, 65535);
+    Association_Key closed = Access::establish(stack, peer_address(40000), 4380, 0);
+    Association_Key open = Access::establish(stack, peer_address(40001), 4380, 65535);
     Access::tcb(stack, closed).outstanding_data.emplace(
         INITIAL_TSN - 1, Outstanding_Data{data_chunk_value{INITIAL_TSN - 1, 0, 0, 0, {'x'}}, {}, {}, false, false, 0, false, false});
     stack.sctp_send_data(closed, MESSAGE);
@@ -254,8 +252,7 @@ void test_tsn_order_is_kept_within_an_association() {
     std::printf("A smaller later message does not overtake a refused one:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 4380, 500);
+    Association_Key key = Access::establish(stack, peer_address(40000), 4380, 500);
     Access::tcb(stack, key).outstanding_data.emplace(
         INITIAL_TSN - 1, Outstanding_Data{data_chunk_value{INITIAL_TSN - 1, 0, 0, 0, {'x'}}, {}, {}, false, false, 0, false, false});
     stack.sctp_send_data(key, std::vector<uint8_t>(1000, 'x'));
@@ -269,8 +266,7 @@ void test_bundling_spends_rwnd() {
     std::printf("Rule A: bundled chunks share the peer's window:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 4380, 900);
+    Association_Key key = Access::establish(stack, peer_address(40000), 4380, 900);
     for (int i = 0; i < 3; ++i) {
         stack.sctp_send_data(key, std::vector<uint8_t>(400, 'x'));
     }
@@ -289,8 +285,7 @@ void test_sender_sws_avoidance() {
     const std::vector<uint8_t> large(3000, 'l');
 
     SCTP_Socket wide;
-    Association_Key key{peer_address(40000)};
-    Access::establish(wide, key, 65535, 1000);
+    Association_Key key = Access::establish(wide, peer_address(40000), 65535, 1000);
     Access::tcb(wide, key).peer_max_rwnd = 65535;
     in_flight(wide, key);
     wide.sctp_send_data(key, large);
@@ -298,7 +293,7 @@ void test_sender_sws_avoidance() {
     check(Access::tcb(wide, key).next_tsn == INITIAL_TSN, "and no TSN is spent");
 
     SCTP_Socket narrow;
-    Access::establish(narrow, key, 65535, 1000);
+    key = Access::establish(narrow, peer_address(40000), 65535, 1000);
     Access::tcb(narrow, key).peer_max_rwnd = 1500;
     in_flight(narrow, key);
     narrow.sctp_send_data(key, large);
@@ -311,7 +306,7 @@ void test_sender_sws_avoidance() {
     check(!Access::transmit(narrow).has_value(), "after which the window is spent");
 
     SCTP_Socket whole;
-    Access::establish(whole, key, 65535, 300);
+    key = Access::establish(whole, peer_address(40000), 65535, 300);
     Access::tcb(whole, key).peer_max_rwnd = 400;
     in_flight(whole, key);
     whole.sctp_send_data(key, std::vector<uint8_t>(500, 'w'));
@@ -322,8 +317,7 @@ void test_zero_window_probe() {
     std::printf("Rule A: zero window probing:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 4380, 0);
+    Association_Key key = Access::establish(stack, peer_address(40000), 4380, 0);
     stack.sctp_send_data(key, MESSAGE);
 
     check(!Access::transmit(stack).has_value(), "no DATA while the window is closed");
@@ -357,8 +351,7 @@ void test_max_burst() {
     std::printf("Rule D: Max.Burst new-DATA packets per transmission opportunity:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 65535, 65535);
+    Association_Key key = Access::establish(stack, peer_address(40000), 65535, 65535);
     for (int i = 0; i < 6; ++i) {
         stack.sctp_send_data(key, MESSAGE);
     }
@@ -375,7 +368,7 @@ void test_initial_cwnd() {
     std::printf("7.2.1: initial cwnd for an IPv4 peer:\n");
 
     SCTP_Socket stack;
-    Association fresh = Access::new_association(stack, Association_Key{peer_address(40000)});
+    Association fresh = Access::new_association(stack, peer_address(40000));
     check(amdcs(fresh) == 1180 && primary(fresh).cwnd == 4404, "min(4 * PMDCS, max(2 * PMDCS, 4404)) with a 1180-byte PMDCS");
 }
 
@@ -383,8 +376,7 @@ void test_slow_start_grows_a_full_window() {
     std::printf("7.2.1: slow start on a fully utilized window:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 1200, 65535);
+    Association_Key key = Access::establish(stack, peer_address(40000), 1200, 65535);
     for (int i = 0; i < 4; ++i) {
         stack.sctp_send_data(key, MESSAGE);
     }
@@ -399,8 +391,7 @@ void test_slow_start_increase_is_capped() {
     std::printf("7.2.1: slow start grows by at most L * PMDCS per SACK:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 2400, 65535);
+    Association_Key key = Access::establish(stack, peer_address(40000), 2400, 65535);
     for (int i = 0; i < 3; ++i) {
         stack.sctp_send_data(key, MESSAGE);
     }
@@ -414,8 +405,7 @@ void test_slow_start_needs_a_full_window() {
     std::printf("7.2.1: no growth while the window is not being used:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 4404, 65535);
+    Association_Key key = Access::establish(stack, peer_address(40000), 4404, 65535);
     stack.sctp_send_data(key, MESSAGE);
     send_all(stack);
 
@@ -427,8 +417,7 @@ void test_slow_start_pauses_in_fast_recovery() {
     std::printf("7.2.1: no slow start growth in Fast Recovery:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 1200, 65535);
+    Association_Key key = Access::establish(stack, peer_address(40000), 1200, 65535);
     for (int i = 0; i < 3; ++i) {
         stack.sctp_send_data(key, MESSAGE);
     }
@@ -444,8 +433,7 @@ void test_congestion_avoidance() {
     std::printf("7.2.2: congestion avoidance adds one PMDCS per cwnd acknowledged:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 2400, 65535);
+    Association_Key key = Access::establish(stack, peer_address(40000), 2400, 65535);
     Association& assoc = Access::tcb(stack, key);
     primary(assoc).ssthresh = 1000;
     for (int i = 0; i < 6; ++i) {
@@ -470,8 +458,7 @@ void test_congestion_avoidance_needs_a_full_window() {
     std::printf("7.2.2: partial_bytes_acked on a window that is not full:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 2400, 65535);
+    Association_Key key = Access::establish(stack, peer_address(40000), 2400, 65535);
     Association& assoc = Access::tcb(stack, key);
     primary(assoc).ssthresh = 1000;
     primary(assoc).partial_bytes_acked = 2000;
@@ -516,8 +503,7 @@ void test_idle_cwnd_decay() {
     std::printf("7.2.1: cwnd decays while no DATA is sent:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 20000, 65535);
+    Association_Key key = Access::establish(stack, peer_address(40000), 20000, 65535);
     Association& assoc = Access::tcb(stack, key);
     primary(assoc).data_sent_at = Clock::now() - std::chrono::milliseconds(2500);
 
@@ -542,8 +528,7 @@ void test_idle_decay_never_raises_cwnd() {
     std::printf("7.2.1: idle decay never raises cwnd:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, BASE_PMDCS, 65535);
+    Association_Key key = Access::establish(stack, peer_address(40000), BASE_PMDCS, 65535);
     Association& assoc = Access::tcb(stack, key);
     uint32_t ssthresh = primary(assoc).ssthresh;
     primary(assoc).data_sent_at = Clock::now() - std::chrono::seconds(10);
@@ -557,8 +542,7 @@ void test_t3_marks_everything_outstanding() {
     std::printf("6.3.3 and 7.2.1: after T3-rtx, one packet in flight until an ack:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 4404, 65535);
+    Association_Key key = Access::establish(stack, peer_address(40000), 4404, 65535);
     for (int i = 0; i < 3; ++i) {
         stack.sctp_send_data(key, std::vector<uint8_t>(400, 'x'));
     }
@@ -586,8 +570,7 @@ void test_marked_chunks_wait_for_cwnd() {
     std::printf("6.1 C: marked chunks go before new DATA, as cwnd allows:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 2400, 65535);
+    Association_Key key = Access::establish(stack, peer_address(40000), 2400, 65535);
     for (int i = 0; i < 4; ++i) {
         stack.sctp_send_data(key, MESSAGE);
     }
@@ -608,8 +591,7 @@ void test_fast_retransmit_on_entering_fast_recovery() {
     std::printf("7.2.4: the Fast Retransmit packet is sent on entering Fast Recovery:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 4404, 65535);
+    Association_Key key = Access::establish(stack, peer_address(40000), 4404, 65535);
     for (int i = 0; i < 5; ++i) {
         stack.sctp_send_data(key, MESSAGE);
     }
@@ -627,8 +609,7 @@ void test_advertised_window_tracks_the_buffer() {
     std::printf("6.2: a_rwnd is the receive buffer left over:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 4404, 65535);
+    Access::establish(stack, peer_address(40000), 4404, 65535);
 
     Access::deliver_data(stack, 40000, PEER_TSN, 1000);
     auto sack = last_sack(Access::drain(stack));
@@ -647,8 +628,7 @@ void test_window_update() {
     std::printf("6.2: a window update when the ULP frees a quarter of the buffer:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 4404, 65535);
+    Access::establish(stack, peer_address(40000), 4404, 65535);
     for (uint32_t i = 0; i < 3; ++i) {
         Access::deliver_data(stack, 40000, PEER_TSN + i, 20000);
     }
@@ -665,8 +645,7 @@ void test_window_update_before_delayed_sack() {
     std::printf("6.2: a window update when the ULP frees data the peer has not yet seen acked:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 4404, 65535);
+    Access::establish(stack, peer_address(40000), 4404, 65535);
     Access::deliver_data(stack, 40000, PEER_TSN, 60000, false);
     check(last_sack(Access::drain(stack)) == std::nullopt, "one packet waits on the delayed SACK");
 
@@ -680,8 +659,7 @@ void test_full_buffer_drops_new_data() {
     std::printf("6.2: with the window at 0, DATA above everything received is dropped:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 4404, 65535);
+    Association_Key key = Access::establish(stack, peer_address(40000), 4404, 65535);
     for (uint32_t i = 0; i < 3; ++i) {
         Access::deliver_data(stack, 40000, PEER_TSN + i, RWND / 3);
     }
@@ -699,8 +677,7 @@ void test_full_buffer_prefers_the_lower_tsn() {
     std::printf("6.2: with the window at 0, a lower TSN displaces the highest one held:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 4404, 65535);
+    Association_Key key = Access::establish(stack, peer_address(40000), 4404, 65535);
     Access::deliver_data(stack, 40000, PEER_TSN, 60000);
     Access::deliver_data(stack, 40000, PEER_TSN + 2, RWND - 60000, true, DATA_FLAG_B);
     auto sack = last_sack(Access::drain(stack));
@@ -719,8 +696,7 @@ void test_full_buffer_takes_the_tsn_blocking_complete_messages() {
     std::printf("6.2: with the window at 0, the missing TSN is taken when what it blocks is already complete:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 4404, 65535);
+    Association_Key key = Access::establish(stack, peer_address(40000), 4404, 65535);
     Access::deliver_data(stack, 40000, PEER_TSN, 60000);
     Access::deliver_data(stack, 40000, PEER_TSN + 2, RWND - 60000);
     auto sack = last_sack(Access::drain(stack));
@@ -747,8 +723,7 @@ void test_held_tsns_are_ordered_across_the_wrap() {
 
     constexpr uint8_t WHOLE = DATA_FLAG_U | DATA_FLAG_B | DATA_FLAG_E;
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 4404, 65535);
+    Association_Key key = Access::establish(stack, peer_address(40000), 4404, 65535);
     Association& assoc = Access::tcb(stack, key);
     assoc.last_peer_tsn = 0xFFFFFFFD;
     Access::deliver_data(stack, 40000, 1, 10, true, WHOLE);
@@ -776,8 +751,7 @@ void test_full_buffer_drops_the_highest_tsn_across_the_wrap() {
     std::printf("6.2: with the window at 0, the TSN dropped to make room is the highest in serial order:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 4404, 65535);
+    Association_Key key = Access::establish(stack, peer_address(40000), 4404, 65535);
     Association& assoc = Access::tcb(stack, key);
     assoc.last_peer_tsn = 0xFFFFFFFC;
     Access::deliver_data(stack, 40000, 0xFFFFFFFD, 60000, true, DATA_FLAG_U | DATA_FLAG_B | DATA_FLAG_E);
@@ -798,8 +772,7 @@ void test_data_beyond_a_gap_ack_block_is_dropped() {
 
     constexpr uint8_t WHOLE = DATA_FLAG_U | DATA_FLAG_B | DATA_FLAG_E;
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 4404, 65535);
+    Association_Key key = Access::establish(stack, peer_address(40000), 4404, 65535);
     Access::deliver_data(stack, 40000, PEER_TSN + 65535, 1, true, WHOLE);
     auto sack = last_sack(Access::drain(stack));
     check(Access::tcb(stack, key).tsn_ooo_buffer.empty(), "a TSN 65536 past the Cumulative TSN Ack is not held");
@@ -815,8 +788,7 @@ void test_unanswered_retransmissions_end_the_association() {
     std::printf("8.1: T3-rtx expiries past Association.Max.Retrans:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 4404, 65535);
+    Association_Key key = Access::establish(stack, peer_address(40000), 4404, 65535);
     stack.sctp_send_data(key, MESSAGE);
     Access::transmit(stack);
 
@@ -836,8 +808,7 @@ void test_probe_expiries_with_sacks_do_not_end_the_association() {
     std::printf("6.1 A: a probed zero window never counts towards Association.Max.Retrans:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 4404, 0);
+    Association_Key key = Access::establish(stack, peer_address(40000), 4404, 0);
     stack.sctp_send_data(key, MESSAGE);
     Access::transmit(stack);
     Access::fire(stack, key, Expiration_Timer_Type::ZERO_WINDOW_PROBE);
@@ -858,8 +829,7 @@ void test_sack_is_bundled_with_data() {
     std::printf("6.1: a delayed SACK is bundled with outgoing DATA:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 65535, 65535);
+    Association_Key key = Access::establish(stack, peer_address(40000), 65535, 65535);
     Access::deliver_data(stack, 40000, PEER_TSN, 100, false);
     check(Access::timer_armed(stack, key, Expiration_Timer_Type::DELAYED_SACK), "the peer's DATA starts the delayed SACK timer");
 
@@ -877,8 +847,7 @@ void test_bundled_sack_survives_a_failed_send() {
     std::printf("A SACK bundled into a packet whose send fails is not lost:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 65535, 65535);
+    Association_Key key = Access::establish(stack, peer_address(40000), 65535, 65535);
     Access::deliver_data(stack, 40000, PEER_TSN, 100, false);
     stack.sctp_send_data(key, MESSAGE);
 
@@ -895,8 +864,7 @@ void test_sack_that_does_not_fit_goes_alone() {
     std::printf("6.1: a SACK that would overflow the packet is sent on its own:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 65535, 65535);
+    Association_Key key = Access::establish(stack, peer_address(40000), 65535, 65535);
     Access::deliver_data(stack, 40000, PEER_TSN, 100, false);
 
     stack.sctp_send_data(key, std::vector<uint8_t>(BASE_PMDCS - 16, 'x'));
@@ -912,8 +880,7 @@ void test_immediate_sack_bit() {
     std::printf("6.1: the I bit on DATA that fills a window, or in SHUTDOWN-PENDING:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 2400, 65535);
+    Association_Key key = Access::establish(stack, peer_address(40000), 2400, 65535);
     for (int i = 0; i < 3; ++i) {
         stack.sctp_send_data(key, MESSAGE);
     }
@@ -925,13 +892,13 @@ void test_immediate_sack_bit() {
     check(third && immediate_sack_requested(*third), "set on the packet that fills cwnd");
 
     SCTP_Socket small_window;
-    Access::establish(small_window, key, 65535, CHUNK);
+    key = Access::establish(small_window, peer_address(40000), 65535, CHUNK);
     small_window.sctp_send_data(key, MESSAGE);
     auto filling = Access::transmit(small_window);
     check(filling && immediate_sack_requested(*filling), "set on the packet that fills the peer's rwnd");
 
     SCTP_Socket closing;
-    Access::establish(closing, key, 65535, 65535);
+    key = Access::establish(closing, peer_address(40000), 65535, 65535);
     closing.sctp_send_data(key, MESSAGE);
     Access::tcb(closing, key).state = SHUTDOWN_PENDING;
     auto last = Access::transmit(closing);
@@ -942,8 +909,7 @@ void test_duplicate_tsns_count_in_congestion_avoidance() {
     std::printf("7.2.2: Duplicate TSNs add to partial_bytes_acked:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address(40000)};
-    Access::establish(stack, key, 2400, 65535);
+    Association_Key key = Access::establish(stack, peer_address(40000), 2400, 65535);
     Association& assoc = Access::tcb(stack, key);
     primary(assoc).ssthresh = 1000;
     stack.sctp_send_data(key, MESSAGE);

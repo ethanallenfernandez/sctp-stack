@@ -56,19 +56,22 @@ sockaddr_in third_address() {
 struct SCTP_Socket_Test_Access {
     // An established association, with the socket's own address filled in so
     // originated packets have ports to carry.
-    static void establish(SCTP_Socket& stack, const Association_Key& key) {
+    static Association_Key establish(SCTP_Socket& stack, const sockaddr_in& peer = peer_address()) {
         stack.local_address.sin_family = AF_INET;
         stack.local_address.sin_port = htons(LOCAL_PORT);
         sctp_parse_ipv4("127.0.0.1", stack.local_address.sin_addr);
 
-        Association assoc = stack.init_new_association(key.address);
+        Association assoc = stack.init_new_association(peer, ntohs(peer.sin_port));
         assoc.this_ver_tag = OUR_TAG;
         assoc.peer_ver_tag = PEER_TAG;
         assoc.state = ESTABLISHED;
         assoc.last_peer_tsn = 0;
-        assoc.primary_path = key.address;
-        stack.associations.insert_or_assign(key, assoc);
-        stack.start_heartbeats(key, stack.associations.at(key));
+        assoc.primary_path = peer;
+        Association_Key key{stack.next_association_id++};
+        Association& tcb = stack.associations.insert_or_assign(key, assoc).first->second;
+        stack.add_peer_addresses(key, tcb, {peer});
+        stack.start_heartbeats(key, tcb);
+        return key;
     }
 
     static void deliver(SCTP_Socket& stack, const SCTP_Packet& packet) {
@@ -90,11 +93,11 @@ struct SCTP_Socket_Test_Access {
     }
 
     static void fire_heartbeat_timer(SCTP_Socket& stack, const Association_Key& key) {
-        fire_heartbeat_timer(stack, key, key.address);
+        fire_heartbeat_timer(stack, key, peer_address());
     }
 
     static void fire_t3(SCTP_Socket& stack, const Association_Key& key) {
-        stack.handle_t3_expiration(key, key.address);
+        stack.handle_t3_expiration(key, peer_address());
     }
 
     static std::vector<Deliverable> drain_deliverables(SCTP_Socket& stack) {
@@ -151,7 +154,7 @@ struct SCTP_Socket_Test_Access {
     }
 
     static bool timer_armed(SCTP_Socket& stack, const Association_Key& key) {
-        return timer_armed(stack, key, key.address);
+        return timer_armed(stack, key, peer_address());
     }
 
     // Whether the path's heartbeat timer falls due within `within`. Destructive:
@@ -170,7 +173,7 @@ struct SCTP_Socket_Test_Access {
     static void add_outstanding_data(SCTP_Socket& stack, const Association_Key& key) {
         Association& assoc = stack.associations.at(key);
         data_chunk_value data{assoc.next_tsn++, 0, 0, 0, {'x'}};
-        stack.record_data_sent(key, key.address, data, Clock::now());
+        stack.record_data_sent(key, peer_address(), data, Clock::now());
     }
 };
 
@@ -197,8 +200,7 @@ void test_heartbeat_is_answered() {
     std::printf("Receiving a HEARTBEAT (3.3.5, 3.3.6):\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Access::establish(stack);
 
     std::vector<uint8_t> info = {0xDE, 0xAD, 0xBE, 0xEF, 0x01};
     Access::deliver(stack, inbound(OUR_TAG, HEARTBEAT, info));
@@ -218,8 +220,7 @@ void test_oversized_info_is_not_echoed() {
     std::printf("A HEARTBEAT whose Info exceeds the path MTU:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
 
     std::vector<uint8_t> info(BASE_PMDCS, 0x5A);
     Access::deliver(stack, inbound(OUR_TAG, HEARTBEAT, info));
@@ -232,8 +233,7 @@ void test_heartbeat_probe_is_sent_when_idle() {
     std::printf("The heartbeat timer on an idle path (8.3):\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
     Access::fire_heartbeat_timer(stack, key);
 
     auto sent = Access::drain_sends(stack);
@@ -244,7 +244,7 @@ void test_heartbeat_probe_is_sent_when_idle() {
     check(info_of(sent[0]).size() == HEARTBEAT_INFO_SIZE, "Heartbeat Info is the nonce and destination");
     check(heartbeat_info_nonce(info_of(sent[0])) == Access::primary_path(stack, key).hb_nonce,
           "the nonce on the wire is the one recorded for the path");
-    check(same_transport_address(heartbeat_info_destination(info_of(sent[0])), key.address),
+    check(same_transport_address(heartbeat_info_destination(info_of(sent[0])), peer_address()),
           "and the Info names the destination");
     check(Access::primary_path(stack, key).hb_outstanding, "the probe is marked outstanding");
     check(Access::timer_armed(stack, key), "and the timer is re-armed");
@@ -254,8 +254,7 @@ void test_no_probe_while_data_is_outstanding() {
     std::printf("The heartbeat timer on a path with unacknowledged DATA:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
     Access::add_outstanding_data(stack, key);
     Access::fire_heartbeat_timer(stack, key);
 
@@ -268,8 +267,7 @@ void test_matching_ack_clears_the_path() {
     std::printf("A HEARTBEAT ACK that answers our probe:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
     Access::fire_heartbeat_timer(stack, key);
     auto sent = Access::drain_sends(stack);
     if (sent.size() != 1) {
@@ -293,8 +291,7 @@ void test_ack_with_a_foreign_nonce_is_ignored() {
     std::printf("A HEARTBEAT ACK carrying a nonce we never sent:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
     Access::fire_heartbeat_timer(stack, key);
     auto sent = Access::drain_sends(stack);
     if (sent.size() != 1) {
@@ -317,8 +314,7 @@ void test_unsolicited_ack_is_ignored() {
     std::printf("A HEARTBEAT ACK with no probe outstanding:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
 
     Access::tcb(stack, key).error_count = 2;
     sockaddr_in destination = peer_address();
@@ -332,8 +328,7 @@ void test_unanswered_probes_end_the_association() {
     std::printf("A peer that stops answering (8.1):\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
 
     // Each round sends a probe, then lets its one-RTO deadline pass.
     int threshold = sctp_parameters::ASSOCIATION_MAX_RETRANS;
@@ -405,8 +400,7 @@ void test_unconfirmed_path_is_probed_every_rto() {
     std::printf("An UNCONFIRMED path (5.4):\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
     Access::add_paths(stack, key, {second_address()});
 
     check(!Access::path(stack, key, second_address()).confirmed, "starts UNCONFIRMED");
@@ -427,8 +421,7 @@ void test_ack_confirms_the_path_it_names() {
     std::printf("A HEARTBEAT ACK for an UNCONFIRMED path, arriving over another:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
     Access::add_paths(stack, key, {second_address()});
     auto sent = probe(stack, key, second_address());
     if (!sent) {
@@ -452,8 +445,7 @@ void test_confirmation_probes_are_bounded_by_hb_max_burst() {
     std::printf("Several UNCONFIRMED paths (5.4, HB.Max.Burst):\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
     Access::add_paths(stack, key, {second_address(), third_address()});
 
     check(Access::timer_armed(stack, key, second_address()), "the first is probed");
@@ -473,8 +465,7 @@ void test_unconfirmed_path_that_never_answers() {
     std::printf("An UNCONFIRMED path that never answers:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
     Access::add_paths(stack, key, {second_address(), third_address()});
 
     for (int i = 0; i <= sctp_parameters::PATH_MAX_RETRANS + 1; i++) {
@@ -498,8 +489,7 @@ void test_alternate_path_failure_and_recovery() {
     std::printf("A CONFIRMED alternate path that stops answering (8.2, 8.3):\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
     Access::add_paths(stack, key, {second_address()});
     if (auto sent = probe(stack, key, second_address())) {
         acknowledge(stack, *sent);
@@ -533,9 +523,8 @@ void test_unanswered_primary_probe() {
     std::printf("An unanswered probe on the primary path:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
-    unanswered(stack, key, key.address);
+    Association_Key key = Access::establish(stack);
+    unanswered(stack, key, peer_address());
 
     check(Access::primary_path(stack, key).error_count == 1, "counts against the path");
     check(Access::tcb(stack, key).error_count == 1, "and the association: it is the path carrying data");
@@ -547,8 +536,7 @@ void test_t3_counts_against_the_primary_path() {
     std::printf("A T3-rtx expiry (8.2):\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
     Access::add_outstanding_data(stack, key);
     Access::fire_t3(stack, key);
 
@@ -567,18 +555,17 @@ void test_probe_deadline_is_one_rto() {
     std::printf("A probe on a CONFIRMED path (8.3, one RTO to answer):\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
-    probe(stack, key, key.address);
+    Association_Key key = Access::establish(stack);
+    probe(stack, key, peer_address());
 
-    check(!Access::due_within(stack, key, key.address, std::chrono::milliseconds(900))
-          && Access::due_within(stack, key, key.address, std::chrono::milliseconds(1100)),
+    check(!Access::due_within(stack, key, peer_address(), std::chrono::milliseconds(900))
+          && Access::due_within(stack, key, peer_address(), std::chrono::milliseconds(1100)),
           "its timer runs to one RTO after it was sent");
     Access::fire_heartbeat_timer(stack, key);
     check(Access::primary_path(stack, key).error_count == 1, "and an unanswered one counts when it fires");
     check(Access::drain_sends(stack).empty(), "with no new probe before the next interval");
     check(Access::timer_armed(stack, key)
-          && !Access::due_within(stack, key, key.address, sctp_parameters::HB_INTERVAL),
+          && !Access::due_within(stack, key, peer_address(), sctp_parameters::HB_INTERVAL),
           "which the timer then runs to");
 }
 
@@ -586,16 +573,15 @@ void test_answer_returns_to_the_interval() {
     std::printf("A probe answered inside its RTO:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
-    auto sent = probe(stack, key, key.address);
+    Association_Key key = Access::establish(stack);
+    auto sent = probe(stack, key, peer_address());
     if (!sent) {
         check(false, "probe sent");
         return;
     }
     acknowledge(stack, *sent);
     check(Access::timer_armed(stack, key)
-          && !Access::due_within(stack, key, key.address, sctp_parameters::HB_INTERVAL),
+          && !Access::due_within(stack, key, peer_address(), sctp_parameters::HB_INTERVAL),
           "the timer goes back to the next interval, not the deadline");
 }
 
@@ -603,13 +589,12 @@ void test_idle_means_no_new_data_this_period() {
     std::printf("Idleness (8.3):\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
     Access::add_outstanding_data(stack, key);
     Peer_Path& path = Access::primary_path(stack, key);
     path.new_data_sent_at = path.hb_period_start - std::chrono::seconds(1);
 
-    check(probe(stack, key, key.address).has_value(),
+    check(probe(stack, key, peer_address()).has_value(),
           "DATA still outstanding from before the period does not stop a probe");
     Access::fire_heartbeat_timer(stack, key);
     Access::drain_sends(stack);
@@ -622,8 +607,7 @@ void test_alternate_ack_leaves_the_association_count() {
     std::printf("A HEARTBEAT ACK on a path that carries no DATA (8.1):\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
     confirm_second_path(stack, key);
 
     Access::tcb(stack, key).error_count = 3;
@@ -631,7 +615,7 @@ void test_alternate_ack_leaves_the_association_count() {
         acknowledge(stack, *sent);
     }
     check(Access::tcb(stack, key).error_count == 3, "does not clear the association error count");
-    if (auto sent = probe(stack, key, key.address)) {
+    if (auto sent = probe(stack, key, peer_address())) {
         acknowledge(stack, *sent);
     }
     check(Access::tcb(stack, key).error_count == 0, "one on the primary does");
@@ -641,20 +625,19 @@ void test_change_heartbeat() {
     std::printf("CHANGE HEARTBEAT (11.1.9):\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
     SCTP_Socket& api = Access::api(stack);
 
     check(api.sctp_change_heartbeat(key, second_address(), false) == Sctp_Status::UNKNOWN_DESTINATION, "refused for an unknown destination");
-    check(api.sctp_change_heartbeat(key, key.address, false) == Sctp_Status::OK, "accepted for a known one");
+    check(api.sctp_change_heartbeat(key, peer_address(), false) == Sctp_Status::OK, "accepted for a known one");
     check(!Access::timer_armed(stack, key), "disabling stops the path's timer");
     Access::fire_heartbeat_timer(stack, key);
     check(Access::drain_sends(stack).empty(), "and nothing is probed");
 
-    check(api.sctp_change_heartbeat(key, key.address, true, std::chrono::seconds(120)) == Sctp_Status::OK, "re-enabled with a new interval");
+    check(api.sctp_change_heartbeat(key, peer_address(), true, std::chrono::seconds(120)) == Sctp_Status::OK, "re-enabled with a new interval");
     check(Access::tcb(stack, key).hb_interval == std::chrono::seconds(120), "the interval is the association's");
     check(Access::timer_armed(stack, key)
-          && !Access::due_within(stack, key, key.address, std::chrono::seconds(120)),
+          && !Access::due_within(stack, key, peer_address(), std::chrono::seconds(120)),
           "and the next probe is at least that far off");
 }
 
@@ -662,8 +645,7 @@ void test_disabled_unconfirmed_path_gives_up_its_turn() {
     std::printf("Disabling heartbeat on an UNCONFIRMED path:\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
     Access::add_paths(stack, key, {second_address(), third_address()});
     Access::api(stack).sctp_change_heartbeat(key, second_address(), false);
 
@@ -675,11 +657,10 @@ void test_request_heartbeat() {
     std::printf("REQUESTHEARTBEAT (11.1.10):\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
 
     check(Access::api(stack).sctp_request_heartbeat(key, second_address()) == Sctp_Status::UNKNOWN_DESTINATION, "refused for an unknown destination");
-    check(Access::api(stack).sctp_request_heartbeat(key, key.address) == Sctp_Status::OK, "accepted for a known one");
+    check(Access::api(stack).sctp_request_heartbeat(key, peer_address()) == Sctp_Status::OK, "accepted for a known one");
     auto sent = Access::drain_sends(stack);
     check(sent.size() == 1 && is_type(sent[0], HEARTBEAT), "a HEARTBEAT goes out at once");
     check(Access::primary_path(stack, key).hb_outstanding, "and is awaited like any other");
@@ -689,8 +670,7 @@ void test_set_primary() {
     std::printf("SETPRIMARY (11.1.6):\n");
 
     SCTP_Socket stack;
-    Association_Key key{peer_address()};
-    Access::establish(stack, key);
+    Association_Key key = Access::establish(stack);
     Access::add_paths(stack, key, {second_address()});
 
     check(Access::api(stack).sctp_set_primary(key, second_address()) == Sctp_Status::UNCONFIRMED_DESTINATION, "refused for an UNCONFIRMED destination");

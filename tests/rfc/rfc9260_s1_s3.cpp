@@ -631,7 +631,7 @@ void s3_3_7_abort() {
         Access::establish(s);
         Access::send(s, {'a'});
         Access::send(s, std::vector<uint8_t>(3000, 'b'));
-        s.sctp_abort(key());
+        s.sctp_abort(Access::key(s));
         auto out = Access::sent(s);
         const Deliverable* abort = out.with(ABORT);
         req("9260-3.3.7-1", abort && !find_chunk(abort->packet, DATA) && out.data().empty(), "DATA is never bundled with ABORT");
@@ -680,7 +680,7 @@ void s3_3_8_shutdown() {
     {
         SCTP_Socket s;
         Access::establish(s);
-        s.sctp_shutdown(key());
+        s.sctp_shutdown(Access::key(s));
         req("9260-3.3.8-1", Access::sent(s).any(SHUTDOWN), "a graceful close starts with SHUTDOWN");
     }
     {

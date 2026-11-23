@@ -5,6 +5,7 @@
 #include <sctp/socket.hpp>
 #include <sctp/platform/compat.hpp>
 #include "protocol/serialize.hpp"
+#include "socket/internal.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -43,15 +44,16 @@ struct SCTP_Socket_Test_Access {
     static Result deliver(const Association_State* state, std::vector<SCTP_Chunk> chunks) {
         SCTP_Socket stack;
         sockaddr_in src = peer_address();
-        Association_Key key{src};
+        Association_Key key{};
         if (state) {
-            Association assoc = stack.init_new_association(key.address);
+            Association assoc = stack.init_new_association(src, PEER_PORT);
             assoc.state = *state;
             assoc.this_ver_tag = OUR_TAG;
             assoc.peer_ver_tag = *state == COOKIE_WAIT ? 0 : PEER_TAG;
             assoc.last_peer_tsn = 0;
-            assoc.primary_path = key.address;
-            stack.associations.insert_or_assign(key, assoc);
+            assoc.primary_path = src;
+            key = Association_Key{stack.next_association_id++};
+            stack.add_peer_addresses(key, stack.associations.insert_or_assign(key, assoc).first->second, {src});
         }
 
         SCTP_Packet packet;
@@ -62,6 +64,10 @@ struct SCTP_Socket_Test_Access {
         stack.handle_recv_packet(wire.data(), wire.size(), src);
 
         Result result{0, {}};
+        // A bundled COOKIE ECHO may have created the association.
+        if (Association_Key made = stack.association_at(peer_key(src, PEER_PORT)); made != Association_Key{}) {
+            key = made;
+        }
         result.delivered = messages(stack, key);
         auto now = std::chrono::steady_clock::now();
         while (auto pending = stack.sends.peek(now)) {

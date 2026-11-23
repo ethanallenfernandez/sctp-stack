@@ -102,6 +102,7 @@ Useful helpers:
 | Helper | Does |
 |---|---|
 | `establish(s, state, others, peer_rwnd)` | creates a TCB with fixed tags (`OUR_TAG`, `PEER_TAG`) and TSNs (`OUR_TSN`, `PEER_TSN`). Extra peer addresses start CONFIRMED. |
+| `key(s, ip, port)` | the id `s` holds for that peer, or the last one it held once the association is gone, so teardown checks still look under the right id. Helpers that take an `Association_Key` default to the default peer's. |
 | `initiate(s, ...)` / `respond(s, init, bundled)` | runs a real handshake in either role and returns each step's packets |
 | `receive(s, packet)` / `receive_wire(s, bytes)` | feed a parsed or raw packet in |
 | `sent(s)` / `sent_once(s)` | drain the send queue: all passes, or one transmission opportunity |
@@ -151,6 +152,7 @@ flowchart LR
 |---|---|
 | `check(cond, what)` / `report()` | PASS/FAIL line, exit status |
 | `wait_until(pred, ms)` | poll every 1 ms until true or timeout. The library's calls never block. |
+| `accepted_association(s, ms)` | the id of an association the peer started, from its COMM UP notification |
 | `await_established(s, key, ms)` | uses `sctp_send_data(key, {})`: `EMPTY_MESSAGE` means ESTABLISHED, and nothing is sent |
 | `send_wait`, `recv_wait`, `recv_from_wait`, `notification_wait` | retry wrappers |
 | `Raw_Peer` | a real UDP socket on 127.0.0.1 that speaks SCTP by hand |

@@ -29,7 +29,7 @@ void s9_1_abort() {
         Access::establish(s);
         Access::send(s, KB);
         std::vector<uint8_t> reason{'b', 'y', 'e'};
-        s.sctp_abort(key(), reason);
+        s.sctp_abort(Access::key(s), reason);
         auto out = Access::sent(s);
         const Deliverable* abort = out.with(ABORT);
         req("9260-9.1-1", abort != nullptr, "aborting sends ABORT");
@@ -73,7 +73,7 @@ void s9_2_shutdown() {
         Association& a = Access::establish(s);
         Access::send(s, KB);
         Access::sent(s);
-        s.sctp_shutdown(key());
+        s.sctp_shutdown(Access::key(s));
         bool waited = !Access::sent(s).any(SHUTDOWN);
         Access::receive(s, packet(OUR_TAG, {sack_chunk(OUR_TSN)}));
         auto out = Access::sent(s);
@@ -94,7 +94,7 @@ void s9_2_shutdown() {
     {
         SCTP_Socket s;
         Access::establish(s);
-        s.sctp_shutdown(key());
+        s.sctp_shutdown(Access::key(s));
         Access::sent(s);
         Access::notifications(s);
         bool resends = true;
@@ -111,7 +111,7 @@ void s9_2_shutdown() {
     {
         SCTP_Socket s;
         Association& a = Access::establish(s);
-        s.sctp_shutdown(key());
+        s.sctp_shutdown(Access::key(s));
         Access::sent(s);
         Access::fire(s, Expiration_Timer_Type::T2_SHUTDOWN);
         Access::sent(s);
@@ -136,7 +136,7 @@ void s9_2_shutdown() {
         SCTP_Socket s;
         Association& a = Access::establish(s);
         shutdown_from_peer(s);
-        Sctp_Status ignored = s.sctp_shutdown(key());
+        Sctp_Status ignored = s.sctp_shutdown(Access::key(s));
         shutdown_from_peer(s);
         auto out = Access::sent(s);
         req("9260-9.2-13", out.any(SHUTDOWN_ACK) && a.state == SHUTDOWN_ACK_SENT && Access::armed(s, Expiration_Timer_Type::T2_SHUTDOWN),
