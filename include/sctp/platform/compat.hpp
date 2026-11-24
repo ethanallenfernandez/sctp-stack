@@ -9,7 +9,7 @@
     #define WIN32_LEAN_AND_MEAN
   #endif
   #include <winsock2.h>   // must precede windows.h
-  #include <ws2tcpip.h>   // also provides socklen_t
+  #include <ws2tcpip.h>
   #include <bcrypt.h>
   #pragma comment(lib, "bcrypt.lib")
   #pragma comment(lib, "Ws2_32.lib")
@@ -142,8 +142,8 @@ inline int sctp_poll(
 #endif
 }
 
-// With DF set, Linux is also told to ignore its own PMTU cache, which RFC 8899
-// 4.5 requires of a sender doing DPLPMTUD.
+// With DF set, Linux is also told to ignore its own PMTU cache, leaving the
+// packet size entirely to DPLPMTUD.
 inline bool sctp_set_dont_fragment(sctp_socket_t s, bool on) {
 #ifdef _WIN32
     DWORD value = on ? 1 : 0;
@@ -169,8 +169,6 @@ inline bool sctp_enable_icmp_errors(sctp_socket_t s) {
 #endif
 }
 
-// Puts the socket in non-blocking mode so recvfrom() returns immediately when
-// no datagram is queued.
 inline bool sctp_set_nonblocking(sctp_socket_t s) {
 #ifdef _WIN32
     u_long mode = 1;
@@ -207,7 +205,7 @@ inline void random_bytes(uint8_t* buffer, size_t length) {
         ssize_t result = getrandom(buffer + filled, length - filled, 0);
         if (result == -1) {
             if (errno == EINTR) {
-                continue; // Retry on OS interrupt
+                continue;
             }
             throw std::runtime_error("getrandom failed: " + std::string(std::strerror(errno)));
         }

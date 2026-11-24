@@ -1,12 +1,11 @@
 #ifndef SCTP_WAKEUP_PAIR_HPP
 #define SCTP_WAKEUP_PAIR_HPP
 
-// Connected loopback UDP pair for interrupting the event loop's poll() from
-// another thread. A byte to the writer makes the reader readable; works under
-// both POSIX poll() and WSAPoll().
-
 #include <sctp/platform/compat.hpp>
 
+// Connected loopback UDP pair for interrupting the event loop's poll() from
+// another thread. A byte to the writer makes the reader readable, which works
+// under both POSIX poll() and WSAPoll().
 class Wakeup_Pair {
     public:
         Wakeup_Pair() = default;

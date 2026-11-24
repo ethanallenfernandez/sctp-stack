@@ -1,15 +1,6 @@
 #ifndef SCTP_EXPIRATION_QUEUE_HPP
 #define SCTP_EXPIRATION_QUEUE_HPP
 
-// Timer heap: T1-init, T1-cookie, T3-rtx, delayed SACK (RFC 9260 5.1, 6.2, 6.3.2).
-//
-// std::priority_queue cannot erase from the middle, so cancellation stamps each
-// entry with a generation and keeps the live one in `active`. Entries whose
-// generation no longer matches are discarded when they surface.
-//
-// Nothing here wakes the event loop; SCTP_Socket wraps these to do that after
-// releasing the lock.
-
 #include <sctp/protocol/association.hpp>
 #include <sctp/queues/deliverable.hpp>
 
@@ -69,11 +60,16 @@ struct Compare_Expiration {
     }
 };
 
+// Every protocol timer, one per key; scheduling a key replaces any timer already
+// running for it. std::priority_queue cannot erase from the middle, so each
+// entry is stamped with a generation and `active` holds the live one per key;
+// stale entries are discarded when they surface. Nothing here wakes the event
+// loop: SCTP_Socket wraps these to do that after releasing the lock.
 class Expiration_Queue {
     friend struct SCTP_Socket_Test_Access;
 
     public:
-        void schedule( // Also replaces any timer already running for this key.
+        void schedule(
             const Expiration_Key& key,
             std::chrono::steady_clock::time_point expiration,
             const Deliverable& retry

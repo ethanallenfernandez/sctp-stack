@@ -24,7 +24,7 @@ const std::array<uint32_t, 256>& crc32c_table() {
     return table;
 }
 
-} // namespace
+}
 
 uint32_t calculate_sctp_checksum(const uint8_t* data, size_t len) {
     const auto& table = crc32c_table();

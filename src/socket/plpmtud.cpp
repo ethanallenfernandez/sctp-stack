@@ -1,6 +1,5 @@
-// Datagram PLPMTUD (RFC 8899, 6.2 for SCTP and SCTP/UDP), kept per destination
-// as RFC 9260 7.3 requires, and the ICMP Packet Too Big messages that feed it
-// (RFC 9260 10, RFC 8899 4.6).
+// Datagram PLPMTUD for SCTP over UDP, kept per destination, and the ICMP Packet
+// Too Big messages that feed it.
 
 #include <sctp/socket.hpp>
 #include <sctp/protocol/tsn.hpp>
@@ -77,7 +76,7 @@ void SCTP_Socket::continue_plpmtu_search(const Association_Key& key, Peer_Path& 
     schedule_plpmtu_probe(key, path);
 }
 
-// 4.3: losing DATA on a path whose PLPMTU was raised past BASE_PLPMTU may mean
+// Losing DATA on a path whose PLPMTU was raised past BASE_PLPMTU may mean
 // the path no longer carries packets that large.
 void SCTP_Socket::check_for_black_hole(const Association_Key& key, Peer_Path& path) {
     Plpmtud& plpmtud = path.plpmtud;

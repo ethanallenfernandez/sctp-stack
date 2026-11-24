@@ -35,8 +35,8 @@ enum class Peer_Addr_State {
     ADDR_CONFIRMED
 };
 
+// sctp_address is the peer's IPv4 address and SCTP port.
 struct Peer_Addr_Change {
-    // The peer's IPv4 address and SCTP port.
     sockaddr_in sctp_address;
     Peer_Addr_State state;
 };

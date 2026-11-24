@@ -108,7 +108,7 @@ inline Peer_Path make_path(const sockaddr_in& address, bool confirmed) {
     return path;
 }
 
-// 7.3: the smallest PMDCS over the destinations DATA can go to, so a chunk
+// The smallest PMDCS over the destinations DATA can go to, so a chunk
 // retransmitted to an alternate still fits.
 inline uint32_t amdcs(const Association_TCB& assoc) {
     uint32_t smallest = 0;
@@ -121,7 +121,7 @@ inline uint32_t amdcs(const Association_TCB& assoc) {
 }
 
 // New DATA goes to the primary while it is active, and otherwise to one
-// alternate, the first active CONFIRMED path (8.2).
+// alternate, the first active CONFIRMED path.
 inline Peer_Path& data_path(Association_TCB& assoc) {
     Peer_Path& preferred = primary(assoc);
     if (preferred.active) {
@@ -137,7 +137,7 @@ inline const Peer_Path& data_path(const Association_TCB& assoc) {
     return data_path(const_cast<Association_TCB&>(assoc));
 }
 
-// 6.4: timed-out DATA goes to an active CONFIRMED path other than the one it
+// Timed-out DATA goes to an active CONFIRMED path other than the one it
 // was last sent to, the next such in list order, if there is one.
 inline Peer_Path& retransmission_path(Association_TCB& assoc, const sockaddr_in& last) {
     Peer_Path& preferred = data_path(assoc);
@@ -223,19 +223,17 @@ inline bool is_forming(Association_State state) {
     return state == COOKIE_WAIT || state == COOKIE_ECHOED;
 }
 
-// RFC 9260 6: DATA is sent and SACKs processed in these states...
 inline bool transmits_data(Association_State state) {
     return state == ESTABLISHED || state == SHUTDOWN_PENDING || state == SHUTDOWN_RECEIVED;
 }
 
-// ...and DATA is received in these.
 inline bool receives_data(Association_State state) {
     return state == ESTABLISHED || state == SHUTDOWN_PENDING || state == SHUTDOWN_SENT;
 }
 
 // The Heartbeat Info is ours to define: the nonce, then the destination's
 // address and UDP port as they sit in sockaddr_in. The send time is not in
-// here - the path records it after sendto, which is both more accurate and not
+// here: the path records it after sendto, which is both more accurate and not
 // something the peer can forge.
 constexpr size_t HEARTBEAT_INFO_SIZE = 14;
 
@@ -261,12 +259,10 @@ inline sockaddr_in heartbeat_info_destination(const std::vector<uint8_t>& info) 
     return destination;
 }
 
-// RFC 9260 3.3.10.1: Stream Identifier, then 16 reserved bits.
 inline error_cause invalid_stream_cause(uint16_t stream_id) {
     return error_cause{CAUSE_INVALID_STREAM_ID, {static_cast<uint8_t>(stream_id >> 8), static_cast<uint8_t>(stream_id), 0, 0}};
 }
 
-// RFC 9260 3.3.10.3: Measure of Staleness, in microseconds.
 inline error_cause stale_cookie_cause(uint32_t staleness_us) {
     return error_cause{CAUSE_STALE_COOKIE, be32_bytes(staleness_us)};
 }
@@ -277,8 +273,7 @@ inline auto generate_random(T& input) -> decltype(input) {
     return input;
 }
 
-// Initiate Tags and Tie-Tags are drawn from 1..2^32-1 (RFC 9260 5.3.1); 0 is
-// reserved for INIT and, in a cookie, means "no Tie-Tag".
+// 0 also means "no Tie-Tag" in a cookie, so Tie-Tags are drawn nonzero too.
 inline uint32_t generate_nonzero_tag() {
     uint32_t tag;
     do {

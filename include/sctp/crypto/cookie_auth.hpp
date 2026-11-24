@@ -11,9 +11,13 @@
 enum class Cookie_Result {
     VALID,
     INVALID,
-    STALE,            // past its lifespan; caller sends an ERROR
+    STALE,
 };
 
+// Signs and verifies State Cookies under a rotating secret, accepting the
+// previous one as well so a cookie issued just before a rotation still verifies.
+// verify() sets staleness_us only for STALE. clock is overridable so tests can
+// expire cookies without waiting.
 class Cookie_Auth {
 public:
     std::vector<uint8_t> generate(
@@ -28,7 +32,6 @@ public:
         const std::vector<uint32_t>& peer_addresses = {}
     );
 
-    // staleness_us is only set when the result is STALE.
     Cookie_Result verify(
         const std::vector<uint8_t>& cookie,
         const SCTP_Common_Header& header,
@@ -37,7 +40,6 @@ public:
         uint32_t& staleness_us
     );
 
-    // Overridable so tests can expire cookies without waiting.
     std::function<std::chrono::steady_clock::time_point()> clock = [] { return std::chrono::steady_clock::now(); };
 
 private:

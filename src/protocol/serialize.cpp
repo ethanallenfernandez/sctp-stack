@@ -5,11 +5,9 @@
 #include <stdexcept>
 #include <utility>
 #include "protocol/checksum.hpp"
-#include <sctp/platform/compat.hpp>   // htons/htonl/ntohs/ntohl
+#include <sctp/platform/compat.hpp>
 
 namespace {
-
-/*----------------- Network byte order (big-endian) helpers -----------------*/
 
 void append16(std::vector<uint8_t>& out, uint16_t v) {
     uint16_t n = htons(v);
@@ -35,9 +33,8 @@ uint32_t read32(const uint8_t* p) {
     return ntohl(n);
 }
 
-// The CRC32c checksum is the one field NOT in network byte order: RFC 9260 §6.8
-// (via RFC 3309) places it on the wire in little-endian. Writing it big-endian
-// like every other field is a classic interop bug, so it gets explicit helpers.
+// The checksum is the one field not in network byte order: it goes on the wire
+// little-endian, so it gets its own helpers.
 void write_checksum_le(uint8_t* p, uint32_t v) {
     p[0] = static_cast<uint8_t>(v      );
     p[1] = static_cast<uint8_t>(v >>  8);
@@ -126,7 +123,6 @@ Chunk_Value_Type deserialize_chunk_value(Chunk_Type type, const uint8_t* data, s
             return error;
         }
         default:
-            // RFC 9260 3.2: the upper two type bits decide; the dispatcher acts on them.
             return unknown_chunk_value{std::vector<uint8_t>(data, data + len)};
     }
 }
@@ -184,12 +180,10 @@ void serialize_chunk(const SCTP_Chunk& chunk, std::vector<uint8_t>& out) {
             serialize_sack_chunk(std::get<sack_chunk_value>(value), out);
             break;
         default:
-            // Lets tests and cause-6 reports put an arbitrary chunk on the wire.
             out.append_range(std::get<unknown_chunk_value>(value).body);
             break;
     }
 
-    // Chunk Length covers the header and body but excludes trailing padding.
     uint16_t length = static_cast<uint16_t>(out.size() - start);
     out[start] = chunk.chunk_header.type;
     out[start + 1] = chunk.chunk_header.flag;
@@ -198,9 +192,7 @@ void serialize_chunk(const SCTP_Chunk& chunk, std::vector<uint8_t>& out) {
     out.resize(start + padded(length), 0);
 }
 
-} // namespace
-
-/*------------------- RFC 9260 3.2.1 parameters and 5.1.3 cookie ------------*/
+}
 
 void append_parameter(std::vector<uint8_t>& out, uint16_t type, const uint8_t* value, size_t len) {
     size_t total = SCTP_CHUNK_HEADER_SIZE + len;
@@ -211,7 +203,7 @@ void append_parameter(std::vector<uint8_t>& out, uint16_t type, const uint8_t* v
     append16(out, type);
     append16(out, static_cast<uint16_t>(total));
     out.insert(out.end(), value, value + len);
-    out.resize(out.size() + padded(total) - total, 0);   // padding is not counted in Length
+    out.resize(out.size() + padded(total) - total, 0);
 }
 
 bool find_parameter(const std::vector<uint8_t>& params, uint16_t type, std::vector<uint8_t>& value_out) {
@@ -261,7 +253,7 @@ std::vector<uint8_t> serialize_state_cookie(const State_Cookie& cookie) {
 
     out.push_back(cookie.version);
     out.push_back(cookie.secret_generation);
-    append16(out, 0);                                                   // reserved
+    append16(out, 0); // reserved
     append32(out, static_cast<uint32_t>(cookie.created_us >> 32));
     append32(out, static_cast<uint32_t>(cookie.created_us));
     append32(out, cookie.lifespan_us);
@@ -282,8 +274,6 @@ std::vector<uint8_t> serialize_state_cookie(const State_Cookie& cookie) {
     append32(out, cookie.local_tie_tag);
     append32(out, cookie.peer_tie_tag);
 
-    // A field added without bumping STATE_COOKIE_BODY_SIZE shifts the MAC
-    // boundary and silently breaks every cookie.
     if (out.size() != STATE_COOKIE_BODY_SIZE) {
         throw std::runtime_error("state cookie body size does not match STATE_COOKIE_BODY_SIZE");
     }
@@ -352,8 +342,6 @@ SCTP_Packet deserialize_sctp_packet(const uint8_t* data, size_t len) {
             throw std::runtime_error("truncated chunk header");
         }
         SCTP_Chunk_Header header{static_cast<Chunk_Type>(data[offset]), data[offset + 1], read16(data + offset + 2)};
-        // Chunk Length counts the 4-byte header itself, so anything below that
-        // is malformed. Without this check the subtraction wraps around.
         if (header.length < SCTP_CHUNK_HEADER_SIZE || header.length > len - offset) {
             throw std::runtime_error("chunk length out of range");
         }
@@ -362,7 +350,6 @@ SCTP_Packet deserialize_sctp_packet(const uint8_t* data, size_t len) {
             std::get<data_chunk_value>(chunk.chunk_value).flags = header.flag & (DATA_FLAG_U | DATA_FLAG_B | DATA_FLAG_E);
         }
         out.chunks.push_back(std::move(chunk));
-        // The final chunk in a packet may omit its padding.
         offset = std::min(len, offset + padded(header.length));
     }
     return out;
@@ -372,7 +359,6 @@ std::vector<uint8_t> serialize_sctp_packet(const SCTP_Packet& pkt) {
     std::vector<uint8_t> out;
     out.reserve(SCTP_COMMON_HEADER_SIZE + 64);
 
-    // Write header with checksum = 0, then fill it in once the body is known.
     append16(out, pkt.header.src_port);
     append16(out, pkt.header.des_port);
     append32(out, pkt.header.verification_tag);

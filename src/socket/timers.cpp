@@ -1,7 +1,7 @@
-// Timer expiry and retransmission scheduling: T1-init and T1-cookie backoff
-// (RFC 9260 5.1.6), the T3-rtx timer and its congestion response (6.3.3, 7.2.3),
-// the RTO estimator (6.3.1), and building the packets that carry chunks marked
-// for retransmission.
+// Timer expiry and retransmission scheduling: T1-init and T1-cookie backoff,
+// the T3-rtx timer and its congestion response, heartbeats and path failure,
+// the shutdown timers, the RTO estimator, and building the packets that carry
+// chunks marked for retransmission.
 
 #include <sctp/socket.hpp>
 #include <sctp/protocol/tsn.hpp>
@@ -176,7 +176,7 @@ void SCTP_Socket::handle_t3_expiration(const Association_Key& location, const so
     schedule_pending_retransmission(location);
 }
 
-// RFC 9260 8.3. A path's timer runs to its next probe, or, while a probe is
+// A path's heartbeat timer runs to its next probe, or, while a probe is
 // out, to one RTO after it was sent. A path is idle when no new DATA went to it
 // since its last probe was due.
 void SCTP_Socket::handle_heartbeat_expiration(const Association_Key& location, const sockaddr_in& destination) {
@@ -194,7 +194,6 @@ void SCTP_Socket::handle_heartbeat_expiration(const Association_Key& location, c
         bool was_probing = probes_for_confirmation(*assoc, *path);
         bool carries_data = path->confirmed && &data_path(*assoc) == path;
         count_path_error(location, *path);
-        // 8.1: an unreachable peer is not sent an ABORT, it is simply gone.
         if (carries_data && ++assoc->paths.error_count > sctp_parameters::ASSOCIATION_MAX_RETRANS) {
             return remove_association(location, Assoc_Change_State::COMM_LOST);
         }
@@ -278,7 +277,7 @@ void SCTP_Socket::arm_confirmation_probes(const Association_Key& key, Associatio
     }
 }
 
-// 8.3: an inactive path stops counting.
+// An inactive path stops counting errors.
 void SCTP_Socket::count_path_error(const Association_Key& key, Peer_Path& path) {
     if (path.active && ++path.error_count > sctp_parameters::PATH_MAX_RETRANS) {
         path.active = false;
@@ -304,6 +303,7 @@ void SCTP_Socket::record_heartbeat_sent(const Association_Key& location, const s
     }
 }
 
+// RTTVAR is updated before SRTT so both use the previous SRTT.
 void SCTP_Socket::update_rto(Peer_Path& path, std::chrono::microseconds measurement) {
     if (!path.has_srtt) {
         path.srtt = measurement;
@@ -312,7 +312,6 @@ void SCTP_Socket::update_rto(Peer_Path& path, std::chrono::microseconds measurem
     } else {
         using std::chrono::duration_cast;
         using sctp_parameters::RTO_ALPHA, sctp_parameters::RTO_BETA;
-        // RTTVAR first, so both use the previous SRTT.
         path.rttvar = duration_cast<std::chrono::microseconds>((1.0 - RTO_BETA) * path.rttvar + RTO_BETA * std::chrono::abs(path.srtt - measurement));
         path.srtt = duration_cast<std::chrono::microseconds>((1.0 - RTO_ALPHA) * path.srtt + RTO_ALPHA * measurement);
     }
@@ -328,6 +327,8 @@ void SCTP_Socket::update_rto(Peer_Path& path, std::chrono::microseconds measurem
 }
 
 // One packet of the lowest marked TSNs that share a destination, sent there.
+// Gated, it waits for that destination's cwnd; T3-rtx and Fast Retransmit send
+// their first packet regardless.
 void SCTP_Socket::schedule_pending_retransmission(const Association_Key& key, bool gated) {
     Association_TCB* found = find_tcb(key);
     if (found == nullptr) {

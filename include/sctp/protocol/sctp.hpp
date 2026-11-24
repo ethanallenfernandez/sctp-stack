@@ -7,7 +7,7 @@
 #include <variant>
 #include <chrono>
 
-// These are intentionally NOT sizeof() of the structs below: struct fields hold HOST byte order.
+// Wire sizes, not sizeof(): the structs below hold host byte order and are not laid out as on the wire.
 constexpr size_t SCTP_COMMON_HEADER_SIZE = 12;
 constexpr size_t SCTP_CHUNK_HEADER_SIZE  = 4;
 constexpr size_t DATA_CHUNK_HEADER_SIZE  = 16;
@@ -15,7 +15,6 @@ constexpr size_t SCTP_CHECKSUM_OFFSET    = 8;
 constexpr size_t UDP_HEADER_SIZE         = 8;
 constexpr size_t IPV4_HEADER_SIZE        = 20;
 
-// RFC 9260 section 16 recommended values. Names match the RFC's.
 namespace sctp_parameters {
     inline constexpr std::chrono::milliseconds RTO_INITIAL = std::chrono::seconds{1};
     inline constexpr std::chrono::milliseconds RTO_MIN = std::chrono::seconds{1};
@@ -30,10 +29,10 @@ namespace sctp_parameters {
     inline constexpr std::chrono::milliseconds HB_INTERVAL =  std::chrono::seconds{30};
     inline constexpr uint32_t HB_MAX_BURST = 1;
     inline constexpr std::chrono::milliseconds SACK_DELAY{200};
-} // namespace sctp_parameters
+}
 
-// RFC 8899 5.1. Sizes are of the UDP datagram, the PL packet for SCTP/UDP
-// (6.2.2.2). MAX_PLPMTU is an Ethernet MTU less the IPv4 header.
+// Sizes are of the UDP datagram, the PL packet for SCTP/UDP. MAX_PLPMTU is an
+// Ethernet MTU less the IPv4 header.
 namespace plpmtud_parameters {
     inline constexpr uint32_t MIN_PLPMTU = 68 - IPV4_HEADER_SIZE;
     inline constexpr uint32_t BASE_PLPMTU = 1200;
@@ -41,7 +40,7 @@ namespace plpmtud_parameters {
     inline constexpr uint8_t MAX_PROBES = 3;
     inline constexpr std::chrono::milliseconds PROBE_TIMER = std::chrono::seconds{15};
     inline constexpr std::chrono::milliseconds PMTU_RAISE_TIMER = std::chrono::seconds{600};
-} // namespace plpmtud_parameters
+}
 
 // All multi-byte fields below are in HOST byte order.
 struct SCTP_Common_Header {
@@ -68,7 +67,7 @@ enum Chunk_Type : uint8_t {
     PAD = 0x84, // RFC 4820
 };
 
-constexpr uint8_t CHUNK_FLAG_T_BIT = 0x01;   // ABORT, SHUTDOWN COMPLETE: tag is reflected
+constexpr uint8_t CHUNK_FLAG_T_BIT = 0x01;
 constexpr uint8_t DATA_FLAG_E = 0x01;
 constexpr uint8_t DATA_FLAG_B = 0x02;
 constexpr uint8_t DATA_FLAG_U = 0x04;
@@ -109,13 +108,13 @@ struct init_chunk_value {
     std::vector<uint8_t> optional_parameters;
 };
 
+// flags holds U, B and E only; the I bit is set per transmission.
 struct data_chunk_value {
     uint32_t tsn;
     uint16_t stream_identifier;
     uint16_t stream_seq_num;
     uint32_t payload_protocal;
     std::vector<uint8_t> user_data;
-    // U, B and E. The I bit is not kept here: it is set per transmission.
     uint8_t flags{DATA_FLAG_B | DATA_FLAG_E};
 };
 
@@ -170,17 +169,21 @@ constexpr size_t STATE_COOKIE_SIZE = STATE_COOKIE_BODY_SIZE + STATE_COOKIE_MAC_S
 constexpr uint8_t STATE_COOKIE_VERSION = 1;
 constexpr size_t COOKIE_SECRET_SIZE = 32;
 
+// Host byte order throughout. secret_generation selects the rotating secret that
+// signed it, created_us is steady_clock time, peer_udp_port is the INIT's
+// encapsulation port that every peer address starts at, and peer_addresses are
+// the INIT's IPv4 addresses other than peer_ipv4.
 struct State_Cookie {
-    uint8_t version;                  // STATE_COOKIE_VERSION
-    uint8_t secret_generation;        // selects the rotating secret that signed this
-    uint64_t created_us;              // steady_clock, microseconds
-    uint32_t lifespan_us;             // Valid.Cookie.Life
-    uint16_t sctp_src_port;           // peer's, from the INIT common header
-    uint16_t sctp_dst_port;           // ours
-    uint32_t peer_ipv4;               // host order; serializer applies htonl
-    uint16_t peer_udp_port;           // host order; the INIT's encapsulation port, which every address starts with
-    uint32_t local_ver_tag;           // tag we advertised in INIT ACK
-    uint32_t peer_ver_tag;            // INIT Initiate Tag
+    uint8_t version;
+    uint8_t secret_generation;
+    uint64_t created_us;
+    uint32_t lifespan_us;
+    uint16_t sctp_src_port;
+    uint16_t sctp_dst_port;
+    uint32_t peer_ipv4;
+    uint16_t peer_udp_port;
+    uint32_t local_ver_tag;
+    uint32_t peer_ver_tag;
     uint32_t local_initial_tsn;
     uint32_t peer_initial_tsn;
     uint32_t peer_a_rwnd;
@@ -190,12 +193,12 @@ struct State_Cookie {
     uint16_t peer_in_streams;
     uint32_t local_tie_tag;
     uint32_t peer_tie_tag;
-    std::vector<uint32_t> peer_addresses; // host order; the INIT's IPv4 addresses other than peer_ipv4
+    std::vector<uint32_t> peer_addresses;
     uint8_t mac[STATE_COOKIE_MAC_SIZE];
 };
 
 struct SCTP_Chunk_Header {
-    Chunk_Type type; // uint8_t enum
+    Chunk_Type type;
     uint8_t flag;
     uint16_t length;
 };

@@ -25,6 +25,8 @@ enum Association_State {
     SHUTDOWN_ACK_SENT
 };
 
+// destination is where the chunk was last sent, or, while pending
+// retransmission, where it goes next.
 struct Outstanding_Data {
     data_chunk_value data;
     std::chrono::steady_clock::time_point first_sent;
@@ -34,7 +36,6 @@ struct Outstanding_Data {
     uint16_t missing_reports;
     bool fast_retransmitted;
     bool pending_retransmission;
-    // Where it was last sent, or, while pending retransmission, where it goes next.
     sockaddr_in destination{};
 };
 
@@ -44,15 +45,15 @@ struct Acked_Retransmission {
     sockaddr_in destination;
 };
 
-// A chunk received above the Cumulative TSN Ack. `assembled` once its message
-// was completed ahead of the cumulative point and taken out of the chunks: the
-// entry stays only for the SACK, and is never dropped to make room.
+// A chunk received above the Cumulative TSN Ack. Once its message completes
+// ahead of the cumulative point it is marked assembled: the entry then stays
+// only for the SACK and is never dropped to make room.
 struct Held_Chunk {
     data_chunk_value data;
     bool assembled{false};
 };
 
-// Bytes of one message handed to the ULP; `complete` is false while more of it is to follow.
+// Bytes of one message handed to the ULP, incomplete while more of it is to follow.
 struct Delivery {
     std::vector<uint8_t> bytes;
     bool complete{true};
@@ -76,11 +77,11 @@ struct Outbound_Message {
     uint32_t ppid{0};
 };
 
-// The message whose fragments are being consumed in TSN order.
+// The message whose fragments are being consumed in TSN order. Once partially
+// delivered, part of it has gone to the ULP ahead of its end and the rest
+// follows as it arrives.
 struct Reassembly {
     bool open{false};
-    // Part of the message has gone to the ULP ahead of its end: the rest
-    // follows as it arrives.
     bool partially_delivered{false};
     bool unordered{false};
     uint16_t stream{0};
@@ -97,7 +98,7 @@ enum class Plpmtud_State {
     ERROR,
 };
 
-// RFC 8899 5.1.3 for one destination. search_high is the smallest size known
+// DPLPMTUD state for one destination. search_high is the smallest size known
 // not to get through, above MAX_PLPMTU until one is found. confirming marks a
 // probe at the PLPMTU itself, sent in SEARCH_COMPLETE on suspicion of a black hole.
 struct Plpmtud {
@@ -112,12 +113,13 @@ struct Plpmtud {
 };
 
 // A destination of the peer, at the UDP encapsulation port this address last
-// sent from. The SCTP port is the association's.
+// sent from; the SCTP port is the association's. We send to it from the local
+// address its packets last arrived at (INADDR_ANY until then). new_data_sent_at
+// tracks first transmissions for heartbeat idleness, while data_sent_at tracks
+// any DATA and is moved forward by each idle cwnd decay.
 struct Peer_Path {
     sockaddr_in udp_address;
     bool confirmed;
-    // Our address its packets last arrived at, and so the one we send to it
-    // from. INADDR_ANY until then: the first address bound.
     in_addr source{};
     bool active{true};
     uint16_t error_count{0};
@@ -127,7 +129,6 @@ struct Peer_Path {
     std::chrono::steady_clock::time_point hb_sent_at{};
     std::chrono::steady_clock::time_point hb_next{};
     std::chrono::steady_clock::time_point hb_period_start{};
-    // Last first transmission of DATA, which makes the path not idle (8.3).
     std::chrono::steady_clock::time_point new_data_sent_at{};
     bool has_srtt{false};
     std::chrono::microseconds srtt{0};
@@ -136,18 +137,15 @@ struct Peer_Path {
     uint32_t cwnd{0};
     uint32_t ssthresh{0};
     uint32_t partial_bytes_acked{0};
-    // Set by a T3-rtx expiry, cleared by the next SACK acknowledging DATA sent
-    // here: until then only one packet may be in flight.
     bool single_packet_in_flight{false};
-    // Last DATA transmission, moved forward by each idle cwnd decay.
     std::chrono::steady_clock::time_point data_sent_at{};
     bool idle_decaying{false};
     Plpmtud plpmtud{};
 };
 
 // Who the peer is and the tags that prove it, for the association's life.
+// Host order; the peer's UDP encapsulation ports are per path.
 struct TCB_Peer {
-    // Host order. The peer's UDP encapsulation ports are per path.
     uint16_t sctp_port{};
     uint32_t this_ver_tag{};
     uint32_t peer_ver_tag{};
@@ -162,27 +160,28 @@ struct Handshake {
     uint8_t stale_cookie_retries{};
 };
 
+// error_count is association-wide; each path also counts its own.
 struct Paths {
     std::vector<Peer_Path> list;
     sockaddr_in primary{};
-    // Association-wide; each path also counts its own.
     uint16_t error_count{};
     std::chrono::milliseconds hb_interval{sctp_parameters::HB_INTERVAL};
 };
 
+// outbound holds ULP messages not yet cut into DATA chunks, and next_ssn is
+// indexed by stream. acked_retransmissions remembers retransmitted chunks
+// recently acked cumulatively, which the peer may yet report as duplicates.
+// cwnd is kept per path; burst_count is the new-DATA packets sent in the
+// current transmission opportunity.
 struct TCB_Send_Side {
-    // ULP messages not yet cut into DATA chunks.
     uint16_t out_streams{};
-    std::vector<uint16_t> next_ssn; // Indexed into by stream number
+    std::vector<uint16_t> next_ssn;
     std::deque<Outbound_Message> outbound;
     size_t outbound_bytes{};
 
     uint32_t next_tsn{};
-    // The peer's acknowledgement of our DATA.
     uint32_t cumulative_tsn_ack{};
     std::map<uint32_t, Outstanding_Data, Tsn_Less> outstanding;
-    // TSN and size of retransmitted chunks recently acked cumulatively, which
-    // the peer may yet report as Duplicate TSNs.
     std::deque<Acked_Retransmission> acked_retransmissions;
     std::optional<uint32_t> rtt_measurement_tsn{};
 
@@ -192,28 +191,25 @@ struct TCB_Send_Side {
     bool zero_window_probing{};
     bool sack_since_t3{};
 
-    // cwnd itself is kept per path.
     bool in_fast_recovery{};
     uint32_t fast_recovery_exit_tsn{};
-    // New-DATA packets sent in the current transmission opportunity.
     uint32_t burst_count{};
 };
 
+// last_peer_tsn is our Cumulative TSN Ack point. our_rwnd is the a_rwnd last
+// advertised and received_since_sack the user data the peer has sent against
+// it since. held_deliveries are messages completed while another is part way
+// through partial delivery, which has the ULP's attention until its end arrives.
 struct TCB_Receive_Side {
     uint16_t in_streams{};
-    // Our Cumulative TSN Ack point.
     uint32_t last_peer_tsn{};
     std::map<uint32_t, Held_Chunk, Tsn_Less> ooo;
     std::vector<uint32_t> duplicate_tsns;
     uint8_t delayed_sack_packet_count{};
-    // The a_rwnd we last advertised, and the user data received since, which
-    // the peer still counts against it.
     uint32_t our_rwnd{RWND};
     uint32_t received_since_sack{};
     Reassembly reassembly;
     std::unordered_map<uint16_t, Inbound_Stream> streams;
-    // Messages completed while another is part way through partial delivery,
-    // which has the ULP's attention until its end arrives.
     std::vector<Delivery> held_deliveries;
 };
 

@@ -10,7 +10,7 @@
 // Must exceed any cookie lifespan, so a cookie still inside it always has its
 // signing key retained.
 constexpr std::chrono::minutes COOKIE_SECRET_ROTATION{60};
-// Ceiling on VALID_COOKIE_LIFE plus a peer's Cookie Preservative (5.2.6).
+// Ceiling on VALID_COOKIE_LIFE plus a peer's Cookie Preservative.
 constexpr std::chrono::seconds MAX_COOKIE_LIFE{120};
 static_assert(MAX_COOKIE_LIFE < COOKIE_SECRET_ROTATION);
 
@@ -31,8 +31,6 @@ void Cookie_Auth::rotate_if_due() {
         return;
     }
 
-    // Retaining the outgoing key is what keeps cookies still inside
-    // VALID_COOKIE_LIFE verifying across a rotation.
     std::memcpy(previous, current, COOKIE_SECRET_SIZE);
     have_previous = true;
     random_bytes(current, COOKIE_SECRET_SIZE);
@@ -53,6 +51,10 @@ const uint8_t* Cookie_Auth::secret_for(uint8_t wanted_generation) {
     return nullptr;
 }
 
+// The ports are stored as the INIT carried them, the peer's as source and ours
+// as destination, which is also how the COOKIE ECHO carries them, so verify()
+// compares them without swapping. The stream counts are what we advertised;
+// init_new_association negotiates them against the peer's.
 std::vector<uint8_t> Cookie_Auth::generate(
     const SCTP_Common_Header& header,
     const init_chunk_value& init,
@@ -76,8 +78,6 @@ std::vector<uint8_t> Cookie_Auth::generate(
     cookie.created_us = now_us();
     cookie.lifespan_us = static_cast<uint32_t>(lifespan.count());
 
-    // src_port is the peer's and des_port ours in both the INIT and the
-    // COOKIE_ECHO, so verify() can compare these directly without swapping.
     cookie.sctp_src_port = header.src_port;
     cookie.sctp_dst_port = header.des_port;
     cookie.peer_ipv4 = ntohl(src.sin_addr.s_addr);
@@ -89,7 +89,6 @@ std::vector<uint8_t> Cookie_Auth::generate(
     cookie.peer_initial_tsn = init.initial_tsn;
     cookie.peer_a_rwnd = init.a_rwnd;
 
-    // What we advertised; init_new_association negotiates against the peer's.
     cookie.local_out_streams = LOCAL_OUT_STREAMS;
     cookie.local_in_streams = LOCAL_MAX_IN_STREAMS;
     cookie.peer_out_streams = init.out_streams;
@@ -99,8 +98,6 @@ std::vector<uint8_t> Cookie_Auth::generate(
     cookie.peer_tie_tag = peer_tie_tag;
     cookie.peer_addresses = peer_addresses;
 
-    // The MAC is a plain suffix covering the body only, so it can be written
-    // straight into the tail of the serialized buffer.
     std::vector<uint8_t> out = serialize_state_cookie(cookie);
     size_t body_size = out.size() - STATE_COOKIE_MAC_SIZE;
     hmac_sha256(current, COOKIE_SECRET_SIZE, out.data(), body_size, out.data() + body_size);

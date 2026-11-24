@@ -36,9 +36,8 @@ inline bool ssn_gt(uint16_t a, uint16_t b) {
     return distance != 0 && distance < HALF_SSN_SPACE;
 }
 
-// Whether a SACK reports this TSN as received: below the cumulative ack point,
-// or inside a Gap Ack Block (RFC 9260 3.3.4). Block offsets are 16-bit relative
-// to that point, so anything beyond UINT16_MAX cannot be covered.
+// Gap Ack Block offsets are 16-bit, so a TSN further than UINT16_MAX past the
+// cumulative point can never be covered.
 inline bool sack_acknowledges(const sack_chunk_value& sack, uint32_t tsn) {
     if (tsn_lte(tsn, sack.cumulative_tsn_ack)) {
         return true;
@@ -51,4 +50,4 @@ inline bool sack_acknowledges(const sack_chunk_value& sack, uint32_t tsn) {
         return offset >= block.start && offset <= block.end;
     });
 }
-#endif // SCTP_TSN_HPP
+#endif

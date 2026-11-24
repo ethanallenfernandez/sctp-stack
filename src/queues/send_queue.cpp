@@ -1,9 +1,3 @@
-// Three-tier outbound scheduling backing Send_Queue.
-//
-// Bodies moved verbatim out of SCTP_Socket::{enqueue_packet,
-// purge_queued_packets, remove_retransmissions} and the queue-touching halves
-// of run_sending and next_poll_timeout.
-
 #include <sctp/queues/send_queue.hpp>
 #include <sctp/protocol/tsn.hpp>
 #include "protocol/builders.hpp"
@@ -93,12 +87,10 @@ std::optional<Send_Queue::Pending> Send_Queue::peek_locked(std::chrono::steady_c
     return std::nullopt;
 }
 
+// A purge() between peek() and commit() may already have dropped the packet
+// along with its abandoned association; finding nothing then is correct.
 void Send_Queue::commit(const Pending& pending) {
     std::lock_guard<std::mutex> lock(mutex);
-    // The lock is released between peek() and commit(), so a purge() landing in
-    // that window can leave nothing to remove. Finding nothing is the correct
-    // outcome and not merely a guard: purge() dropped that packet because the
-    // association it belonged to was abandoned.
     std::deque<Queued>& queue = queue_for(pending.priority);
     auto it = std::ranges::find(queue, pending.id, &Queued::id);
     if (it != queue.end()) {
@@ -131,6 +123,8 @@ void Send_Queue::remove_acked_retransmissions(const Association_Key& location, c
     std::erase_if(retransmission, [](const Queued& queued) { return queued.deliverable.packet.chunks.empty(); });
 }
 
+// The only ERROR retransmitted is one bundled behind a COOKIE ECHO, so it goes
+// whenever the chunk it rides with does.
 void Send_Queue::remove_retransmissions_of_type(const Association_Key& location, Chunk_Type type, const sockaddr_in* destination) {
     std::lock_guard<std::mutex> lock(mutex);
     for (Queued& queued : retransmission) {
@@ -140,7 +134,6 @@ void Send_Queue::remove_retransmissions_of_type(const Association_Key& location,
             bool carried = std::ranges::any_of(chunks, [&](const SCTP_Chunk& chunk) {
                 return chunk.chunk_header.type == type;
             });
-            // The only ERROR retransmitted is one bundled behind a COOKIE ECHO, and it goes with it.
             if (carried) {
                 std::erase_if(chunks, [&](const SCTP_Chunk& chunk) {
                     return chunk.chunk_header.type == type || chunk.chunk_header.type == OP_ERROR;

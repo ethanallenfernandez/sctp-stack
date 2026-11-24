@@ -1,6 +1,3 @@
-// Loopback UDP wakeup pair backing Wakeup_Pair. The failure path saves and restores
-// the platform error code around close(), which clobbers it.
-
 #include <sctp/platform/wakeup_pair.hpp>
 #include <sctp/platform/compat.hpp>
 #include <iostream>

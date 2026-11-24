@@ -21,8 +21,8 @@ SCTP_Packet build_init_ack(uint16_t src_port, uint16_t des_port, uint32_t peer_t
 
 SCTP_Packet build_data(uint16_t src_port, uint16_t des_port, uint32_t peer_tag, std::vector<data_chunk_value> chunks);
 
-// RFC 8899 6.2.1.2: a HEARTBEAT and a PAD chunk filling the UDP datagram to
-// exactly plpmtu bytes. plpmtu is a multiple of 4.
+// A HEARTBEAT and a PAD chunk filling the UDP datagram to exactly plpmtu bytes,
+// which must be a multiple of 4.
 SCTP_Packet build_plpmtu_probe(uint16_t src_port, uint16_t des_port, uint32_t peer_tag, std::vector<uint8_t> info, uint32_t plpmtu);
 
 // Padded wire footprint of one DATA chunk, for callers bundling against PMDCS.

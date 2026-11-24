@@ -1,5 +1,3 @@
-// Timer heap backing Expiration_Queue.
-
 #include <sctp/queues/expiration_queue.hpp>
 
 void Expiration_Queue::schedule(

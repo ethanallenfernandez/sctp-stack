@@ -1,7 +1,6 @@
 // Inbound chunk handling: packet validation and dispatch, the four-way
-// handshake (RFC 9260 5.1), SACK processing and fast retransmit (6.2, 7.2.4),
-// SACK generation with gap ack blocks (3.3.4), and DATA reception with the
-// out-of-order buffer and reassembly.
+// handshake, SACK processing and fast retransmit, SACK generation, and DATA
+// reception with the out-of-order buffer, reassembly and ordered delivery.
 
 #include <sctp/socket.hpp>
 #include <sctp/platform/compat.hpp>
@@ -55,10 +54,8 @@ namespace {
             });
     }
 
-    // With the receive buffer full, a new chunk above everything received is
-    // dropped. One below it instead takes the place of the highest TSN held for
-    // reordering, which is dropped even if a Gap Ack Block already reported it.
-    // Each report is counted once: an entry is consumed when it is matched.
+    // Bytes the SACK reports as duplicates, per destination. An acked
+    // retransmission is consumed when matched, so each is counted once.
     uint32_t duplicate_bytes(Association_TCB& assoc, const sack_chunk_value& sack, std::vector<uint32_t>& per_path) {
         uint32_t total = 0;
         for (uint32_t tsn : sack.duplicate_tsns) {
@@ -85,6 +82,9 @@ namespace {
         return total;
     }
 
+    // With the receive buffer full, a new chunk above everything received is
+    // dropped. One below it instead takes the place of the highest TSN held for
+    // reordering, which is dropped even if a Gap Ack Block already reported it.
     bool make_room(TCB_Receive_Side& receive, uint32_t tsn, size_t& used) {
         auto highest = std::ranges::find_last_if(receive.ooo, [](const auto& entry) {
             return !entry.second.assembled;
@@ -186,7 +186,9 @@ namespace {
     }
 
     // A message lying wholly above the Cumulative TSN Ack is taken out as soon
-    // as its last fragment arrives, so a gap holds back only its own stream.
+    // as its last fragment arrives, so a gap holds back only its own stream. A
+    // neighbouring fragment belongs to it when it shares its stream and
+    // ordering and does not open or close another message.
     bool assemble_early(TCB_Receive_Side& receive, uint32_t tsn, std::vector<Delivery>& delivered) {
         auto usable = [&](uint32_t at) -> const data_chunk_value* {
             auto it = receive.ooo.find(at);
@@ -202,7 +204,6 @@ namespace {
         uint16_t stream = arrived->stream_identifier;
         uint16_t ssn = arrived->stream_seq_num;
         bool unordered = (arrived->flags & DATA_FLAG_U) != 0;
-        // A fragment of the same message that does not open or close another.
         auto continues = [&](const data_chunk_value* chunk, uint8_t foreign_edge) {
             return chunk != nullptr && (chunk->flags & foreign_edge) == 0 && chunk->stream_identifier == stream
                 && ((chunk->flags & DATA_FLAG_U) != 0) == unordered && (unordered || chunk->stream_seq_num == ssn);
@@ -394,6 +395,13 @@ namespace {
     }
 }
 
+// Unknown chunks are resolved by their type's upper bits before dispatch. A
+// leading COOKIE ECHO skipped the tag check, so it gates the rest of the packet:
+// an accepted cookie proves the header tag, since verify() matched it against
+// the cookie's local tag, which every accepting path leaves in the TCB. An INIT
+// carries no proof of origin, so it never moves where a path was last heard
+// from. DATA is taken once per packet, after every other chunk, and skips the
+// delayed SACK when it arrived with a COOKIE ECHO.
 void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockaddr_in& src, in_addr local) {
     if (n < SCTP_COMMON_HEADER_SIZE) {
         return;
@@ -450,9 +458,6 @@ void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockad
         it = (type & 0x80) ? in_pkt.chunks.erase(it) : in_pkt.chunks.erase(it, in_pkt.chunks.end());
     }
 
-    // A COOKIE ECHO skipped the tag check, so it gates the rest of the packet.
-    // An accepted cookie proves the header tag: verify() matched it against the
-    // cookie's local tag, which every accepting path leaves in the TCB.
     bool carried_cookie_echo = !in_pkt.chunks.empty() && in_pkt.chunks[0].chunk_header.type == COOKIE_ECHO;
     if (carried_cookie_echo) {
         if (!handle_cookie_echo(in_pkt.header, in_pkt.chunks[0], key, src)) {
@@ -460,18 +465,15 @@ void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockad
         }
     }
 
-    // An INIT carries no proof that it came from the peer.
     if (in_pkt.chunks.empty() || in_pkt.chunks[0].chunk_header.type != INIT) {
         record_arrival(key, src, local);
     }
 
-    // 9.2: any packet from the peer in SHUTDOWN-SENT gives it more time.
     if (Association_TCB* assoc = find_tcb(key); assoc != nullptr && assoc->state == SHUTDOWN_SENT) {
         assoc->paths.error_count = 0;
         restart_t2(key);
     }
 
-    // DATA is taken once per packet, after the rest.
     const SCTP_Common_Header& header = in_pkt.header;
     for (size_t i = carried_cookie_echo ? 1 : 0; i < in_pkt.chunks.size(); i++) {
         const SCTP_Chunk& chunk = in_pkt.chunks[i];
@@ -491,7 +493,6 @@ void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockad
         }
     }
 
-    // DATA bundled with a COOKIE ECHO must skip the delayed-SACK timer.
     handle_data_packet(in_pkt, key, src, carried_cookie_echo);
 
     if (!unrecognized.empty()) {
@@ -499,6 +500,11 @@ void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockad
     }
 }
 
+// False if the packet goes no further, once answered as an out of the blue
+// packet would be. Our SCTP port is our UDP port, so a packet for any other has
+// no endpoint here. A COOKIE ECHO passes unchecked: its cookie is verified
+// instead, and handle_recv_packet drops what is bundled behind it unless the
+// cookie is accepted.
 bool SCTP_Socket::validate_verification_tag(const SCTP_Packet& pkt, const Association_Key& key, const sockaddr_in& src) {
     if (pkt.chunks.empty()) {
         return false;
@@ -506,7 +512,6 @@ bool SCTP_Socket::validate_verification_tag(const SCTP_Packet& pkt, const Associ
 
     const SCTP_Chunk_Header& first = pkt.chunks[0].chunk_header;
 
-    // Our SCTP port is our UDP port; no endpoint here listens on any other.
     if (pkt.header.des_port != ntohs(local_address.sin_port)) {
         if (first.type != INIT) {
             answer_ootb(pkt, key, src);
@@ -523,9 +528,6 @@ bool SCTP_Socket::validate_verification_tag(const SCTP_Packet& pkt, const Associ
         return pkt.header.verification_tag == 0 && pkt.chunks.size() == 1;
     }
 
-    // 8.5.1 D: a restarting or colliding peer echoes under a tag the live TCB
-    // does not hold, so the cookie is checked instead. handle_recv_packet drops
-    // everything bundled behind it unless the cookie is accepted.
     if (first.type == COOKIE_ECHO) {
         return true;
     }
@@ -536,9 +538,6 @@ bool SCTP_Socket::validate_verification_tag(const SCTP_Packet& pkt, const Associ
         return false;
     }
 
-    // 8.5.1 B and C: the T bit says which tag the sender could reach for. Set, it
-    // had no TCB and echoed ours back, so the match is against the tag we handed
-    // the peer; clear, it held a TCB and addressed us under our own.
     if (first.type == ABORT || first.type == SHUTDOWN_COMPLETE) {
         uint32_t expected = (first.flag & CHUNK_FLAG_T_BIT)
             ? it->second.peer.peer_ver_tag
@@ -546,7 +545,6 @@ bool SCTP_Socket::validate_verification_tag(const SCTP_Packet& pkt, const Associ
         return expected != 0 && pkt.header.verification_tag == expected;
     }
 
-    // 8.5.1 E: the SHUTDOWN ACK belongs to an association this TCB replaced.
     if ((it->second.state == COOKIE_WAIT || it->second.state == COOKIE_ECHOED) && contains_chunk(pkt, SHUTDOWN_ACK)) {
         answer_ootb(pkt, key, src);
         return false;
@@ -555,7 +553,7 @@ bool SCTP_Socket::validate_verification_tag(const SCTP_Packet& pkt, const Associ
     return pkt.header.verification_tag == it->second.peer.this_ver_tag;
 }
 
-// 8.4: an unattributable packet is answered with an ABORT, except where a reply
+// An unattributable packet is answered with an ABORT, except where a reply
 // would bounce forever or the sender is already tearing the association down.
 // The rules are ordered: an ABORT anywhere in the packet outranks the rest.
 void SCTP_Socket::answer_ootb(const SCTP_Packet& pkt, const Association_Key& key, const sockaddr_in& src) {
@@ -594,16 +592,17 @@ void SCTP_Socket::report_unrecognized_chunks(const SCTP_Common_Header& header, c
     }
 }
 
+// An INIT carries no proof of origin, so an ABORT answering an invalid one is
+// sent under the INIT's own Initiate Tag where it has one, closing only the
+// association it asks for and never a TCB already held for the peer. In
+// COOKIE_WAIT the INIT ACK goes to the primary path: the address the ULP gave,
+// which the INIT must have listed to have found this TCB.
 void SCTP_Socket::handle_init(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const Association_Key& key, const sockaddr_in& src) {
     const auto& init = std::get<init_chunk_value>(chunk.chunk_value);
-    // The association closed here is the one this INIT asks for. A TCB already
-    // held for this peer survives: an INIT carries no proof of origin.
     if (init.initiate_tag == 0) {
         reply(header, key, src, header.verification_tag, ABORT, error_chunk_value{{error_cause{CAUSE_INVALID_MANDATORY_PARAM, {}}}}, CHUNK_FLAG_T_BIT);
         return;
     }
-    // The Initiate Tag is the peer's own, learned from the chunk rather than
-    // reflected off the header, so the T bit stays clear.
     if (init.out_streams == 0 || init.in_streams == 0) {
         reply(header, key, src, init.initiate_tag, ABORT, error_chunk_value{{error_cause{CAUSE_INVALID_MANDATORY_PARAM, {}}}});
         return;
@@ -631,8 +630,6 @@ void SCTP_Socket::handle_init(const SCTP_Common_Header& header, const SCTP_Chunk
             case SHUTDOWN_ACK_SENT:
                 return reply(header, key, reply_destination(assoc, src), assoc.peer.peer_ver_tag, SHUTDOWN_ACK, empty_chunk_value{});
             case COOKIE_WAIT:
-                // The primary path is the address the ULP gave, and the INIT
-                // reported it: that is how it found this TCB.
                 local_tag = assoc.peer.this_ver_tag;
                 local_tsn = assoc.send.next_tsn;
                 destination = primary(assoc).udp_address;
@@ -690,6 +687,10 @@ void SCTP_Socket::handle_init(const SCTP_Common_Header& header, const SCTP_Chunk
     )});
 }
 
+// A refused INIT ACK takes the TCB with it whether or not the optional ABORT
+// gets through; the ABORT follows remove_association's purge and, with no
+// Initiate Tag to use, reflects our own. Unrecognized parameters are reported in
+// an ERROR bundled behind the COOKIE ECHO, trimmed to fit beside it.
 void SCTP_Socket::handle_init_ack(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const Association_Key& key, const sockaddr_in& src) {
     const auto& init_ack = std::get<init_chunk_value>(chunk.chunk_value);
 
@@ -698,9 +699,6 @@ void SCTP_Socket::handle_init_ack(const SCTP_Common_Header& header, const SCTP_C
         return;
     }
 
-    // 3.3.3: the TCB goes whether or not the optional ABORT does. That ABORT
-    // follows the purge in remove_association; with no Initiate Tag to use,
-    // it reflects our own.
     auto refuse = [&](error_cause cause) {
         remove_association(key, Assoc_Change_State::CANT_STR_ASSOC);
         bool reflected = init_ack.initiate_tag == 0;
@@ -733,7 +731,6 @@ void SCTP_Socket::handle_init_ack(const SCTP_Common_Header& header, const SCTP_C
     assoc.receive.in_streams = std::min(LOCAL_MAX_IN_STREAMS, init_ack.out_streams);
     assoc.send.next_ssn.assign(assoc.send.out_streams, 0);
     assoc.state = COOKIE_ECHOED;
-    // COOKIE ECHO, then the ERROR chunk and cause headers.
     trim_reports(params.reported, amdcs(assoc) - std::min<size_t>(amdcs(assoc), 3 * SCTP_CHUNK_HEADER_SIZE + ((cookie.size() + 3) & ~size_t{3})), 0);
     cancel_expiration(Expiration_Key{key, Expiration_Timer_Type::T1_INIT});
     sends.remove_retransmissions_of_type(key, INIT);
@@ -757,6 +754,13 @@ SCTP_Packet SCTP_Socket::packet_to(const Association_TCB& assoc, Chunk_Type type
     return build_packet(ntohs(local_address.sin_port), assoc.peer.sctp_port, assoc.peer.peer_ver_tag, type, std::move(value), flag);
 }
 
+// Sets key to the association the cookie names, which the rest of the packet
+// belongs to. Against an existing TCB the tags select a case of Table 12: the
+// branches below are D, A and B in turn, and C or anything outside the table is
+// dropped. A zero Tie-Tag means none and never matches, and a stale cookie whose
+// tags both match is a retransmission rather than an error. A restart in
+// SHUTDOWN-ACK-SENT answers under the old tag, which the restarted peer reflects
+// back; a collision keeps any shutdown already under way.
 bool SCTP_Socket::handle_cookie_echo(
     const SCTP_Common_Header& header,
     const SCTP_Chunk& chunk,
@@ -788,7 +792,6 @@ bool SCTP_Socket::handle_cookie_echo(
         return true;
     }
 
-    // RFC 9260 5.2.4, Table 12. A zero Tie-Tag means "none" and never matches.
     Association_TCB& tcb = it->second;
     bool local_match = cookie.local_ver_tag == tcb.peer.this_ver_tag;
     bool peer_match = cookie.peer_ver_tag == tcb.peer.peer_ver_tag;
@@ -797,23 +800,18 @@ bool SCTP_Socket::handle_cookie_echo(
         && cookie.peer_tie_tag == tcb.peer.peer_tie_tag;
 
     sockaddr_in destination = reply_destination(tcb, src);
-    // Step 3: a stale cookie whose tags both match is a retransmission (case E).
     if (result == Cookie_Result::STALE && !(local_match && peer_match)) {
         reply(header, key, destination, cookie.peer_ver_tag, OP_ERROR, error_chunk_value{{stale_cookie_cause(staleness_us)}});
         return false;
     }
 
     if (local_match && peer_match) {
-        // D
         if (tcb.state == COOKIE_ECHOED) {
             tcb.state = ESTABLISHED;
             notify_assoc_change(key, Assoc_Change_State::COMM_UP);
             start_heartbeats(key, tcb);
         }
     } else if (!local_match && !peer_match && tie_tags_match) {
-        // A: peer restart
-        // The SHUTDOWN ACK is for the old association, so it goes under the old
-        // tag: the restarted peer reflects it back, which is what we accept.
         if (tcb.state == SHUTDOWN_ACK_SENT) {
             reply(header, key, destination, tcb.peer.peer_ver_tag, SHUTDOWN_ACK, empty_chunk_value{});
             reply(header, key, destination, cookie.peer_ver_tag, OP_ERROR, error_chunk_value{{error_cause{CAUSE_COOKIE_WHILE_SHUTTING_DOWN, {}}}});
@@ -829,7 +827,6 @@ bool SCTP_Socket::handle_cookie_echo(
         notify_assoc_change(key, Assoc_Change_State::RESTART);
         start_heartbeats(key, tcb);
     } else if (local_match) {
-        // B: collision, peer's tag is new or not yet known
         add_peer_addresses(key, tcb, cookie_addresses(cookie));
         tcb.peer.peer_ver_tag = cookie.peer_ver_tag;
         tcb.receive.last_peer_tsn = cookie.peer_initial_tsn - 1;
@@ -841,7 +838,6 @@ bool SCTP_Socket::handle_cookie_echo(
         tcb.receive.streams.clear();
         tcb.receive.held_deliveries.clear();
         tcb.receive.duplicate_tsns.clear();
-        // A shutdown in progress is kept rather than silently cancelled.
         if (is_forming(tcb.state)) {
             tcb.state = ESTABLISHED;
             notify_assoc_change(key, Assoc_Change_State::COMM_UP);
@@ -850,7 +846,6 @@ bool SCTP_Socket::handle_cookie_echo(
             arm_confirmation_probes(key, tcb);
         }
     } else {
-        // C, and anything not in the table
         return false;
     }
 
@@ -862,6 +857,8 @@ bool SCTP_Socket::handle_cookie_echo(
     return true;
 }
 
+// Every cause is passed up raw, unknown codes included, unless the ERROR is a
+// Stale Cookie consumed by handshake recovery.
 void SCTP_Socket::handle_error(const SCTP_Common_Header&, const SCTP_Chunk& chunk, const Association_Key& key, const sockaddr_in&) {
     const auto& error = std::get<error_chunk_value>(chunk.chunk_value);
     Association_TCB* assoc = find_tcb(key);
@@ -871,8 +868,6 @@ void SCTP_Socket::handle_error(const SCTP_Common_Header&, const SCTP_Chunk& chun
     auto stale = std::ranges::find_if(error.causes, [](const error_cause& cause) {
         return cause.code == CAUSE_STALE_COOKIE && cause.info.size() == 4;
     });
-    // Every cause is passed up raw, unknown codes included, unless the
-    // ERROR is consumed by handshake recovery.
     if (stale == error.causes.end() || assoc->state != COOKIE_ECHOED) {
         notifications.enqueue(Notification{Notification_Type::SCTP_REMOTE_ERROR, key, Remote_Error{error.causes}});
         return;
@@ -899,7 +894,7 @@ void SCTP_Socket::handle_abort(const SCTP_Common_Header&, const SCTP_Chunk&, con
     }
 }
 
-// 9.1: tear the association down locally, then tell the peer. The ABORT is
+// Tears the association down locally, then tell the peer. The ABORT is
 // enqueued after remove_association, whose purge would otherwise drop it along
 // with the DATA that must not accompany it.
 void SCTP_Socket::abort_association(const Association_Key& key, const SCTP_Common_Header& header, const sockaddr_in& src, std::vector<error_cause> causes) {
@@ -956,11 +951,11 @@ void SCTP_Socket::handle_cookie_ack(const SCTP_Common_Header&, const SCTP_Chunk&
     sends.remove_retransmissions_of_type(key, COOKIE_ECHO);
 }
 
+// The Info is echoed verbatim and the peer chooses its length, so an oversized
+// one would build a reply we cannot put on the wire.
 void SCTP_Socket::handle_heartbeat(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const Association_Key& key, const sockaddr_in& src) {
     const auto& info = std::get<heartbeat_chunk_value>(chunk.chunk_value).info;
     Association_TCB* assoc = find_tcb(key);
-    // The Info is echoed verbatim and the peer chooses its length, so an
-    // oversized one would build a reply we cannot put on the wire.
     if (assoc == nullptr || assoc->state == SHUTDOWN_SENT || assoc->state == SHUTDOWN_ACK_SENT
             || 2 * SCTP_CHUNK_HEADER_SIZE + info.size() > amdcs(*assoc)) {
         return;
@@ -968,8 +963,11 @@ void SCTP_Socket::handle_heartbeat(const SCTP_Common_Header& header, const SCTP_
     reply(header, key, src, assoc->peer.peer_ver_tag, HEARTBEAT_ACK, heartbeat_chunk_value{info});
 }
 
-// 5.4: the ACK is credited to the path its Info names, which may not be the
-// one it arrived from.
+// The ACK is credited to the path its Info names, which may not be the one it
+// arrived from. The nonce tells it from one answering a heartbeat two intervals
+// back, which would otherwise clear the error count of a failing path. Only the
+// path carrying DATA answers for the association, or an idle alternate would
+// keep alive one whose data path has failed.
 void SCTP_Socket::handle_heartbeat_ack(const SCTP_Common_Header&, const SCTP_Chunk& chunk, const Association_Key& key, const sockaddr_in&) {
     const auto& info = std::get<heartbeat_chunk_value>(chunk.chunk_value).info;
     if (info.size() != HEARTBEAT_INFO_SIZE) {
@@ -981,8 +979,6 @@ void SCTP_Socket::handle_heartbeat_ack(const SCTP_Common_Header&, const SCTP_Chu
         return;
     }
 
-    // The nonce tells this ACK from one answering a heartbeat two intervals
-    // back, which would otherwise clear the error count of a failing path.
     Association_TCB& assoc = *found;
     Peer_Path* path = find_path(assoc, heartbeat_info_destination(info));
     if (path != nullptr && path->plpmtud.probe_outstanding && heartbeat_info_nonce(info) == path->plpmtud.probe_nonce) {
@@ -997,8 +993,6 @@ void SCTP_Socket::handle_heartbeat_ack(const SCTP_Common_Header&, const SCTP_Chu
     path->hb_outstanding = false;
     update_rto(*path, std::chrono::duration_cast<std::chrono::microseconds>(now - path->hb_sent_at));
     clear_path_errors(key, *path);
-    // 8.1: only the path carrying DATA answers for the association, or an
-    // idle alternate would keep alive one whose data path has failed.
     if (&data_path(assoc) == path) {
         assoc.paths.error_count = 0;
     }
@@ -1017,7 +1011,7 @@ void SCTP_Socket::handle_heartbeat_ack(const SCTP_Common_Header&, const SCTP_Chu
 }
 
 // The Cumulative TSN Ack is applied as a SACK with no Gap Ack Blocks, except
-// that the missing blocks are not a renege (3.3.8): gap-acked chunks stay so.
+// that the missing blocks are not a renege: gap-acked chunks stay so.
 void SCTP_Socket::handle_shutdown(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const Association_Key& key, const sockaddr_in& src) {
     uint32_t cumulative_tsn_ack = std::get<shutdown_chunk_value>(chunk.chunk_value).cumulative_tsn_ack;
     Association_TCB* found = find_tcb(key);
@@ -1090,6 +1084,9 @@ void SCTP_Socket::handle_shutdown_complete(const SCTP_Common_Header&, const SCTP
     }
 }
 
+// send.outstanding is in TSN order, so the first chunk a destination has there
+// is its lowest TSN and the last its highest. A reneged chunk's miss is counted
+// where the renege is found and not again in the fast retransmit pass.
 void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const Association_Key& key, const sockaddr_in& src) {
     const auto& sack = std::get<sack_chunk_value>(chunk.chunk_value);
     Association_TCB* found = find_tcb(key);
@@ -1122,8 +1119,6 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
             ack.flight_before = bytes_in_flight(assoc, &path);
         }
 
-        // send.outstanding is in TSN order, so the first match is the lowest
-        // TSN and the last the highest.
         bool newly_acknowledged = false;
         std::vector<uint32_t> reneged_tsns;
         std::optional<uint32_t> htna;
@@ -1206,8 +1201,6 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
 
             const std::optional<uint32_t>& above = assoc.send.in_fast_recovery && cumulative_ack_advanced ? highest_reported : htna;
             bool was_reneged = std::ranges::contains(reneged_tsns, tsn);
-            // Reneging was already counted once while applying the Gap Ack
-            // state transition above.
             if (above && tsn_lt(tsn, *above) && !was_reneged) {
                 ++outstanding.missing_reports;
             }
@@ -1259,7 +1252,6 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
             assoc.send.zero_window_probing = false;
         }
 
-        // 6.3.2 R2-R4, and 7.2.4 step 4.
         for (auto&& [path, ack] : std::views::zip(paths, acks)) {
             auto earliest = ack.earliest ? assoc.send.outstanding.find(*ack.earliest) : assoc.send.outstanding.end();
             bool retransmits_earliest = schedule_fast_retransmission && earliest != assoc.send.outstanding.end()
@@ -1291,6 +1283,8 @@ void SCTP_Socket::send_sack(const Association_Key& key) {
     enqueue_packet(Deliverable{key, data_path(*assoc).udp_address, std::move(sack)});
 }
 
+// Receiver SWS avoidance: an opening too small to be worth a packet is held
+// back until it grows, while a shrinking window is always advertised as it is.
 SCTP_Packet SCTP_Socket::make_sack(const Association_Key& key, Association_TCB& assoc) {
     std::vector<sack_gap_ack_block> gaps;
     for (uint32_t tsn : assoc.receive.ooo | std::views::keys) {
@@ -1302,8 +1296,6 @@ SCTP_Packet SCTP_Socket::make_sack(const Association_Key& key, Association_TCB& 
         }
     }
 
-    // Receiver SWS avoidance: an opening too small to be worth a packet is held
-    // back until it grows. A shrinking window is always advertised as it is.
     uint32_t window = receive_window(key, assoc.receive);
     uint32_t believed = peer_view_of_window(assoc.receive);
     if (window > believed && window - believed < std::min<uint32_t>(RWND / 2, amdcs(assoc))) {
@@ -1318,8 +1310,14 @@ SCTP_Packet SCTP_Socket::make_sack(const Association_Key& key, Association_TCB& 
     return sack_packet;
 }
 
+// A chunk is dropped past what a Gap Ack Block can report, or when the receive
+// buffer is full and no room can be made. Once the window cannot take another
+// full-size chunk, the rest of the open message could only arrive after the ULP
+// reads, so it gets what there is; only the message next in its stream can go
+// up early, and the ULP sees it through to its end before anything else.
+// Deliveries are queued before any SACK is built so the window it advertises
+// counts them.
 void SCTP_Socket::handle_data_packet(const SCTP_Packet& packet, const Association_Key& key, const sockaddr_in& src, bool acknowledge_immediately) {
-    // 3.3.1: a DATA chunk carrying no user data is fatal to the association.
     for (const auto& chunk : packet.chunks) {
         if (chunk.chunk_header.type == DATA && std::get<data_chunk_value>(chunk.chunk_value).user_data.empty()) {
             return abort_association(key, packet.header, src, {error_cause{CAUSE_NO_USER_DATA, be32_bytes(std::get<data_chunk_value>(chunk.chunk_value).tsn)}});
@@ -1349,14 +1347,12 @@ void SCTP_Socket::handle_data_packet(const SCTP_Packet& packet, const Associatio
         const auto& data = std::get<data_chunk_value>(chunk.chunk_value);
         assoc.receive.received_since_sack += static_cast<uint32_t>(data.user_data.size());
         uint32_t tsn = data.tsn;
-        // RFC 9260 6.5: an invalid stream is still acked, but reported and never delivered.
         bool valid_stream = data.stream_identifier < assoc.receive.in_streams;
         if (tsn_lte(tsn, assoc.receive.last_peer_tsn) || assoc.receive.ooo.contains(tsn)) {
             assoc.receive.duplicate_tsns.push_back(tsn);
             saw_duplicate = true;
             continue;
         }
-        // Past what a Gap Ack Block can report, and past any window we can offer.
         if (tsn - assoc.receive.last_peer_tsn > UINT16_MAX || (used >= RWND && !make_room(assoc.receive, tsn, used)
                 && !(tsn == assoc.receive.last_peer_tsn + 1 && blocked_on_cumulative_tsn(assoc.receive)))) {
             dropped = true;
@@ -1386,10 +1382,6 @@ void SCTP_Socket::handle_data_packet(const SCTP_Packet& packet, const Associatio
         return;
     }
 
-    // Once the window cannot take another full-size chunk, the rest of the
-    // message could only arrive after the ULP reads, so it gets what there is.
-    // Only the message next in its stream can go up early: the ULP sees it
-    // through to its end before anything else.
     Reassembly& message = assoc.receive.reassembly;
     if (message.open && !message.bytes.empty() && used + amdcs(assoc) > RWND
             && (message.unordered || message.ssn == assoc.receive.streams[message.stream].next_ssn)) {
@@ -1400,8 +1392,6 @@ void SCTP_Socket::handle_data_packet(const SCTP_Packet& packet, const Associatio
             advance_stream(assoc.receive, message.stream, delivered);
         }
     }
-    // 9.2: in SHUTDOWN-SENT every DATA packet is answered with a SHUTDOWN,
-    // and with a SACK as well whenever the SHUTDOWN alone would not say it all.
     bool shutdown_sent = assoc.state == SHUTDOWN_SENT;
     SCTP_Packet shutdown;
     if (shutdown_sent) {
@@ -1415,7 +1405,6 @@ void SCTP_Socket::handle_data_packet(const SCTP_Packet& packet, const Associatio
         send_immediately = ++assoc.receive.delayed_sack_packet_count >= 2;
     }
 
-    // The window a SACK advertises counts what has been handed up.
     for (auto& delivery : delivered) {
         receives.push(key, std::move(delivery.bytes), delivery.complete, delivery.stream, delivery.ppid);
     }

@@ -176,7 +176,6 @@ void SCTP_Socket::run_sending() {
         if (!pending) {
             return;
         }
-        // handle_send_packet must not run under the send queue's lock.
         if (!handle_send_packet(pending->deliverable)) {
             sends.defer(std::chrono::steady_clock::now() + SEND_RETRY_DELAY);
             requeue_bundled_sack(*pending);
@@ -222,7 +221,7 @@ void SCTP_Socket::requeue_bundled_sack(const Send_Queue::Pending& pending) {
     enqueue_packet(Deliverable{pending.deliverable.location, pending.deliverable.destination, std::move(sack)});
 }
 
-// Max.Burst (6.1 D) is applied by counting the new-DATA packets each association
+// Max.Burst is applied by counting the new-DATA packets each association
 // sends in one pass of the send loop, rather than by clamping cwnd.
 void SCTP_Socket::start_transmission_opportunity() {
     std::lock_guard<std::mutex> assoc_lock(associations_mutex);
@@ -326,7 +325,7 @@ void SCTP_Socket::refill_new_data(Send_Allowances& allowances) {
     }
 }
 
-// 6.1 A: the first probe goes one RTO after the window is found closed with
+// The first zero window probe goes one RTO after the window is found closed with
 // nothing in flight. T3-rtx then retransmits it with exponential backoff.
 void SCTP_Socket::arm_zero_window_probes(const Send_Allowances& allowances) {
     for (const auto& [key, allowance] : allowances) {
@@ -365,8 +364,8 @@ void SCTP_Socket::run_receiving(sctp_socket_t socket, in_addr local) {
     }
 }
 
-// Wraps enqueue only to wake the loop, which may be in poll() with no deadline.
-
+// A reply to the datagram being handled leaves from the address it arrived at.
+// Wrapping enqueue also wakes the loop, which may be in poll() with no deadline.
 void SCTP_Socket::enqueue_packet(Deliverable deliverable, Send_Priority priority) {
     if (deliverable.source.s_addr == INADDR_ANY && inbound_datagram != nullptr
             && same_destination(deliverable.destination, inbound_datagram->src)) {
@@ -375,8 +374,6 @@ void SCTP_Socket::enqueue_packet(Deliverable deliverable, Send_Priority priority
     sends.enqueue(std::move(deliverable), priority);
     wake_event_loop();
 }
-
-// On SCTP_Socket rather than inline at each site: every scheduling path ends here.
 
 void SCTP_Socket::wake_event_loop() {
     wakeup.wake();
@@ -442,14 +439,14 @@ bool SCTP_Socket::handle_send_packet(const Deliverable& deliverable) {
     return true;
 }
 
+// A heartbeat arms no timer of its own, as its path's is already running. It is
+// timestamped here rather than when built so the RTT it measures excludes the
+// time it sat in the send queue.
 void SCTP_Socket::schedule_expirations_after_send(const Deliverable& deliverable, std::chrono::steady_clock::time_point sent_at) {
     bool sent_data = false;
     for (const auto& chunk : deliverable.packet.chunks) {
         Chunk_Type type = chunk.chunk_header.type;
         switch (type) {
-            // A heartbeat arms no timer of its own: its path's is already
-            // running. It is timestamped here rather than at build time so the RTT
-            // it measures excludes however long the packet sat in the send queue.
             case HEARTBEAT:
                 record_heartbeat_sent(deliverable.location, deliverable.destination,
                     std::get<heartbeat_chunk_value>(chunk.chunk_value).info, sent_at);
@@ -486,7 +483,6 @@ void SCTP_Socket::schedule_expirations_after_send(const Deliverable& deliverable
 
 // These wrap Expiration_Queue only to wake the loop: its poll() deadline goes
 // stale the moment the heap changes. The wake must be outside the queue's lock.
-
 void SCTP_Socket::schedule_expiration(const Expiration_Key& key, std::chrono::steady_clock::time_point expiration, const Deliverable& retry) {
     expirations.schedule(key, expiration, retry);
     wake_event_loop();

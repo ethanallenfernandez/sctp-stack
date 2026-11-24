@@ -1,5 +1,5 @@
 // SCTP_Socket lifecycle and the public API surface: construction, bind, run,
-// close, association setup (RFC 9260 5.1) and the send/receive entry points
+// close, association setup and the send/receive entry points
 // the application calls. Everything here runs on the caller's thread, not the
 // event loop.
 
@@ -213,8 +213,6 @@ Sctp_Status SCTP_Socket::sctp_associate(std::string_view ip_address, int sctp_po
     Association_Key key{next_association_id++};
     Association_TCB& assoc = associations.emplace(key, init_new_association(udp_address, peer_sctp_port)).first->second;
     add_peer_addresses(key, assoc, {udp_address});
-    // sin_port is already network order, so the builder's host-order ports need
-    // ntohs, not htons.
     enqueue_packet(Deliverable{key, assoc.paths.primary, build_init(ntohs(local_address.sin_port), assoc.peer.sctp_port,
         assoc.peer.this_ver_tag, assoc.send.next_tsn, 0, advertised_addresses())});
     out_association_id = key;
@@ -231,7 +229,6 @@ Association_TCB SCTP_Socket::init_new_association(const sockaddr_in& udp_address
     result.peer.this_ver_tag = generate_nonzero_tag();
     generate_random(result.send.next_tsn);
     result.send.cumulative_tsn_ack = result.send.next_tsn - 1;
-    // Upper bounds until the INIT ACK narrows them (5.1.1).
     result.send.out_streams = LOCAL_OUT_STREAMS;
     result.receive.in_streams = LOCAL_MAX_IN_STREAMS;
     result.send.next_ssn.assign(result.send.out_streams, 0);
@@ -249,7 +246,6 @@ Association_TCB SCTP_Socket::init_new_association(const State_Cookie& cookie) {
     result.receive.last_peer_tsn = cookie.peer_initial_tsn - 1;
     result.send.peer_rwnd = cookie.peer_a_rwnd;
     result.send.peer_max_rwnd = cookie.peer_a_rwnd;
-    // RFC 9260 5.1.1: each direction gets the smaller of what the two ends offered.
     result.send.out_streams = std::min(cookie.local_out_streams, cookie.peer_in_streams);
     result.receive.in_streams = std::min(cookie.local_in_streams, cookie.peer_out_streams);
     result.send.next_ssn.assign(result.send.out_streams, 0);
@@ -429,6 +425,9 @@ Sctp_Status SCTP_Socket::sctp_send_data(const Association_Key& association_id, c
     return Sctp_Status::OK;
 }
 
+// The association is removed before the ABORT is queued so the purge drops the
+// DATA that must not accompany it. In COOKIE_WAIT there is no peer tag to send
+// the ABORT under, so the association simply goes.
 Sctp_Status SCTP_Socket::sctp_abort(const Association_Key& association_id, const std::vector<uint8_t>& reason) {
     std::lock_guard<std::mutex> assoc_lock(associations_mutex);
     Association_TCB* assoc = find_tcb(association_id);
@@ -441,10 +440,8 @@ Sctp_Status SCTP_Socket::sctp_abort(const Association_Key& association_id, const
     std::vector<uint8_t> abort_reason(reason.begin(), reason.begin() + static_cast<long>(std::min(reason.size(), room)));
     SCTP_Packet abort = packet_to(*assoc, ABORT, error_chunk_value{{error_cause{CAUSE_USER_INITIATED_ABORT, std::move(abort_reason)}}});
 
-    // Purge first so it drops the queued DATA that MUST NOT accompany the ABORT
     remove_association(association_id);
 
-    // In COOKIE_WAIT there is no tag the peer would accept the ABORT under.
     if (peer_tag != 0) {
         enqueue_packet(Deliverable{association_id, destination, std::move(abort)});
     }
@@ -480,14 +477,14 @@ size_t SCTP_Socket::finish_read(const std::optional<Receive_Queue::Read>& read, 
     return read->bytes;
 }
 
+// An association still forming has nothing to close gracefully: as on Linux, it
+// is dropped without a word to the peer and without a notification.
 Sctp_Status SCTP_Socket::sctp_shutdown(const Association_Key& association_id) {
     std::lock_guard<std::mutex> assoc_lock(associations_mutex);
     Association_TCB* assoc = find_tcb(association_id);
     if (assoc == nullptr) {
         return Sctp_Status::NO_ASSOCIATION;
     }
-    // Before COMMUNICATION UP there is nothing to close gracefully. As Linux does,
-    // the TCB goes without a word to the peer and without a notification.
     if (is_forming(assoc->state)) {
         remove_association(association_id);
         return Sctp_Status::OK;

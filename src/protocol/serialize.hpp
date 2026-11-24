@@ -25,14 +25,16 @@ bool deserialize_state_cookie(const std::vector<uint8_t>& data, State_Cookie& ou
 
 void append_parameter(std::vector<uint8_t>& out, uint16_t type, const uint8_t* value, size_t len);
 bool find_parameter(const std::vector<uint8_t>& params, uint16_t type, std::vector<uint8_t>& value_out);
-// Every IPv4 Address parameter, host order.
+// Host order.
 std::vector<uint32_t> find_ipv4_addresses(const std::vector<uint8_t>& params);
 
 struct Parameter_Scan {
-    std::vector<uint8_t> recognized;              // only these are processed
-    std::vector<std::vector<uint8_t>> reported;   // whole TLVs, padded
+    std::vector<uint8_t> recognized;
+    std::vector<std::vector<uint8_t>> reported;
 };
-// A malformed Parameter Length ends the walk like a stop does.
+// recognized holds the parameters to process and reported the whole padded TLVs
+// to report as unrecognized. A malformed Parameter Length ends the walk like a
+// stop does.
 Parameter_Scan scan_parameters(const std::vector<uint8_t>& params, std::initializer_list<uint16_t> recognized);
 
 uint32_t sctp_read_wire_checksum(const uint8_t* data);

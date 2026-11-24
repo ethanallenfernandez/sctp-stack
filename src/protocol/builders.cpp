@@ -16,7 +16,7 @@ SCTP_Packet init_packet(Chunk_Type type, uint16_t src_port, uint16_t des_port, u
         init_chunk_value{initiate_tag, RWND, LOCAL_OUT_STREAMS, LOCAL_MAX_IN_STREAMS, initial_tsn, std::move(parameters)});
 }
 
-}   // namespace
+}
 
 SCTP_Packet build_packet(uint16_t src_port, uint16_t des_port, uint32_t tag, Chunk_Type type, Chunk_Value_Type value, uint8_t flag) {
     SCTP_Packet packet{{src_port, des_port, tag, 0}, {}};
@@ -32,7 +32,6 @@ SCTP_Packet build_init(uint16_t src_port, uint16_t des_port, uint32_t initiate_t
         std::vector<uint8_t> increment = be32_bytes(cookie_preservative_ms);
         append_parameter(parameters, PARAM_COOKIE_PRESERVATIVE, increment.data(), increment.size());
     }
-    // RFC 9260 8.5: a packet carrying INIT has a zero verification tag.
     return init_packet(INIT, src_port, des_port, 0, initiate_tag, initial_tsn, std::move(parameters));
 }
 

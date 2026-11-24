@@ -28,7 +28,6 @@ inline uint32_t rotr(uint32_t x, int n) {
 // One 64-byte block folded into the 256-bit state. The rounds are invertible;
 // the Davies-Meyer addition at the end is what makes the whole thing one-way.
 void compress(uint32_t h[8], const uint8_t block[64]) {
-    // Stretch 16 words to 64 so every round depends on every input word.
     uint32_t w[64];
     for (int i = 0; i < 16; i++) {
         w[i] = static_cast<uint32_t>(block[i * 4]) << 24
@@ -67,10 +66,12 @@ void compress(uint32_t h[8], const uint8_t block[64]) {
     h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
 }
 
-} // namespace
+}
 
+// The padded tail can take two blocks: past a remainder of 55 bytes the bit
+// length no longer fits in the last one. An empty message may pass a null data,
+// which memcpy must not see even for zero bytes.
 void sha256(const uint8_t* data, size_t len, uint8_t out[SHA256_DIGEST_SIZE]) {
-    // Fractional parts of the square roots of the first 8 primes.
     uint32_t h[8] = {
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
         0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
@@ -81,12 +82,8 @@ void sha256(const uint8_t* data, size_t len, uint8_t out[SHA256_DIGEST_SIZE]) {
         compress(h, data + i * SHA256_BLOCK_SIZE);
     }
 
-    // Padding: 0x80, zeros (free: the buffer zero-inits), then the bit length
-    // big-endian. At remainder >= 56 the length no longer fits in one block and
-    // a second is needed - the case most implementations get wrong.
     uint8_t tail[2 * SHA256_BLOCK_SIZE]{};
     size_t remainder = len - full_blocks * SHA256_BLOCK_SIZE;
-    // memcpy(dst, nullptr, 0) is UB, and an empty message passes a null `data`.
     if (remainder > 0) {
         std::memcpy(tail, data + full_blocks * SHA256_BLOCK_SIZE, remainder);
     }
@@ -114,7 +111,6 @@ void sha256(const uint8_t* data, size_t len, uint8_t out[SHA256_DIGEST_SIZE]) {
 // blocks length extension: SHA-256's output is its internal state, so a bare
 // H(key || m) would let anyone holding the tag forge one for m || anything.
 void hmac_sha256(const uint8_t* key, size_t key_len, const uint8_t* data, size_t len, uint8_t out[SHA256_DIGEST_SIZE]) {
-    // Long keys hashed down, short ones zero-extended.
     uint8_t padded_key[SHA256_BLOCK_SIZE]{};
     if (key_len > SHA256_BLOCK_SIZE) {
         sha256(key, key_len, padded_key);
@@ -129,7 +125,6 @@ void hmac_sha256(const uint8_t* key, size_t key_len, const uint8_t* data, size_t
         outer_key[i] = static_cast<uint8_t>(padded_key[i] ^ 0x5c);
     }
 
-    // Two-pass, not streaming: the only caller MACs 64 bytes.
     std::vector<uint8_t> inner_message;
     inner_message.reserve(SHA256_BLOCK_SIZE + len);
     inner_message.insert(inner_message.end(), inner_key, inner_key + SHA256_BLOCK_SIZE);
@@ -145,7 +140,6 @@ void hmac_sha256(const uint8_t* key, size_t key_len, const uint8_t* data, size_t
 }
 
 bool constant_time_equal(const uint8_t* a, const uint8_t* b, size_t len) {
-    // Accumulate rather than branch: runtime must not reveal where they differ.
     uint8_t difference = 0;
     for (size_t i = 0; i < len; i++) {
         difference |= static_cast<uint8_t>(a[i] ^ b[i]);
