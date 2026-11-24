@@ -72,9 +72,9 @@ void s1_6_serial_numbers() {
     section("1.6 Serial Number Arithmetic");
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
-        a.next_tsn = 0xFFFFFFFF;
-        a.cumulative_tsn_ack = 0xFFFFFFFE;
+        Association_TCB& a = Access::establish(s);
+        a.send.next_tsn = 0xFFFFFFFF;
+        a.send.cumulative_tsn_ack = 0xFFFFFFFE;
         Access::send(s, {'a'});
         Access::send(s, std::vector<uint8_t>(1000, 'b'));
         auto chunks = Access::sent(s).data();
@@ -82,7 +82,7 @@ void s1_6_serial_numbers() {
         req("9260-1.6-1", wrapped, "TSNs are assigned modulo 2^32");
         req("9260-1.6-4", wrapped, "the TSN after 2^32 - 1 is 0");
         Access::receive(s, packet(OUR_TAG, {sack_chunk(0)}));
-        req("9260-1.6-2", tsn_lt(0xFFFFFFFF, 0) && tsn_gt(0, 0xFFFFFFFF) && a.outstanding_data.empty(),
+        req("9260-1.6-2", tsn_lt(0xFFFFFFFF, 0) && tsn_gt(0, 0xFFFFFFFF) && a.send.outstanding.empty(),
             "TSN comparisons and SACK processing use serial arithmetic across the wrap");
     }
     {
@@ -93,8 +93,8 @@ void s1_6_serial_numbers() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
-        a.inbound_streams[0].next_ssn = 65535;
+        Association_TCB& a = Access::establish(s);
+        a.receive.streams[0].next_ssn = 65535;
         Access::receive(s, packet(OUR_TAG, {data_chunk(data(PEER_TSN, {'x'}, DATA_FLAG_B | DATA_FLAG_E, 0, 0))}));
         Access::receive(s, packet(OUR_TAG, {data_chunk(data(PEER_TSN + 1, {'w'}, DATA_FLAG_B | DATA_FLAG_E, 0, 65535))}));
         std::vector<uint8_t> buffer(8);
@@ -117,7 +117,7 @@ void s3_packet_format() {
         bool ack_alone = !resp.init_ack.empty() && only(resp.init_ack[0], INIT_ACK);
         SCTP_Socket t;
         Access::establish(t, SHUTDOWN_SENT);
-        Access::tcb(t)->duplicate_tsns.push_back(PEER_TSN - 1);
+        Access::tcb(t)->receive.duplicate_tsns.push_back(PEER_TSN - 1);
         Access::receive(t, packet(OUR_TAG, {chunk(SHUTDOWN_ACK, empty_chunk_value{})}));
         auto out = Access::sent(t);
         bool complete_alone = out.with(SHUTDOWN_COMPLETE) && only(out.with(SHUTDOWN_COMPLETE)->packet, SHUTDOWN_COMPLETE);
@@ -202,8 +202,8 @@ void s3_2_1_parameters() {
     std::vector<uint8_t> skipped = parameter(0x8005, {1, 2, 3});
     skipped.back() = 0xFF;
     auto r = Access::respond(s, init_value(PEER_TAG, PEER_TSN, RWND, 10, 10, concat({skipped, ipv4_parameter("127.0.0.2")})));
-    Association* a = Access::tcb(s);
-    req("9260-3.2.1-3", a && a->peer_address_list.size() == 2, "parameter padding is ignored: the address after it is read");
+    Association_TCB* a = Access::tcb(s);
+    req("9260-3.2.1-3", a && a->paths.list.size() == 2, "parameter padding is ignored: the address after it is read");
 }
 
 void s3_2_1_registry() {
@@ -384,10 +384,10 @@ void s3_3_2_init() {
         const Deliverable* abort = out.with(ABORT);
         req(abort_id, abort && abort->packet.header.verification_tag == init.initiate_tag, std::string(what) + ": ABORT under its Initiate Tag");
         SCTP_Socket live;
-        Association& a = Access::establish(live);
+        Association_TCB& a = Access::establish(live);
         Access::receive(live, packet(0, {chunk(INIT, init)}));
         Access::sent(live);
-        req(discard_id, a.state == ESTABLISHED && a.peer_ver_tag == PEER_TAG, std::string(what) + ": an existing association is untouched");
+        req(discard_id, a.state == ESTABLISHED && a.peer.peer_ver_tag == PEER_TAG, std::string(what) + ": an existing association is untouched");
     };
     refused(init_value(0x77777777, PEER_TSN, 1499), "9260-3.3.2-9", "9260-3.3.2-9", "INIT with a_rwnd below 1500");
     refused(init_value(0x77777777, PEER_TSN, RWND, 0, 10), "9260-3.3.2-12", "9260-3.3.2-12", "INIT with OS 0");
@@ -411,8 +411,8 @@ void s3_3_2_1_addresses() {
     {
         SCTP_Socket s;
         Access::respond(s);
-        Association* a = Access::tcb(s);
-        req("9260-3.3.2.1.2-2", a && a->peer_address_list.size() == 1 && same_destination(a->peer_address_list[0].address, addr()),
+        Association_TCB* a = Access::tcb(s);
+        req("9260-3.3.2.1.2-2", a && a->paths.list.size() == 1 && same_destination(a->paths.list[0].udp_address, addr()),
             "with no address parameters, the INIT's source is the only destination");
     }
     {
@@ -458,8 +458,8 @@ void s3_3_3_init_ack() {
     req("9260-3.3.3-17", ack && ack2 && ack->initial_tsn != ack2->initial_tsn, "the INIT ACK's Initial TSN is random");
     auto w = r.init_ack.empty() ? std::vector<uint8_t>{} : serialize_sctp_packet(r.init_ack[0]);
     req("9260-3.3.3.1-2", w.size() > 36 && be16(w, 32) == PARAM_STATE_COOKIE, "parameters follow the 16 fixed bytes");
-    Association* a = Access::tcb(s);
-    req("9260-3.3.3.1.1-1", a && a->peer_ver_tag == PEER_TAG && a->last_peer_tsn == PEER_TSN - 1 && a->this_ver_tag == r.our_tag,
+    Association_TCB* a = Access::tcb(s);
+    req("9260-3.3.3.1.1-1", a && a->peer.peer_ver_tag == PEER_TAG && a->receive.last_peer_tsn == PEER_TSN - 1 && a->peer.this_ver_tag == r.our_tag,
         "the cookie alone carries the state to create the association");
 
     {
@@ -469,8 +469,8 @@ void s3_3_3_init_ack() {
         req("9260-3.3.3-4", !ri.echo.empty() && ri.echo[0].header.verification_tag == PEER_TAG,
             "the INIT ACK's receiver sends under its Initiate Tag");
         req("9260-3.3.3-19", ri.echo.any(COOKIE_ECHO), "a complete INIT ACK is answered with COOKIE ECHO");
-        Association* ai = Access::tcb(i);
-        req("9260-3.3.3-20", ai && ai->peer_address_list.size() == 1, "with no address parameters, the source is the only destination");
+        Association_TCB* ai = Access::tcb(i);
+        req("9260-3.3.3-20", ai && ai->paths.list.size() == 1, "with no address parameters, the source is the only destination");
     }
     {
         SCTP_Socket i;
@@ -509,10 +509,10 @@ void s3_3_3_init_ack() {
     }
     auto established = [](init_chunk_value value, const char* id, const char* what) {
         SCTP_Socket e;
-        Association& a = Access::establish(e);
+        Association_TCB& a = Access::establish(e);
         value.optional_parameters = parameter(PARAM_STATE_COOKIE, std::vector<uint8_t>(16, 1));
         Access::receive(e, packet(OUR_TAG, {chunk(INIT_ACK, value)}));
-        req(id, Access::sent(e).empty() && a.state == ESTABLISHED && a.peer_ver_tag == PEER_TAG, std::string(what) + " in ESTABLISHED is silently discarded");
+        req(id, Access::sent(e).empty() && a.state == ESTABLISHED && a.peer.peer_ver_tag == PEER_TAG, std::string(what) + " in ESTABLISHED is silently discarded");
     };
     established(init_value(0), "9260-3.3.3-7", "INIT ACK with Initiate Tag 0");
     established(init_value(PEER_TAG, PEER_TSN, RWND, 0, 10), "9260-3.3.3-13", "INIT ACK with OS 0");
@@ -554,8 +554,8 @@ void s3_3_3_init_ack() {
 void s3_3_4_sack() {
     section("3.3.4 Selective Acknowledgement (SACK) (3)");
     SCTP_Socket s;
-    Association& a = Access::establish(s);
-    a.last_peer_tsn = 12;
+    Association_TCB& a = Access::establish(s);
+    a.receive.last_peer_tsn = 12;
     for (uint32_t tsn : {14u, 15u, 17u}) {
         Access::receive(s, packet(OUR_TAG, {data_chunk(data(tsn, {'g'}, DATA_FLAG_U | DATA_FLAG_B | DATA_FLAG_E))}));
     }
@@ -590,8 +590,8 @@ void s3_3_4_sack() {
 void s3_3_5_heartbeat() {
     section("3.3.5 / 3.3.6 HEARTBEAT and HEARTBEAT ACK");
     SCTP_Socket s;
-    Association& a = Access::establish(s, ESTABLISHED, {"127.0.0.2"});
-    a.peer_address_list[1].confirmed = false;
+    Association_TCB& a = Access::establish(s, ESTABLISHED, {"127.0.0.2"});
+    a.paths.list[1].confirmed = false;
     Access::start_heartbeats_for(s);
     Access::fire(s, Expiration_Timer_Type::HEARTBEAT, PEER_IP);
     auto out = Access::sent(s);
@@ -643,7 +643,7 @@ void s3_3_7_abort() {
         Access::receive(s, packet(0x12345678, {chunk(ABORT, error_chunk_value{})}));
         bool silent = Access::sent(s).empty();
         SCTP_Socket t;
-        Association& a = Access::establish(t);
+        Association_TCB& a = Access::establish(t);
         auto w = serialize_sctp_packet(packet(OUR_TAG, {chunk(ABORT, error_chunk_value{{error_cause{CAUSE_PROTOCOL_VIOLATION, {1, 2, 3, 4, 5, 6, 7, 8}}}})}));
         w[SCTP_COMMON_HEADER_SIZE + 6] = 0x40;
         std::memset(w.data() + SCTP_CHECKSUM_OFFSET, 0, 4);
@@ -685,14 +685,14 @@ void s3_3_8_shutdown() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s, ESTABLISHED);
+        Association_TCB& a = Access::establish(s, ESTABLISHED);
         Access::send(s, {'1'});
         Access::send(s, std::vector<uint8_t>(1300, '2'));
         Access::sent(s);
         Access::receive(s, packet(OUR_TAG, {sack_chunk(OUR_TSN - 1, RWND, {{2, 2}})}));
         Access::receive(s, packet(OUR_TAG, {chunk(SHUTDOWN, shutdown_chunk_value{OUR_TSN - 1})}));
-        auto gap = a.outstanding_data.find(OUR_TSN + 1);
-        req("9260-3.3.8-2", gap != a.outstanding_data.end() && gap->second.gap_acked, "a SHUTDOWN's missing Gap Ack Blocks are not a renege");
+        auto gap = a.send.outstanding.find(OUR_TSN + 1);
+        req("9260-3.3.8-2", gap != a.send.outstanding.end() && gap->second.gap_acked, "a SHUTDOWN's missing Gap Ack Blocks are not a renege");
     }
     {
         SCTP_Socket s;

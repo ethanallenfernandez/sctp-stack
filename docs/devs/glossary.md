@@ -12,7 +12,7 @@
 |---|---|---|
 | **a_rwnd** | Advertised Receiver Window Credit: free receive buffer, carried in INIT, INIT ACK and SACK | `sack_chunk_value::a_rwnd`, `init_chunk_value::a_rwnd` |
 | **AMDCS** | Association Maximum DATA Chunk Size: the smallest PMDCS over usable destinations | `amdcs(assoc)` |
-| **Association** | an SCTP connection between two endpoints | `Association` |
+| **Association** | an SCTP connection between two endpoints | `Association_TCB`, named by `Association_Key` |
 | **B / E / U / I bits** | DATA flags: Beginning fragment, Ending fragment, Unordered, Immediate SACK requested | `DATA_FLAG_B/E/U`, `DATA_IMMEDIATE_SACK_FLAG` |
 | **cwnd** | congestion window, per destination | `Peer_Path::cwnd` |
 | **Cumulative TSN Ack** | highest TSN below which everything has been received | ours: `last_peer_tsn`. The peer's: `cumulative_tsn_ack` |
@@ -32,7 +32,7 @@
 | **PLPMTU** | the largest packet (here: UDP datagram) the path carries | `Plpmtud::plpmtu` |
 | **PMDCS** | Path Maximum DATA Chunk Size = PLPMTU - UDP header - SCTP common header | `pmdcs(path)` |
 | **PPID** | Payload Protocol Identifier: opaque per-message tag passed through to the peer's ULP | `payload_protocal`, `ppid` |
-| **Primary path** | the destination the ULP prefers | `primary_path`, `primary(assoc)` |
+| **Primary path** | the destination the ULP prefers | `paths.primary`, `primary(assoc)` |
 | **PTB** | ICMP Packet Too Big (IPv4: Destination Unreachable, Fragmentation Needed) | `handle_icmp_ptb()` |
 | **Reneging** | a receiver dropping data it had already gap-acknowledged | the renege branch in `handle_sack` |
 | **RTO** | Retransmission TimeOut, per destination | `Peer_Path::rto` |
@@ -46,7 +46,7 @@
 | **T2-shutdown** | SHUTDOWN / SHUTDOWN ACK retransmission timer | `T2_SHUTDOWN` |
 | **T3-rtx** | DATA retransmission timer, per destination | `T3_RTX` |
 | **T5-shutdown-guard** | overall bound on a shutdown | `T5_SHUTDOWN_GUARD` |
-| **TCB** | Transmission Control Block: all per-association state | `Association` |
+| **TCB** | Transmission Control Block: all per-association state | `Association_TCB` |
 | **Tie-Tag** | random values copied into cookies so a restart can be told from a stale cookie | `local_tie_tag`, `peer_tie_tag` |
 | **Transmission opportunity** | one pass of `run_sending()`. Max.Burst is counted per pass. | `start_transmission_opportunity()` |
 | **TSN** | Transmission Sequence Number: per-chunk sequence number, 32-bit serial | `tsn`, `next_tsn` |
@@ -61,9 +61,9 @@
 
 | Pair | Difference |
 |---|---|
-| `cumulative_tsn_ack` vs `last_peer_tsn` | The peer's ack of **our** DATA (send side), vs **our** ack point for the peer's DATA (receive side). The SACKs we send carry `last_peer_tsn`. |
+| `send.cumulative_tsn_ack` vs `receive.last_peer_tsn` | The peer's ack of **our** DATA (send side), vs **our** ack point for the peer's DATA (receive side). The SACKs we send carry `last_peer_tsn`. |
 | `this_ver_tag` vs `peer_ver_tag` | Tag the peer puts on packets **to us**, vs tag we put on packets **to the peer**. |
-| `Association_Key` vs `Peer_Key` vs `Peer_Path.address` | Opaque id naming the association, vs a peer IP + SCTP port (`peer_key`, to find the association) or IP only (`path_key`, per-path timers), vs IP + **UDP** port (where to send). See [Architecture](01-architecture.md#identity-association-ids-and-peer-addresses). |
+| `Association_Key` vs `Peer_Key` vs `Peer_Path.udp_address` | Opaque id naming the association, vs a peer IP + SCTP port (`peer_key`, to find the association) or IP only (`path_key`, per-path timers), vs IP + **UDP** port (where to send). See [Architecture](01-architecture.md#identity-association-ids-and-peer-addresses). |
 | `zero_window_probe_allowed` vs `zero_window_probing` | Permission to send the next probe (set by its timer), vs a probe is outstanding (changes how T3 reacts). |
 | `retransmitted` vs `fast_retransmitted` vs `pending_retransmission` | Sent more than once, vs already fast-retransmitted (not again), vs marked to be sent again. |
 | `transmits_data()` vs `receives_data()` | States that send DATA and process SACKs, vs states that accept DATA and send SACKs. They differ in `SHUTDOWN_SENT` and `SHUTDOWN_RECEIVED`. |

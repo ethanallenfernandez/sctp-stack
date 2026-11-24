@@ -77,7 +77,7 @@ struct SCTP_Socket_Test_Access {
         return stack.association_at(peer);
     }
 
-    static Association* tcb(SCTP_Socket& stack, const Peer_Key& peer) {
+    static Association_TCB* tcb(SCTP_Socket& stack, const Peer_Key& peer) {
         auto it = stack.associations.find(stack.association_at(peer));
         return it == stack.associations.end() ? nullptr : &it->second;
     }
@@ -109,9 +109,9 @@ bool sent_to(const Access::Sent* sent, const sockaddr_in& at) {
 }
 
 uint16_t udp_port_of(SCTP_Socket& stack, const sockaddr_in& at) {
-    Association* assoc = Access::tcb(stack, key_of(A));
+    Association_TCB* assoc = Access::tcb(stack, key_of(A));
     const Peer_Path* path = assoc ? find_path(*assoc, at) : nullptr;
-    return path ? ntohs(path->address.sin_port) : 0;
+    return path ? ntohs(path->udp_address.sin_port) : 0;
 }
 
 SCTP_Chunk init_chunk(std::vector<uint8_t> params = {}) {
@@ -139,7 +139,7 @@ uint32_t establish(SCTP_Socket& stack, std::vector<uint8_t> params = {}) {
     find_parameter(value.optional_parameters, PARAM_STATE_COOKIE, cookie);
     Access::receive(stack, A, value.initiate_tag, {{{COOKIE_ECHO, 0, 0}, cookie_echo_chunk_value{cookie}}});
     Access::drain(stack);
-    Association* assoc = Access::tcb(stack, key_of(A));
+    Association_TCB* assoc = Access::tcb(stack, key_of(A));
     return assoc && assoc->state == ESTABLISHED ? value.initiate_tag : 0;
 }
 
@@ -183,7 +183,7 @@ void test_other_sctp_port_is_out_of_the_blue() {
               && abort->packet.header.des_port == PEER_SCTP_PORT + 1,
           "answered as out of the blue, with a reflected ABORT");
     check(!first_with(sent, HEARTBEAT_ACK), "and not as the association's HEARTBEAT");
-    Association* assoc = Access::tcb(stack, key_of(A));
+    Association_TCB* assoc = Access::tcb(stack, key_of(A));
     check(assoc && assoc->state == ESTABLISHED && Access::association_count(stack) == 1, "the association is untouched");
 }
 
@@ -210,7 +210,7 @@ void test_unbound_port_is_out_of_the_blue() {
     abort = first_with(sent, ABORT);
     check(abort && (abort->packet.chunks[0].chunk_header.flag & CHUNK_FLAG_T_BIT) && !first_with(sent, HEARTBEAT_ACK),
           "the association's peer and tag at another port: a reflected ABORT");
-    Association* assoc = Access::tcb(stack, key_of(A));
+    Association_TCB* assoc = Access::tcb(stack, key_of(A));
     check(assoc && assoc->state == ESTABLISHED, "the association is untouched");
 
     Access::receive(stack, A, our_tag, {{{ABORT, 0, 0}, error_chunk_value{}}}, PEER_SCTP_PORT, OUR_PORT + 1);

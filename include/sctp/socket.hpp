@@ -33,6 +33,7 @@ public:
     ~SCTP_Socket();
 
 public:
+    // port is both our SCTP port and the UDP port it is encapsulated on.
     bool sctp_bind(std::string_view ip_address, int port);
     // Every address at the one port, each on its own UDP socket. When there is
     // more than one, all are listed in INIT and INIT ACK. A wildcard address
@@ -41,11 +42,10 @@ public:
     bool sctp_run();
     // Aborts every association still open.
     void sctp_close();
-    // port is the peer's SCTP port. udp_port is the UDP encapsulation port to
-    // reach it at, by default the same; once the peer answers, each of its
-    // addresses is sent to whatever UDP port it last sent from. out_association_id
-    // is set only on OK.
-    Sctp_Status sctp_associate(std::string_view ip_address, int port, Association_Key& out_association_id, std::optional<int> udp_port = std::nullopt);
+    // udp_port is the UDP encapsulation port to reach the peer at, by default
+    // its SCTP port; once the peer answers, each of its addresses is sent to
+    // whatever UDP port it last sent from. out_association_id is set only on OK.
+    Sctp_Status sctp_associate(std::string_view ip_address, int sctp_port, Association_Key& out_association_id, std::optional<int> udp_port = std::nullopt);
     // Refused if the stream is not one the association negotiated. An unordered
     // message takes no SSN and may be delivered ahead of others on its stream.
     // ppid goes on every DATA chunk of the message, unchanged.
@@ -78,7 +78,7 @@ private:
     // Bound beside local_address, at its port.
     std::vector<Local_Address> other_local_addresses;
     Wakeup_Pair wakeup;
-    std::unordered_map<Association_Key, Association> associations;
+    std::unordered_map<Association_Key, Association_TCB> associations;
     // Every transport address of every peer, to its association.
     std::unordered_map<Peer_Key, Association_Key, Peer_Key_Hash> peer_addresses;
     uint32_t next_association_id{1};
@@ -121,10 +121,10 @@ private:
     void notify_peer_addr_change(const Association_Key& key, const sockaddr_in& address, Peer_Addr_State state);
     // Empty when only one address is bound.
     std::vector<in_addr> advertised_addresses() const;
-    Association init_new_association(const sockaddr_in& destination, uint16_t peer_port);
-    Association init_new_association(const State_Cookie& cookie);
+    Association_TCB init_new_association(const sockaddr_in& udp_address, uint16_t peer_sctp_port);
+    Association_TCB init_new_association(const State_Cookie& cookie);
 
-    Association* find_tcb(const Association_Key& key);
+    Association_TCB* find_tcb(const Association_Key& key);
     // Id 0 if no association has this address.
     Association_Key association_at(const Peer_Key& peer);
     // Purges what the association has queued, then reports state if given.
@@ -133,10 +133,10 @@ private:
     // address of ours it arrived at.
     void record_arrival(const Association_Key& key, const sockaddr_in& src, in_addr local);
     // Appends the addresses the association lacks, as UNCONFIRMED, and maps each to key.
-    void add_peer_addresses(const Association_Key& key, Association& assoc, const std::vector<sockaddr_in>& addresses);
-    void forget_peer_addresses(const Association_Key& key, const Association& assoc);
+    void add_peer_addresses(const Association_Key& key, Association_TCB& assoc, const std::vector<sockaddr_in>& addresses);
+    void forget_peer_addresses(const Association_Key& key, const Association_TCB& assoc);
     // For a TCB being discarded or reset.
-    void abandon_partial_delivery(const Association_Key& key, const Association& assoc);
+    void abandon_partial_delivery(const Association_Key& key, const TCB_Receive_Side& receive);
     Send_Allowances send_allowances();
     void arm_zero_window_probes(const Send_Allowances& allowances);
     void refill_retransmissions(const Send_Allowances& allowances);
@@ -150,11 +150,11 @@ private:
     void handle_pmtu_raise_expiration(const Association_Key& location, const sockaddr_in& destination);
     void handle_t2_expiration(const Association_Key& location);
     void handle_t5_expiration(const Association_Key& location);
-    void start_heartbeats(const Association_Key& key, Association& assoc);
-    void arm_heartbeat(const Association_Key& key, const Association& assoc, const Peer_Path& path);
-    void arm_confirmation_probes(const Association_Key& key, Association& assoc);
-    void plan_next_probe(const Association& assoc, Peer_Path& path, std::chrono::steady_clock::time_point now);
-    Deliverable build_probe(const Association_Key& key, const Association& assoc, Peer_Path& path);
+    void start_heartbeats(const Association_Key& key, Association_TCB& assoc);
+    void arm_heartbeat(const Association_Key& key, const Association_TCB& assoc, const Peer_Path& path);
+    void arm_confirmation_probes(const Association_Key& key, Association_TCB& assoc);
+    void plan_next_probe(const Association_TCB& assoc, Peer_Path& path, std::chrono::steady_clock::time_point now);
+    Deliverable build_probe(const Association_Key& key, const Association_TCB& assoc, Peer_Path& path);
     void count_path_error(const Association_Key& key, Peer_Path& path);
     void clear_path_errors(const Association_Key& key, Peer_Path& path);
     void start_plpmtud(const Association_Key& key, Peer_Path& path);
@@ -163,8 +163,8 @@ private:
     void complete_plpmtu_search(const Association_Key& key, Peer_Path& path);
     void continue_plpmtu_search(const Association_Key& key, Peer_Path& path);
     void check_for_black_hole(const Association_Key& key, Peer_Path& path);
-    Deliverable make_plpmtu_probe(const Association_Key& key, const Association& assoc, Peer_Path& path);
-    void handle_plpmtu_probe_ack(const Association_Key& key, Association& assoc, Peer_Path& path);
+    Deliverable make_plpmtu_probe(const Association_Key& key, const Association_TCB& assoc, Peer_Path& path);
+    void handle_plpmtu_probe_ack(const Association_Key& key, Association_TCB& assoc, Peer_Path& path);
     void record_heartbeat_sent(const Association_Key& location, const sockaddr_in& destination, const std::vector<uint8_t>& info, std::chrono::steady_clock::time_point sent_at);
     void record_data_sent(const Association_Key& location, const sockaddr_in& destination, const data_chunk_value& data, std::chrono::steady_clock::time_point sent_at);
     void start_t3_if_stopped(const Association_Key& location, const sockaddr_in& destination);
@@ -176,7 +176,6 @@ private:
     // False if the packet goes no further, once answered as 8.4 says.
     bool validate_verification_tag(const SCTP_Packet& pkt, const Association_Key& key, const sockaddr_in& src);
     void answer_ootb(const SCTP_Packet& pkt, const Association_Key& key, const sockaddr_in& src);
-    bool read_ooo_buffer(Association& assoc, std::vector<Delivery>& delivered);
     void abort_association(const Association_Key& key, const SCTP_Common_Header& header, const sockaddr_in& src, std::vector<error_cause> causes);
     void do_next_shutdown_step(const Association_Key& key);
 
@@ -195,13 +194,13 @@ private:
     void handle_shutdown_ack(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const Association_Key& key, const sockaddr_in& src);
     void handle_shutdown_complete(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const Association_Key& key, const sockaddr_in& src);
     void send_sack(const Association_Key& key);
-    SCTP_Packet make_sack(const Association_Key& key, Association& assoc);
-    uint32_t receive_window(const Association_Key& key, const Association& assoc);
+    SCTP_Packet make_sack(const Association_Key& key, Association_TCB& assoc);
+    uint32_t receive_window(const Association_Key& key, const TCB_Receive_Side& receive);
     void maybe_send_window_update(const Association_Key& key);
     // Sent back the way header came, under tag.
     void reply(const SCTP_Common_Header& header, const Association_Key& key, const sockaddr_in& destination, uint32_t tag, Chunk_Type type, Chunk_Value_Type value, uint8_t flag = 0);
     // From our port to the peer's, under its tag.
-    SCTP_Packet packet_to(const Association& assoc, Chunk_Type type, Chunk_Value_Type value, uint8_t flag = 0) const;
+    SCTP_Packet packet_to(const Association_TCB& assoc, Chunk_Type type, Chunk_Value_Type value, uint8_t flag = 0) const;
     void report_unrecognized_chunks(const SCTP_Common_Header& header, const Association_Key& key, const sockaddr_in& src, std::vector<error_cause> causes);
 };
 

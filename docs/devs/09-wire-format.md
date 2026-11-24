@@ -386,11 +386,11 @@ tsn_lt(a, b):  d = b - a  (mod 2^32)      a < b  ⇔  d ≠ 0 and d < 2^31
 | Function | Bits | Use |
 |---|---:|---|
 | `tsn_lt / lte / gt / gte` | 32 | every TSN comparison |
-| `Tsn_Less` | 32 | comparator for `std::map` keyed by TSN (`outstanding_data`, `tsn_ooo_buffer`) |
+| `Tsn_Less` | 32 | comparator for `std::map` keyed by TSN (`send.outstanding`, `receive.ooo`) |
 | `ssn_gt` | 16 | ordering per stream |
 | `sack_acknowledges(sack, tsn)` | 32 | is `tsn` ≤ cum ack, or inside a gap block? Offsets above 65535 can never be covered. |
 
 > `Tsn_Less` is a strict weak ordering **only** while every key lies within
-> half the TSN space of the others. That holds because `outstanding_data` is
-> bounded by the windows, and `tsn_ooo_buffer` is bounded to 65535 above the
+> half the TSN space of the others. That holds because `send.outstanding` is
+> bounded by the windows, and `receive.ooo` is bounded to 65535 above the
 > ack point.

@@ -24,17 +24,17 @@
 namespace {
     // User data held back from the ULP: for reordering, reassembly, or ordered
     // delivery.
-    size_t held_bytes(const Association& assoc) {
-        size_t total = assoc.reassembly.bytes.size();
-        for (const auto& held : assoc.tsn_ooo_buffer | std::views::values) {
+    size_t held_bytes(const TCB_Receive_Side& receive) {
+        size_t total = receive.reassembly.bytes.size();
+        for (const auto& held : receive.ooo | std::views::values) {
             total += held.data.user_data.size();
         }
-        for (const auto& stream : assoc.inbound_streams | std::views::values) {
+        for (const auto& stream : receive.streams | std::views::values) {
             for (const auto& early : stream.early | std::views::values) {
                 total += early.bytes.size();
             }
         }
-        for (const auto& delivery : assoc.held_deliveries) {
+        for (const auto& delivery : receive.held_deliveries) {
             total += delivery.bytes.size();
         }
         return total;
@@ -42,15 +42,15 @@ namespace {
 
     // What the peer believes is left of our window: what we last advertised,
     // less what it has sent us since.
-    uint32_t peer_view_of_window(const Association& assoc) {
-        return assoc.our_rwnd > assoc.received_since_sack ? assoc.our_rwnd - assoc.received_since_sack : 0;
+    uint32_t peer_view_of_window(const TCB_Receive_Side& receive) {
+        return receive.our_rwnd > receive.received_since_sack ? receive.our_rwnd - receive.received_since_sack : 0;
     }
 
     // Whether anything held is complete and waiting only on the TSN at the
     // Cumulative TSN Ack point. Nothing could be dropped to make room for it.
-    bool blocked_on_cumulative_tsn(const Association& assoc) {
-        return std::ranges::any_of(assoc.tsn_ooo_buffer | std::views::values, &Held_Chunk::assembled)
-            || std::ranges::any_of(assoc.inbound_streams | std::views::values, [](const Inbound_Stream& stream) {
+    bool blocked_on_cumulative_tsn(const TCB_Receive_Side& receive) {
+        return std::ranges::any_of(receive.ooo | std::views::values, &Held_Chunk::assembled)
+            || std::ranges::any_of(receive.streams | std::views::values, [](const Inbound_Stream& stream) {
                 return !stream.early.empty();
             });
     }
@@ -59,17 +59,17 @@ namespace {
     // dropped. One below it instead takes the place of the highest TSN held for
     // reordering, which is dropped even if a Gap Ack Block already reported it.
     // Each report is counted once: an entry is consumed when it is matched.
-    uint32_t duplicate_bytes(Association& assoc, const sack_chunk_value& sack, std::vector<uint32_t>& per_path) {
+    uint32_t duplicate_bytes(Association_TCB& assoc, const sack_chunk_value& sack, std::vector<uint32_t>& per_path) {
         uint32_t total = 0;
         for (uint32_t tsn : sack.duplicate_tsns) {
-            auto outstanding = assoc.outstanding_data.find(tsn);
+            auto outstanding = assoc.send.outstanding.find(tsn);
             uint32_t size = 0;
             sockaddr_in destination{};
-            if (outstanding != assoc.outstanding_data.end()) {
+            if (outstanding != assoc.send.outstanding.end()) {
                 size = static_cast<uint32_t>(data_chunk_wire_size(outstanding->second.data));
                 destination = outstanding->second.destination;
             } else {
-                auto& acked = assoc.acked_retransmissions;
+                auto& acked = assoc.send.acked_retransmissions;
                 auto match = std::ranges::find(acked, tsn, &Acked_Retransmission::tsn);
                 if (match == acked.end()) {
                     continue;
@@ -79,55 +79,55 @@ namespace {
                 acked.erase(match);
             }
             Peer_Path* path = find_path(assoc, destination);
-            per_path[static_cast<size_t>((path != nullptr ? path : &primary(assoc)) - assoc.peer_address_list.data())] += size;
+            per_path[static_cast<size_t>((path != nullptr ? path : &primary(assoc)) - assoc.paths.list.data())] += size;
             total += size;
         }
         return total;
     }
 
-    bool make_room(Association& assoc, uint32_t tsn, size_t& used) {
-        auto highest = std::ranges::find_last_if(assoc.tsn_ooo_buffer, [](const auto& entry) {
+    bool make_room(TCB_Receive_Side& receive, uint32_t tsn, size_t& used) {
+        auto highest = std::ranges::find_last_if(receive.ooo, [](const auto& entry) {
             return !entry.second.assembled;
         }).begin();
-        if (highest == assoc.tsn_ooo_buffer.end() || tsn_gt(tsn, highest->first)) {
+        if (highest == receive.ooo.end() || tsn_gt(tsn, highest->first)) {
             return false;
         }
         used -= highest->second.data.user_data.size();
-        assoc.tsn_ooo_buffer.erase(highest);
+        receive.ooo.erase(highest);
         return true;
     }
 
-    bool partial_delivery_open(const Association& assoc) {
-        return assoc.reassembly.open && assoc.reassembly.partially_delivered;
+    bool partial_delivery_open(const TCB_Receive_Side& receive) {
+        return receive.reassembly.open && receive.reassembly.partially_delivered;
     }
 
-    void hand_up(Association& assoc, Delivery delivery, std::vector<Delivery>& delivered) {
-        (partial_delivery_open(assoc) ? assoc.held_deliveries : delivered).push_back(std::move(delivery));
+    void hand_up(TCB_Receive_Side& receive, Delivery delivery, std::vector<Delivery>& delivered) {
+        (partial_delivery_open(receive) ? receive.held_deliveries : delivered).push_back(std::move(delivery));
     }
 
-    void advance_stream(Association& assoc, uint16_t stream_id, std::vector<Delivery>& delivered) {
-        Inbound_Stream& stream = assoc.inbound_streams[stream_id];
+    void advance_stream(TCB_Receive_Side& receive, uint16_t stream_id, std::vector<Delivery>& delivered) {
+        Inbound_Stream& stream = receive.streams[stream_id];
         ++stream.next_ssn;
         for (auto next = stream.early.find(stream.next_ssn); next != stream.early.end(); next = stream.early.find(++stream.next_ssn)) {
-            hand_up(assoc, std::move(next->second), delivered);
+            hand_up(receive, std::move(next->second), delivered);
             stream.early.erase(next);
         }
     }
 
     // False if the SSN was already delivered or is already waiting: the peer
     // reused it.
-    bool order_message(Association& assoc, uint16_t stream_id, uint16_t ssn, bool unordered, std::vector<uint8_t> bytes, uint32_t ppid, std::vector<Delivery>& delivered) {
+    bool order_message(TCB_Receive_Side& receive, uint16_t stream_id, uint16_t ssn, bool unordered, std::vector<uint8_t> bytes, uint32_t ppid, std::vector<Delivery>& delivered) {
         Delivery message{std::move(bytes), true, stream_id, ppid};
         if (unordered) {
-            hand_up(assoc, std::move(message), delivered);
+            hand_up(receive, std::move(message), delivered);
             return true;
         }
-        Inbound_Stream& stream = assoc.inbound_streams[stream_id];
+        Inbound_Stream& stream = receive.streams[stream_id];
         if (ssn != stream.next_ssn) {
             return ssn_gt(ssn, stream.next_ssn) && stream.early.emplace(ssn, std::move(message)).second;
         }
-        hand_up(assoc, std::move(message), delivered);
-        advance_stream(assoc, stream_id, delivered);
+        hand_up(receive, std::move(message), delivered);
+        advance_stream(receive, stream_id, delivered);
         return true;
     }
 
@@ -135,8 +135,8 @@ namespace {
     // nor continue the open one. Without keep_bytes only the framing is checked:
     // the stream is invalid, or the message was already assembled ahead of the
     // Cumulative TSN Ack.
-    bool reassemble(Association& assoc, const data_chunk_value& data, bool keep_bytes, std::vector<Delivery>& delivered) {
-        Reassembly& message = assoc.reassembly;
+    bool reassemble(TCB_Receive_Side& receive, const data_chunk_value& data, bool keep_bytes, std::vector<Delivery>& delivered) {
+        Reassembly& message = receive.reassembly;
         bool begins = (data.flags & DATA_FLAG_B) != 0;
         bool ends = (data.flags & DATA_FLAG_E) != 0;
         bool unordered = (data.flags & DATA_FLAG_U) != 0;
@@ -158,8 +158,8 @@ namespace {
             delivered.push_back(Delivery{std::move(message.bytes), ends, message.stream, message.ppid});
             message.bytes.clear();
             if (ends) {
-                delivered.append_range(assoc.held_deliveries | std::views::as_rvalue);
-                assoc.held_deliveries.clear();
+                delivered.append_range(receive.held_deliveries | std::views::as_rvalue);
+                receive.held_deliveries.clear();
             }
             return true;
         }
@@ -168,15 +168,29 @@ namespace {
         }
         std::vector<uint8_t> bytes = std::move(message.bytes);
         message.bytes.clear();
-        return order_message(assoc, message.stream, message.ssn, message.unordered, std::move(bytes), message.ppid, delivered);
+        return order_message(receive, message.stream, message.ssn, message.unordered, std::move(bytes), message.ppid, delivered);
+    }
+
+    // Consumes the held chunks the Cumulative TSN Ack has just reached.
+    bool read_ooo_buffer(TCB_Receive_Side& receive, std::vector<Delivery>& delivered) {
+        uint32_t tsn = receive.last_peer_tsn + 1;
+        for (auto it = receive.ooo.find(tsn); it != receive.ooo.end(); it = receive.ooo.find(++tsn)) {
+            const Held_Chunk& held = it->second;
+            if (!reassemble(receive, held.data, !held.assembled && !held.data.user_data.empty(), delivered)) {
+                return false;
+            }
+            receive.ooo.erase(it);
+        }
+        receive.last_peer_tsn = tsn - 1;
+        return true;
     }
 
     // A message lying wholly above the Cumulative TSN Ack is taken out as soon
     // as its last fragment arrives, so a gap holds back only its own stream.
-    bool assemble_early(Association& assoc, uint32_t tsn, std::vector<Delivery>& delivered) {
+    bool assemble_early(TCB_Receive_Side& receive, uint32_t tsn, std::vector<Delivery>& delivered) {
         auto usable = [&](uint32_t at) -> const data_chunk_value* {
-            auto it = assoc.tsn_ooo_buffer.find(at);
-            if (it == assoc.tsn_ooo_buffer.end() || it->second.assembled || it->second.data.user_data.empty()) {
+            auto it = receive.ooo.find(at);
+            if (it == receive.ooo.end() || it->second.assembled || it->second.data.user_data.empty()) {
                 return nullptr;
             }
             return &it->second.data;
@@ -212,7 +226,7 @@ namespace {
         uint32_t ppid = usable(first)->payload_protocal;
         std::vector<uint8_t> bytes;
         for (uint32_t at = first;; ++at) {
-            Held_Chunk& held = assoc.tsn_ooo_buffer.at(at);
+            Held_Chunk& held = receive.ooo.at(at);
             bytes.append_range(held.data.user_data);
             held.data.user_data = {};
             held.assembled = true;
@@ -220,7 +234,7 @@ namespace {
                 break;
             }
         }
-        return order_message(assoc, stream, ssn, unordered, std::move(bytes), ppid, delivered);
+        return order_message(receive, stream, ssn, unordered, std::move(bytes), ppid, delivered);
     }
 
     // Leading reports win: keeps as many as fit in room, each costing per_report on top of its size.
@@ -336,10 +350,10 @@ namespace {
 
     // flight_before is the flightsize before this SACK was applied. It is what
     // says whether the window being grown was actually in use.
-    void grow_cwnd(const Association& assoc, Peer_Path& path, uint32_t bytes_acked, uint32_t duplicate_bytes, size_t flight_before) {
+    void grow_cwnd(const TCB_Send_Side& send, Peer_Path& path, uint32_t bytes_acked, uint32_t duplicate_bytes, size_t flight_before) {
         bool cwnd_full = flight_before >= path.cwnd;
         if (path.cwnd <= path.ssthresh) {
-            if (cwnd_full && !assoc.in_fast_recovery) {
+            if (cwnd_full && !send.in_fast_recovery) {
                 path.cwnd += std::min(bytes_acked, SLOW_START_INCREASE_PMDCS * pmdcs(path));
             }
             return;
@@ -365,8 +379,8 @@ namespace {
         bool fast_retransmitted{false};
     };
 
-    size_t index_of(const Association& assoc, const Peer_Path& path) {
-        return static_cast<size_t>(&path - assoc.peer_address_list.data());
+    size_t index_of(const Association_TCB& assoc, const Peer_Path& path) {
+        return static_cast<size_t>(&path - assoc.paths.list.data());
     }
 
     bool contains_chunk(const SCTP_Packet& packet, Chunk_Type type) {
@@ -452,8 +466,8 @@ void SCTP_Socket::handle_recv_packet(const uint8_t* data, size_t n, const sockad
     }
 
     // 9.2: any packet from the peer in SHUTDOWN-SENT gives it more time.
-    if (Association* assoc = find_tcb(key); assoc != nullptr && assoc->state == SHUTDOWN_SENT) {
-        assoc->error_count = 0;
+    if (Association_TCB* assoc = find_tcb(key); assoc != nullptr && assoc->state == SHUTDOWN_SENT) {
+        assoc->paths.error_count = 0;
         restart_t2(key);
     }
 
@@ -527,8 +541,8 @@ bool SCTP_Socket::validate_verification_tag(const SCTP_Packet& pkt, const Associ
     // the peer; clear, it held a TCB and addressed us under our own.
     if (first.type == ABORT || first.type == SHUTDOWN_COMPLETE) {
         uint32_t expected = (first.flag & CHUNK_FLAG_T_BIT)
-            ? it->second.peer_ver_tag
-            : it->second.this_ver_tag;
+            ? it->second.peer.peer_ver_tag
+            : it->second.peer.this_ver_tag;
         return expected != 0 && pkt.header.verification_tag == expected;
     }
 
@@ -538,7 +552,7 @@ bool SCTP_Socket::validate_verification_tag(const SCTP_Packet& pkt, const Associ
         return false;
     }
 
-    return pkt.header.verification_tag == it->second.this_ver_tag;
+    return pkt.header.verification_tag == it->second.peer.this_ver_tag;
 }
 
 // 8.4: an unattributable packet is answered with an ABORT, except where a reply
@@ -562,7 +576,7 @@ void SCTP_Socket::answer_ootb(const SCTP_Packet& pkt, const Association_Key& key
 // After dispatch: a bundled COOKIE ECHO may have created the TCB. COOKIE_WAIT
 // has no peer tag to address the report with.
 void SCTP_Socket::report_unrecognized_chunks(const SCTP_Common_Header& header, const Association_Key& key, const sockaddr_in& src, std::vector<error_cause> causes) {
-    Association* assoc = find_tcb(key);
+    Association_TCB* assoc = find_tcb(key);
     if (assoc == nullptr || assoc->state == COOKIE_WAIT) {
         return;
     }
@@ -576,7 +590,7 @@ void SCTP_Socket::report_unrecognized_chunks(const SCTP_Common_Header& header, c
     }
     causes.erase(fits, causes.end());
     if (!causes.empty()) {
-        reply(header, key, reply_destination(*assoc, src), assoc->peer_ver_tag, OP_ERROR, error_chunk_value{std::move(causes)});
+        reply(header, key, reply_destination(*assoc, src), assoc->peer.peer_ver_tag, OP_ERROR, error_chunk_value{std::move(causes)});
     }
 }
 
@@ -611,17 +625,17 @@ void SCTP_Socket::handle_init(const SCTP_Common_Header& header, const SCTP_Chunk
     uint32_t local_tie_tag = 0;
     uint32_t peer_tie_tag = 0;
     sockaddr_in destination = src;
-    if (Association* existing = find_tcb(key)) {
-        Association& assoc = *existing;
+    if (Association_TCB* existing = find_tcb(key)) {
+        Association_TCB& assoc = *existing;
         switch (assoc.state) {
             case SHUTDOWN_ACK_SENT:
-                return reply(header, key, reply_destination(assoc, src), assoc.peer_ver_tag, SHUTDOWN_ACK, empty_chunk_value{});
+                return reply(header, key, reply_destination(assoc, src), assoc.peer.peer_ver_tag, SHUTDOWN_ACK, empty_chunk_value{});
             case COOKIE_WAIT:
                 // The primary path is the address the ULP gave, and the INIT
                 // reported it: that is how it found this TCB.
-                local_tag = assoc.this_ver_tag;
-                local_tsn = assoc.next_tsn;
-                destination = primary(assoc).address;
+                local_tag = assoc.peer.this_ver_tag;
+                local_tsn = assoc.send.next_tsn;
+                destination = primary(assoc).udp_address;
                 break;
             default: {
                 auto added = addresses | std::views::filter([&](const sockaddr_in& address) {
@@ -631,15 +645,15 @@ void SCTP_Socket::handle_init(const SCTP_Common_Header& header, const SCTP_Chunk
                     return reply(header, key, src, init.initiate_tag, ABORT, error_chunk_value{new_address_causes(added, params.recognized)});
                 }
                 if (assoc.state == COOKIE_ECHOED) {
-                    local_tag = assoc.this_ver_tag;
-                    local_tsn = assoc.next_tsn;
+                    local_tag = assoc.peer.this_ver_tag;
+                    local_tsn = assoc.send.next_tsn;
                 }
-                if (assoc.local_tie_tag == 0) {
-                    assoc.local_tie_tag = generate_nonzero_tag();
-                    assoc.peer_tie_tag = generate_nonzero_tag();
+                if (assoc.peer.local_tie_tag == 0) {
+                    assoc.peer.local_tie_tag = generate_nonzero_tag();
+                    assoc.peer.peer_tie_tag = generate_nonzero_tag();
                 }
-                local_tie_tag = assoc.local_tie_tag;
-                peer_tie_tag = assoc.peer_tie_tag;
+                local_tie_tag = assoc.peer.local_tie_tag;
+                peer_tie_tag = assoc.peer.peer_tie_tag;
             }
         }
     }
@@ -679,7 +693,7 @@ void SCTP_Socket::handle_init(const SCTP_Common_Header& header, const SCTP_Chunk
 void SCTP_Socket::handle_init_ack(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const Association_Key& key, const sockaddr_in& src) {
     const auto& init_ack = std::get<init_chunk_value>(chunk.chunk_value);
 
-    Association* found = find_tcb(key);
+    Association_TCB* found = find_tcb(key);
     if (found == nullptr || found->state != COOKIE_WAIT) {
         return;
     }
@@ -708,22 +722,22 @@ void SCTP_Socket::handle_init_ack(const SCTP_Common_Header& header, const SCTP_C
         return refuse(unresolvable_address_cause(host_name));
     }
 
-    Association& assoc = *found;
+    Association_TCB& assoc = *found;
     add_peer_addresses(key, assoc, transport_addresses(src, params.recognized));
     sockaddr_in destination = reply_destination(assoc, src);
-    assoc.last_peer_tsn = init_ack.initial_tsn - 1;
-    assoc.peer_ver_tag = init_ack.initiate_tag;
-    assoc.peer_rwnd = init_ack.a_rwnd;
-    assoc.peer_max_rwnd = init_ack.a_rwnd;
-    assoc.out_streams = std::min(LOCAL_OUT_STREAMS, init_ack.in_streams);
-    assoc.in_streams = std::min(LOCAL_MAX_IN_STREAMS, init_ack.out_streams);
-    assoc.next_ssn.assign(assoc.out_streams, 0);
+    assoc.receive.last_peer_tsn = init_ack.initial_tsn - 1;
+    assoc.peer.peer_ver_tag = init_ack.initiate_tag;
+    assoc.send.peer_rwnd = init_ack.a_rwnd;
+    assoc.send.peer_max_rwnd = init_ack.a_rwnd;
+    assoc.send.out_streams = std::min(LOCAL_OUT_STREAMS, init_ack.in_streams);
+    assoc.receive.in_streams = std::min(LOCAL_MAX_IN_STREAMS, init_ack.out_streams);
+    assoc.send.next_ssn.assign(assoc.send.out_streams, 0);
     assoc.state = COOKIE_ECHOED;
     // COOKIE ECHO, then the ERROR chunk and cause headers.
     trim_reports(params.reported, amdcs(assoc) - std::min<size_t>(amdcs(assoc), 3 * SCTP_CHUNK_HEADER_SIZE + ((cookie.size() + 3) & ~size_t{3})), 0);
     cancel_expiration(Expiration_Key{key, Expiration_Timer_Type::T1_INIT});
     sends.remove_retransmissions_of_type(key, INIT);
-    SCTP_Packet echo = build_packet(header.des_port, header.src_port, assoc.peer_ver_tag, COOKIE_ECHO, cookie_echo_chunk_value{std::move(cookie)});
+    SCTP_Packet echo = build_packet(header.des_port, header.src_port, assoc.peer.peer_ver_tag, COOKIE_ECHO, cookie_echo_chunk_value{std::move(cookie)});
     if (!params.reported.empty()) {
         std::vector<uint8_t> info;
         for (const auto& parameter : params.reported) {
@@ -739,8 +753,8 @@ void SCTP_Socket::reply(const SCTP_Common_Header& header, const Association_Key&
     enqueue_packet(Deliverable{key, destination, build_packet(header.des_port, header.src_port, tag, type, std::move(value), flag)});
 }
 
-SCTP_Packet SCTP_Socket::packet_to(const Association& assoc, Chunk_Type type, Chunk_Value_Type value, uint8_t flag) const {
-    return build_packet(ntohs(local_address.sin_port), assoc.peer_port, assoc.peer_ver_tag, type, std::move(value), flag);
+SCTP_Packet SCTP_Socket::packet_to(const Association_TCB& assoc, Chunk_Type type, Chunk_Value_Type value, uint8_t flag) const {
+    return build_packet(ntohs(local_address.sin_port), assoc.peer.sctp_port, assoc.peer.peer_ver_tag, type, std::move(value), flag);
 }
 
 bool SCTP_Socket::handle_cookie_echo(
@@ -775,12 +789,12 @@ bool SCTP_Socket::handle_cookie_echo(
     }
 
     // RFC 9260 5.2.4, Table 12. A zero Tie-Tag means "none" and never matches.
-    Association& tcb = it->second;
-    bool local_match = cookie.local_ver_tag == tcb.this_ver_tag;
-    bool peer_match = cookie.peer_ver_tag == tcb.peer_ver_tag;
+    Association_TCB& tcb = it->second;
+    bool local_match = cookie.local_ver_tag == tcb.peer.this_ver_tag;
+    bool peer_match = cookie.peer_ver_tag == tcb.peer.peer_ver_tag;
     bool tie_tags_match = cookie.local_tie_tag != 0
-        && cookie.local_tie_tag == tcb.local_tie_tag
-        && cookie.peer_tie_tag == tcb.peer_tie_tag;
+        && cookie.local_tie_tag == tcb.peer.local_tie_tag
+        && cookie.peer_tie_tag == tcb.peer.peer_tie_tag;
 
     sockaddr_in destination = reply_destination(tcb, src);
     // Step 3: a stale cookie whose tags both match is a retransmission (case E).
@@ -801,14 +815,14 @@ bool SCTP_Socket::handle_cookie_echo(
         // The SHUTDOWN ACK is for the old association, so it goes under the old
         // tag: the restarted peer reflects it back, which is what we accept.
         if (tcb.state == SHUTDOWN_ACK_SENT) {
-            reply(header, key, destination, tcb.peer_ver_tag, SHUTDOWN_ACK, empty_chunk_value{});
+            reply(header, key, destination, tcb.peer.peer_ver_tag, SHUTDOWN_ACK, empty_chunk_value{});
             reply(header, key, destination, cookie.peer_ver_tag, OP_ERROR, error_chunk_value{{error_cause{CAUSE_COOKIE_WHILE_SHUTTING_DOWN, {}}}});
             return false;
         }
         cancel_expirations(key);
         sends.purge(key);
         forget_peer_addresses(key, tcb);
-        abandon_partial_delivery(key, tcb);
+        abandon_partial_delivery(key, tcb.receive);
         tcb = init_new_association(cookie);
         add_peer_addresses(key, tcb, cookie_addresses(cookie));
         destination = reply_destination(tcb, src);
@@ -817,16 +831,16 @@ bool SCTP_Socket::handle_cookie_echo(
     } else if (local_match) {
         // B: collision, peer's tag is new or not yet known
         add_peer_addresses(key, tcb, cookie_addresses(cookie));
-        tcb.peer_ver_tag = cookie.peer_ver_tag;
-        tcb.last_peer_tsn = cookie.peer_initial_tsn - 1;
-        tcb.peer_rwnd = cookie.peer_a_rwnd;
-        tcb.peer_max_rwnd = cookie.peer_a_rwnd;
-        tcb.tsn_ooo_buffer.clear();
-        abandon_partial_delivery(key, tcb);
-        tcb.reassembly = {};
-        tcb.inbound_streams.clear();
-        tcb.held_deliveries.clear();
-        tcb.duplicate_tsns.clear();
+        tcb.peer.peer_ver_tag = cookie.peer_ver_tag;
+        tcb.receive.last_peer_tsn = cookie.peer_initial_tsn - 1;
+        tcb.send.peer_rwnd = cookie.peer_a_rwnd;
+        tcb.send.peer_max_rwnd = cookie.peer_a_rwnd;
+        tcb.receive.ooo.clear();
+        abandon_partial_delivery(key, tcb.receive);
+        tcb.receive.reassembly = {};
+        tcb.receive.streams.clear();
+        tcb.receive.held_deliveries.clear();
+        tcb.receive.duplicate_tsns.clear();
         // A shutdown in progress is kept rather than silently cancelled.
         if (is_forming(tcb.state)) {
             tcb.state = ESTABLISHED;
@@ -850,7 +864,7 @@ bool SCTP_Socket::handle_cookie_echo(
 
 void SCTP_Socket::handle_error(const SCTP_Common_Header&, const SCTP_Chunk& chunk, const Association_Key& key, const sockaddr_in&) {
     const auto& error = std::get<error_chunk_value>(chunk.chunk_value);
-    Association* assoc = find_tcb(key);
+    Association_TCB* assoc = find_tcb(key);
     if (error.causes.empty() || assoc == nullptr) {
         return;
     }
@@ -866,21 +880,21 @@ void SCTP_Socket::handle_error(const SCTP_Common_Header&, const SCTP_Chunk& chun
 
     cancel_expiration(Expiration_Key{key, Expiration_Timer_Type::T1_COOKIE});
     sends.remove_retransmissions_of_type(key, COOKIE_ECHO);
-    if (assoc->stale_cookie_retries >= MAX_STALE_COOKIE_RETRIES) {
+    if (assoc->handshake.stale_cookie_retries >= MAX_STALE_COOKIE_RETRIES) {
         return remove_association(key, Assoc_Change_State::CANT_STR_ASSOC);
     }
     uint32_t staleness_ms = read_be32(stale->info.data()) / 1000 + 1;
-    ++assoc->stale_cookie_retries;
+    ++assoc->handshake.stale_cookie_retries;
     assoc->state = COOKIE_WAIT;
-    assoc->peer_ver_tag = 0;
-    assoc->init_retransmits = 0;
-    assoc->cookie_retransmits = 0;
-    enqueue_packet(Deliverable{key, primary(*assoc).address, build_init(ntohs(local_address.sin_port), assoc->peer_port,
-        assoc->this_ver_tag, assoc->next_tsn, staleness_ms + std::min(staleness_ms, 1000U), advertised_addresses())});
+    assoc->peer.peer_ver_tag = 0;
+    assoc->handshake.init_retransmits = 0;
+    assoc->handshake.cookie_retransmits = 0;
+    enqueue_packet(Deliverable{key, primary(*assoc).udp_address, build_init(ntohs(local_address.sin_port), assoc->peer.sctp_port,
+        assoc->peer.this_ver_tag, assoc->send.next_tsn, staleness_ms + std::min(staleness_ms, 1000U), advertised_addresses())});
 }
 
 void SCTP_Socket::handle_abort(const SCTP_Common_Header&, const SCTP_Chunk&, const Association_Key& key, const sockaddr_in&) {
-    if (Association* assoc = find_tcb(key)) {
+    if (Association_TCB* assoc = find_tcb(key)) {
         remove_association(key, is_forming(assoc->state) ? Assoc_Change_State::CANT_STR_ASSOC : Assoc_Change_State::COMM_LOST);
     }
 }
@@ -889,11 +903,11 @@ void SCTP_Socket::handle_abort(const SCTP_Common_Header&, const SCTP_Chunk&, con
 // enqueued after remove_association, whose purge would otherwise drop it along
 // with the DATA that must not accompany it.
 void SCTP_Socket::abort_association(const Association_Key& key, const SCTP_Common_Header& header, const sockaddr_in& src, std::vector<error_cause> causes) {
-    Association* assoc = find_tcb(key);
+    Association_TCB* assoc = find_tcb(key);
     if (assoc == nullptr) {
         return;
     }
-    uint32_t peer_tag = assoc->peer_ver_tag;
+    uint32_t peer_tag = assoc->peer.peer_ver_tag;
     sockaddr_in destination = reply_destination(*assoc, src);
     remove_association(key, is_forming(assoc->state) ? Assoc_Change_State::CANT_STR_ASSOC : Assoc_Change_State::COMM_LOST);
     if (peer_tag != 0) {
@@ -901,18 +915,18 @@ void SCTP_Socket::abort_association(const Association_Key& key, const SCTP_Commo
     }
 }
 
-// Cumulative against next_tsn rather than outstanding_data being empty: DATA
+// Cumulative against next_tsn rather than send.outstanding being empty: DATA
 // still in the send queue has a TSN but no outstanding entry yet, and messages
 // still in the outbound queue have no TSN at all.
 void SCTP_Socket::do_next_shutdown_step(const Association_Key& key) {
-    Association* assoc = find_tcb(key);
-    if (assoc == nullptr || assoc->cumulative_tsn_ack != assoc->next_tsn - 1 || !assoc->outbound.empty()) {
+    Association_TCB* assoc = find_tcb(key);
+    if (assoc == nullptr || assoc->send.cumulative_tsn_ack != assoc->send.next_tsn - 1 || !assoc->send.outbound.empty()) {
         return;
     }
     SCTP_Packet packet;
     switch (assoc->state) {
         case SHUTDOWN_PENDING:
-            packet = packet_to(*assoc, SHUTDOWN, shutdown_chunk_value{assoc->last_peer_tsn});
+            packet = packet_to(*assoc, SHUTDOWN, shutdown_chunk_value{assoc->receive.last_peer_tsn});
             assoc->state = SHUTDOWN_SENT;
             schedule_expiration(Expiration_Key{key, Expiration_Timer_Type::T5_SHUTDOWN_GUARD}, std::chrono::steady_clock::now() + T5_SHUTDOWN_GUARD);
             break;
@@ -926,12 +940,12 @@ void SCTP_Socket::do_next_shutdown_step(const Association_Key& key) {
     expirations.cancel_all(key, Expiration_Timer_Type::HEARTBEAT);
     cancel_expiration(Expiration_Key{key, Expiration_Timer_Type::DELAYED_SACK});
     expirations.cancel_all(key, Expiration_Timer_Type::T3_RTX);
-    enqueue_packet(Deliverable{key, data_path(*assoc).address, std::move(packet)});
+    enqueue_packet(Deliverable{key, data_path(*assoc).udp_address, std::move(packet)});
     restart_t2(key);
 }
 
 void SCTP_Socket::handle_cookie_ack(const SCTP_Common_Header&, const SCTP_Chunk&, const Association_Key& key, const sockaddr_in&) {
-    Association* assoc = find_tcb(key);
+    Association_TCB* assoc = find_tcb(key);
     if (assoc == nullptr || assoc->state != COOKIE_ECHOED) {
         return;
     }
@@ -944,14 +958,14 @@ void SCTP_Socket::handle_cookie_ack(const SCTP_Common_Header&, const SCTP_Chunk&
 
 void SCTP_Socket::handle_heartbeat(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const Association_Key& key, const sockaddr_in& src) {
     const auto& info = std::get<heartbeat_chunk_value>(chunk.chunk_value).info;
-    Association* assoc = find_tcb(key);
+    Association_TCB* assoc = find_tcb(key);
     // The Info is echoed verbatim and the peer chooses its length, so an
     // oversized one would build a reply we cannot put on the wire.
     if (assoc == nullptr || assoc->state == SHUTDOWN_SENT || assoc->state == SHUTDOWN_ACK_SENT
             || 2 * SCTP_CHUNK_HEADER_SIZE + info.size() > amdcs(*assoc)) {
         return;
     }
-    reply(header, key, src, assoc->peer_ver_tag, HEARTBEAT_ACK, heartbeat_chunk_value{info});
+    reply(header, key, src, assoc->peer.peer_ver_tag, HEARTBEAT_ACK, heartbeat_chunk_value{info});
 }
 
 // 5.4: the ACK is credited to the path its Info names, which may not be the
@@ -962,14 +976,14 @@ void SCTP_Socket::handle_heartbeat_ack(const SCTP_Common_Header&, const SCTP_Chu
         return;
     }
 
-    Association* found = find_tcb(key);
+    Association_TCB* found = find_tcb(key);
     if (found == nullptr) {
         return;
     }
 
     // The nonce tells this ACK from one answering a heartbeat two intervals
     // back, which would otherwise clear the error count of a failing path.
-    Association& assoc = *found;
+    Association_TCB& assoc = *found;
     Peer_Path* path = find_path(assoc, heartbeat_info_destination(info));
     if (path != nullptr && path->plpmtud.probe_outstanding && heartbeat_info_nonce(info) == path->plpmtud.probe_nonce) {
         handle_plpmtu_probe_ack(key, assoc, *path);
@@ -986,11 +1000,11 @@ void SCTP_Socket::handle_heartbeat_ack(const SCTP_Common_Header&, const SCTP_Chu
     // 8.1: only the path carrying DATA answers for the association, or an
     // idle alternate would keep alive one whose data path has failed.
     if (&data_path(assoc) == path) {
-        assoc.error_count = 0;
+        assoc.paths.error_count = 0;
     }
     if (!path->confirmed) {
         path->confirmed = true;
-        notify_peer_addr_change(key, path->address, Peer_Addr_State::ADDR_CONFIRMED);
+        notify_peer_addr_change(key, path->udp_address, Peer_Addr_State::ADDR_CONFIRMED);
         if (transmits_data(assoc.state)) {
             start_plpmtud(key, *path);
         }
@@ -1006,29 +1020,29 @@ void SCTP_Socket::handle_heartbeat_ack(const SCTP_Common_Header&, const SCTP_Chu
 // that the missing blocks are not a renege (3.3.8): gap-acked chunks stay so.
 void SCTP_Socket::handle_shutdown(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const Association_Key& key, const sockaddr_in& src) {
     uint32_t cumulative_tsn_ack = std::get<shutdown_chunk_value>(chunk.chunk_value).cumulative_tsn_ack;
-    Association* found = find_tcb(key);
+    Association_TCB* found = find_tcb(key);
     if (found == nullptr || is_forming(found->state)) {
         return;
     }
-    Association& assoc = *found;
+    Association_TCB& assoc = *found;
     switch (assoc.state) {
         case SHUTDOWN_SENT:
             assoc.state = SHUTDOWN_ACK_SENT;
             [[fallthrough]];
         case SHUTDOWN_ACK_SENT:
-            reply(header, key, reply_destination(assoc, src), assoc.peer_ver_tag, SHUTDOWN_ACK, empty_chunk_value{});
+            reply(header, key, reply_destination(assoc, src), assoc.peer.peer_ver_tag, SHUTDOWN_ACK, empty_chunk_value{});
             return restart_t2(key);
         default:
             break;
     }
-    if (!tsn_lt(cumulative_tsn_ack, assoc.next_tsn)) {
+    if (!tsn_lt(cumulative_tsn_ack, assoc.send.next_tsn)) {
         return abort_association(key, header, src, {error_cause{CAUSE_PROTOCOL_VIOLATION, {}}});
     }
 
     assoc.state = SHUTDOWN_RECEIVED;
-    if (tsn_gt(cumulative_tsn_ack, assoc.cumulative_tsn_ack)) {
-        std::vector<bool> acked_on(assoc.peer_address_list.size(), false);
-        for (auto entry = assoc.outstanding_data.begin(); entry != assoc.outstanding_data.end();) {
+    if (tsn_gt(cumulative_tsn_ack, assoc.send.cumulative_tsn_ack)) {
+        std::vector<bool> acked_on(assoc.paths.list.size(), false);
+        for (auto entry = assoc.send.outstanding.begin(); entry != assoc.send.outstanding.end();) {
             if (!tsn_lte(entry->first, cumulative_tsn_ack)) {
                 ++entry;
                 continue;
@@ -1037,21 +1051,21 @@ void SCTP_Socket::handle_shutdown(const SCTP_Common_Header& header, const SCTP_C
                 Peer_Path& path = destination_of(assoc, entry->second);
                 acked_on[index_of(assoc, path)] = true;
                 clear_path_errors(key, path);
-                assoc.error_count = 0;
+                assoc.paths.error_count = 0;
             }
-            entry = assoc.outstanding_data.erase(entry);
+            entry = assoc.send.outstanding.erase(entry);
         }
-        assoc.cumulative_tsn_ack = cumulative_tsn_ack;
-        if (assoc.rtt_measurement_tsn && tsn_lte(*assoc.rtt_measurement_tsn, cumulative_tsn_ack)) {
-            assoc.rtt_measurement_tsn.reset();
+        assoc.send.cumulative_tsn_ack = cumulative_tsn_ack;
+        if (assoc.send.rtt_measurement_tsn && tsn_lte(*assoc.send.rtt_measurement_tsn, cumulative_tsn_ack)) {
+            assoc.send.rtt_measurement_tsn.reset();
         }
-        if (assoc.in_fast_recovery && tsn_gte(cumulative_tsn_ack, assoc.fast_recovery_exit_tsn)) {
-            assoc.in_fast_recovery = false;
+        if (assoc.send.in_fast_recovery && tsn_gte(cumulative_tsn_ack, assoc.send.fast_recovery_exit_tsn)) {
+            assoc.send.in_fast_recovery = false;
         }
         sends.remove_acked_retransmissions(key, sack_chunk_value{cumulative_tsn_ack, 0, {}, {}});
-        for (auto&& [path, acked] : std::views::zip(assoc.peer_address_list, acked_on)) {
+        for (auto&& [path, acked] : std::views::zip(assoc.paths.list, acked_on)) {
             if (acked) {
-                restart_t3(key, path.address);
+                restart_t3(key, path.udp_address);
             }
         }
     }
@@ -1059,18 +1073,18 @@ void SCTP_Socket::handle_shutdown(const SCTP_Common_Header& header, const SCTP_C
 }
 
 void SCTP_Socket::handle_shutdown_ack(const SCTP_Common_Header& header, const SCTP_Chunk&, const Association_Key& key, const sockaddr_in& src) {
-    Association* assoc = find_tcb(key);
+    Association_TCB* assoc = find_tcb(key);
     if (assoc == nullptr || (assoc->state != SHUTDOWN_SENT && assoc->state != SHUTDOWN_ACK_SENT)) {
         return;
     }
-    uint32_t peer_tag = assoc->peer_ver_tag;
+    uint32_t peer_tag = assoc->peer.peer_ver_tag;
     sockaddr_in destination = reply_destination(*assoc, src);
     remove_association(key, Assoc_Change_State::SHUTDOWN_COMP);
     reply(header, key, destination, peer_tag, SHUTDOWN_COMPLETE, empty_chunk_value{});
 }
 
 void SCTP_Socket::handle_shutdown_complete(const SCTP_Common_Header&, const SCTP_Chunk&, const Association_Key& key, const sockaddr_in&) {
-    Association* assoc = find_tcb(key);
+    Association_TCB* assoc = find_tcb(key);
     if (assoc != nullptr && assoc->state == SHUTDOWN_ACK_SENT) {
         remove_association(key, Assoc_Change_State::SHUTDOWN_COMP);
     }
@@ -1078,28 +1092,28 @@ void SCTP_Socket::handle_shutdown_complete(const SCTP_Common_Header&, const SCTP
 
 void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk& chunk, const Association_Key& key, const sockaddr_in& src) {
     const auto& sack = std::get<sack_chunk_value>(chunk.chunk_value);
-    Association* found = find_tcb(key);
+    Association_TCB* found = find_tcb(key);
     if (found == nullptr || !transmits_data(found->state)) {
         return;
     }
-    Association& assoc = *found;
-    bool acks_unsent = !tsn_lt(sack.cumulative_tsn_ack, assoc.next_tsn)
+    Association_TCB& assoc = *found;
+    bool acks_unsent = !tsn_lt(sack.cumulative_tsn_ack, assoc.send.next_tsn)
         || std::ranges::any_of(sack.gap_ack_blocks, [&](const sack_gap_ack_block& block) {
-            return !tsn_lt(sack.cumulative_tsn_ack + block.end, assoc.next_tsn);
+            return !tsn_lt(sack.cumulative_tsn_ack + block.end, assoc.send.next_tsn);
         });
     if (acks_unsent) {
         return abort_association(key, header, src, {error_cause{CAUSE_PROTOCOL_VIOLATION, {}}});
     }
-    if (tsn_lt(sack.cumulative_tsn_ack, assoc.cumulative_tsn_ack)) {
+    if (tsn_lt(sack.cumulative_tsn_ack, assoc.send.cumulative_tsn_ack)) {
         return;
     }
 
     bool schedule_fast_retransmission = false;
     bool entered_fast_recovery = false;
     {
-        bool cumulative_ack_advanced = tsn_gt(sack.cumulative_tsn_ack, assoc.cumulative_tsn_ack);
+        bool cumulative_ack_advanced = tsn_gt(sack.cumulative_tsn_ack, assoc.send.cumulative_tsn_ack);
 
-        std::vector<Peer_Path>& paths = assoc.peer_address_list;
+        std::vector<Peer_Path>& paths = assoc.paths.list;
         std::vector<Path_Ack> acks(paths.size());
         auto ack_of = [&](const Outstanding_Data& outstanding) -> Path_Ack& {
             return acks[index_of(assoc, destination_of(assoc, outstanding))];
@@ -1108,14 +1122,14 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
             ack.flight_before = bytes_in_flight(assoc, &path);
         }
 
-        // outstanding_data is in TSN order, so the first match is the lowest
+        // send.outstanding is in TSN order, so the first match is the lowest
         // TSN and the last the highest.
         bool newly_acknowledged = false;
         std::vector<uint32_t> reneged_tsns;
         std::optional<uint32_t> htna;
         std::optional<uint32_t> highest_reported;
         auto now = std::chrono::steady_clock::now();
-        for (auto it = assoc.outstanding_data.begin(); it != assoc.outstanding_data.end();) {
+        for (auto it = assoc.send.outstanding.begin(); it != assoc.send.outstanding.end();) {
             uint32_t tsn = it->first;
             Outstanding_Data& outstanding = it->second;
             Path_Ack& ack = ack_of(outstanding);
@@ -1131,21 +1145,21 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
                 newly_acknowledged = true;
                 ack.newly_acknowledged = true;
                 ack.bytes_acked += static_cast<uint32_t>(data_chunk_wire_size(outstanding.data));
-                if (assoc.rtt_measurement_tsn == tsn && !outstanding.retransmitted) {
+                if (assoc.send.rtt_measurement_tsn == tsn && !outstanding.retransmitted) {
                     update_rto(destination_of(assoc, outstanding), std::chrono::duration_cast<std::chrono::microseconds>(now - outstanding.first_sent));
-                    assoc.rtt_measurement_tsn.reset();
+                    assoc.send.rtt_measurement_tsn.reset();
                 }
             }
 
             if (tsn_lte(tsn, sack.cumulative_tsn_ack)) {
                 if (outstanding.retransmitted) {
-                    assoc.acked_retransmissions.push_back(Acked_Retransmission{
+                    assoc.send.acked_retransmissions.push_back(Acked_Retransmission{
                         tsn, static_cast<uint32_t>(data_chunk_wire_size(outstanding.data)), outstanding.destination});
-                    if (assoc.acked_retransmissions.size() > ACKED_RETRANSMISSION_MEMORY) {
-                        assoc.acked_retransmissions.pop_front();
+                    if (assoc.send.acked_retransmissions.size() > ACKED_RETRANSMISSION_MEMORY) {
+                        assoc.send.acked_retransmissions.pop_front();
                     }
                 }
-                it = assoc.outstanding_data.erase(it);
+                it = assoc.send.outstanding.erase(it);
                 continue;
             }
 
@@ -1163,11 +1177,11 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
             ++it;
         }
 
-        assoc.cumulative_tsn_ack = sack.cumulative_tsn_ack;
+        assoc.send.cumulative_tsn_ack = sack.cumulative_tsn_ack;
         std::vector<uint32_t> duplicates(paths.size(), 0);
         duplicate_bytes(assoc, sack, duplicates);
         if (newly_acknowledged) {
-            assoc.error_count = 0;
+            assoc.paths.error_count = 0;
         }
         for (auto&& [path, ack, duplicate] : std::views::zip(paths, acks, duplicates)) {
             if (ack.newly_acknowledged) {
@@ -1175,9 +1189,9 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
                 path.single_packet_in_flight = false;
             }
             if (ack.newly_acknowledged || duplicate > 0) {
-                grow_cwnd(assoc, path, ack.bytes_acked, duplicate, ack.flight_before);
+                grow_cwnd(assoc.send, path, ack.bytes_acked, duplicate, ack.flight_before);
             }
-            bool sent_here = std::ranges::any_of(assoc.outstanding_data | std::views::values, [&](const Outstanding_Data& outstanding) {
+            bool sent_here = std::ranges::any_of(assoc.send.outstanding | std::views::values, [&](const Outstanding_Data& outstanding) {
                 return &destination_of(assoc, outstanding) == &path;
             });
             if (!sent_here) {
@@ -1185,12 +1199,12 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
             }
         }
 
-        for (auto& [tsn, outstanding] : assoc.outstanding_data) {
+        for (auto& [tsn, outstanding] : assoc.send.outstanding) {
             if (outstanding.gap_acked || outstanding.fast_retransmitted) {
                 continue;
             }
 
-            const std::optional<uint32_t>& above = assoc.in_fast_recovery && cumulative_ack_advanced ? highest_reported : htna;
+            const std::optional<uint32_t>& above = assoc.send.in_fast_recovery && cumulative_ack_advanced ? highest_reported : htna;
             bool was_reneged = std::ranges::contains(reneged_tsns, tsn);
             // Reneging was already counted once while applying the Gap Ack
             // state transition above.
@@ -1205,7 +1219,7 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
             }
         }
 
-        if (schedule_fast_retransmission && !assoc.in_fast_recovery) {
+        if (schedule_fast_retransmission && !assoc.send.in_fast_recovery) {
             for (auto&& [path, ack] : std::views::zip(paths, acks)) {
                 if (ack.fast_retransmitted) {
                     path.ssthresh = std::max(path.cwnd / 2, 4U * pmdcs(path));
@@ -1214,48 +1228,48 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
                 }
             }
 
-            if (!assoc.outstanding_data.empty()) {
-                assoc.in_fast_recovery = true;
-                assoc.fast_recovery_exit_tsn = assoc.outstanding_data.rbegin()->first;
+            if (!assoc.send.outstanding.empty()) {
+                assoc.send.in_fast_recovery = true;
+                assoc.send.fast_recovery_exit_tsn = assoc.send.outstanding.rbegin()->first;
                 entered_fast_recovery = true;
             }
         }
 
-        if (assoc.in_fast_recovery && tsn_gte(sack.cumulative_tsn_ack, assoc.fast_recovery_exit_tsn)) {
-            assoc.in_fast_recovery = false;
+        if (assoc.send.in_fast_recovery && tsn_gte(sack.cumulative_tsn_ack, assoc.send.fast_recovery_exit_tsn)) {
+            assoc.send.in_fast_recovery = false;
         }
 
-        for (const auto& [tsn, outstanding] : assoc.outstanding_data) {
-            if (assoc.rtt_measurement_tsn) {
+        for (const auto& [tsn, outstanding] : assoc.send.outstanding) {
+            if (assoc.send.rtt_measurement_tsn) {
                 break;
             }
             if (!outstanding.gap_acked && !outstanding.retransmitted
-                    && std::ranges::none_of(assoc.outstanding_data, [&](const auto& other) {
+                    && std::ranges::none_of(assoc.send.outstanding, [&](const auto& other) {
                         return other.second.retransmitted && tsn_lte(other.first, tsn) && other.second.last_sent >= outstanding.first_sent;
                     })) {
-                assoc.rtt_measurement_tsn = tsn;
+                assoc.send.rtt_measurement_tsn = tsn;
             }
         }
 
         size_t flight_size = bytes_in_flight(assoc);
-        assoc.peer_rwnd = flight_size >= sack.a_rwnd ? 0 : sack.a_rwnd - static_cast<uint32_t>(flight_size);
-        assoc.peer_max_rwnd = std::max(assoc.peer_max_rwnd, sack.a_rwnd);
-        assoc.sack_since_t3 = true;
+        assoc.send.peer_rwnd = flight_size >= sack.a_rwnd ? 0 : sack.a_rwnd - static_cast<uint32_t>(flight_size);
+        assoc.send.peer_max_rwnd = std::max(assoc.send.peer_max_rwnd, sack.a_rwnd);
+        assoc.send.sack_since_t3 = true;
         if (sack.a_rwnd > 0) {
-            assoc.zero_window_probing = false;
+            assoc.send.zero_window_probing = false;
         }
 
         // 6.3.2 R2-R4, and 7.2.4 step 4.
         for (auto&& [path, ack] : std::views::zip(paths, acks)) {
-            auto earliest = ack.earliest ? assoc.outstanding_data.find(*ack.earliest) : assoc.outstanding_data.end();
-            bool retransmits_earliest = schedule_fast_retransmission && earliest != assoc.outstanding_data.end()
+            auto earliest = ack.earliest ? assoc.send.outstanding.find(*ack.earliest) : assoc.send.outstanding.end();
+            bool retransmits_earliest = schedule_fast_retransmission && earliest != assoc.send.outstanding.end()
                 && earliest->second.pending_retransmission;
             if (!has_unacknowledged_data(assoc, path)) {
-                cancel_expiration(Expiration_Key{key, Expiration_Timer_Type::T3_RTX, path_key(path.address)});
+                cancel_expiration(Expiration_Key{key, Expiration_Timer_Type::T3_RTX, path_key(path.udp_address)});
             } else if ((ack.earliest && sack_acknowledges(sack, *ack.earliest)) || retransmits_earliest) {
-                restart_t3(key, path.address);
+                restart_t3(key, path.udp_address);
             } else if (ack.reneged) {
-                start_t3_if_stopped(key, path.address);
+                start_t3_if_stopped(key, path.udp_address);
             }
         }
     }
@@ -1268,19 +1282,19 @@ void SCTP_Socket::handle_sack(const SCTP_Common_Header& header, const SCTP_Chunk
 }
 
 void SCTP_Socket::send_sack(const Association_Key& key) {
-    Association* assoc = find_tcb(key);
+    Association_TCB* assoc = find_tcb(key);
     if (assoc == nullptr || !receives_data(assoc->state)) {
         return;
     }
     SCTP_Packet sack = make_sack(key, *assoc);
     cancel_expiration(Expiration_Key{key, Expiration_Timer_Type::DELAYED_SACK});
-    enqueue_packet(Deliverable{key, data_path(*assoc).address, std::move(sack)});
+    enqueue_packet(Deliverable{key, data_path(*assoc).udp_address, std::move(sack)});
 }
 
-SCTP_Packet SCTP_Socket::make_sack(const Association_Key& key, Association& assoc) {
+SCTP_Packet SCTP_Socket::make_sack(const Association_Key& key, Association_TCB& assoc) {
     std::vector<sack_gap_ack_block> gaps;
-    for (uint32_t tsn : assoc.tsn_ooo_buffer | std::views::keys) {
-        uint16_t offset = static_cast<uint16_t>(tsn - assoc.last_peer_tsn);
+    for (uint32_t tsn : assoc.receive.ooo | std::views::keys) {
+        uint16_t offset = static_cast<uint16_t>(tsn - assoc.receive.last_peer_tsn);
         if (gaps.empty() || static_cast<uint32_t>(gaps.back().end) + 1 != offset) {
             gaps.push_back({offset, offset});
         } else {
@@ -1290,17 +1304,17 @@ SCTP_Packet SCTP_Socket::make_sack(const Association_Key& key, Association& asso
 
     // Receiver SWS avoidance: an opening too small to be worth a packet is held
     // back until it grows. A shrinking window is always advertised as it is.
-    uint32_t window = receive_window(key, assoc);
-    uint32_t believed = peer_view_of_window(assoc);
+    uint32_t window = receive_window(key, assoc.receive);
+    uint32_t believed = peer_view_of_window(assoc.receive);
     if (window > believed && window - believed < std::min<uint32_t>(RWND / 2, amdcs(assoc))) {
         window = believed;
     }
-    assoc.our_rwnd = window;
-    assoc.received_since_sack = 0;
+    assoc.receive.our_rwnd = window;
+    assoc.receive.received_since_sack = 0;
 
-    SCTP_Packet sack_packet = packet_to(assoc, SACK, sack_chunk_value{assoc.last_peer_tsn, window, std::move(gaps), std::move(assoc.duplicate_tsns)});
-    assoc.duplicate_tsns.clear();
-    assoc.delayed_sack_packet_count = 0;
+    SCTP_Packet sack_packet = packet_to(assoc, SACK, sack_chunk_value{assoc.receive.last_peer_tsn, window, std::move(gaps), std::move(assoc.receive.duplicate_tsns)});
+    assoc.receive.duplicate_tsns.clear();
+    assoc.receive.delayed_sack_packet_count = 0;
     return sack_packet;
 }
 
@@ -1312,19 +1326,19 @@ void SCTP_Socket::handle_data_packet(const SCTP_Packet& packet, const Associatio
         }
     }
 
-    Association* found = find_tcb(key);
+    Association_TCB* found = find_tcb(key);
     if (found == nullptr || !receives_data(found->state)) {
         return;
     }
-    Association& assoc = *found;
+    Association_TCB& assoc = *found;
     bool have_data = false;
     bool send_immediately = acknowledge_immediately;
     std::vector<error_cause> invalid_streams;
     std::vector<Delivery> delivered;
-    bool hole_existed = !assoc.tsn_ooo_buffer.empty();
+    bool hole_existed = !assoc.receive.ooo.empty();
     bool saw_duplicate = false;
     bool dropped = false;
-    size_t used = receives.buffered_bytes(key) + held_bytes(assoc);
+    size_t used = receives.buffered_bytes(key) + held_bytes(assoc.receive);
 
     for (const auto& chunk : packet.chunks) {
         if (chunk.chunk_header.type != DATA) {
@@ -1333,18 +1347,18 @@ void SCTP_Socket::handle_data_packet(const SCTP_Packet& packet, const Associatio
         have_data = true;
         send_immediately = send_immediately || (chunk.chunk_header.flag & DATA_IMMEDIATE_SACK_FLAG) != 0;
         const auto& data = std::get<data_chunk_value>(chunk.chunk_value);
-        assoc.received_since_sack += static_cast<uint32_t>(data.user_data.size());
+        assoc.receive.received_since_sack += static_cast<uint32_t>(data.user_data.size());
         uint32_t tsn = data.tsn;
         // RFC 9260 6.5: an invalid stream is still acked, but reported and never delivered.
-        bool valid_stream = data.stream_identifier < assoc.in_streams;
-        if (tsn_lte(tsn, assoc.last_peer_tsn) || assoc.tsn_ooo_buffer.contains(tsn)) {
-            assoc.duplicate_tsns.push_back(tsn);
+        bool valid_stream = data.stream_identifier < assoc.receive.in_streams;
+        if (tsn_lte(tsn, assoc.receive.last_peer_tsn) || assoc.receive.ooo.contains(tsn)) {
+            assoc.receive.duplicate_tsns.push_back(tsn);
             saw_duplicate = true;
             continue;
         }
         // Past what a Gap Ack Block can report, and past any window we can offer.
-        if (tsn - assoc.last_peer_tsn > UINT16_MAX || (used >= RWND && !make_room(assoc, tsn, used)
-                && !(tsn == assoc.last_peer_tsn + 1 && blocked_on_cumulative_tsn(assoc)))) {
+        if (tsn - assoc.receive.last_peer_tsn > UINT16_MAX || (used >= RWND && !make_room(assoc.receive, tsn, used)
+                && !(tsn == assoc.receive.last_peer_tsn + 1 && blocked_on_cumulative_tsn(assoc.receive)))) {
             dropped = true;
             continue;
         }
@@ -1354,15 +1368,15 @@ void SCTP_Socket::handle_data_packet(const SCTP_Packet& packet, const Associatio
             invalid_streams.push_back(invalid_stream_cause(data.stream_identifier));
         }
         bool framed;
-        if (tsn == assoc.last_peer_tsn + 1) {
-            assoc.last_peer_tsn = tsn;
-            framed = reassemble(assoc, data, valid_stream, delivered) && read_ooo_buffer(assoc, delivered);
+        if (tsn == assoc.receive.last_peer_tsn + 1) {
+            assoc.receive.last_peer_tsn = tsn;
+            framed = reassemble(assoc.receive, data, valid_stream, delivered) && read_ooo_buffer(assoc.receive, delivered);
         } else {
-            auto inserted = assoc.tsn_ooo_buffer.emplace(tsn, Held_Chunk{data});
+            auto inserted = assoc.receive.ooo.emplace(tsn, Held_Chunk{data});
             if (!valid_stream) {
                 inserted.first->second.data.user_data.clear();
             }
-            framed = !valid_stream || assemble_early(assoc, tsn, delivered);
+            framed = !valid_stream || assemble_early(assoc.receive, tsn, delivered);
         }
         if (!framed) {
             return abort_association(key, packet.header, src, {error_cause{CAUSE_PROTOCOL_VIOLATION, {}}});
@@ -1376,14 +1390,14 @@ void SCTP_Socket::handle_data_packet(const SCTP_Packet& packet, const Associatio
     // message could only arrive after the ULP reads, so it gets what there is.
     // Only the message next in its stream can go up early: the ULP sees it
     // through to its end before anything else.
-    Reassembly& message = assoc.reassembly;
+    Reassembly& message = assoc.receive.reassembly;
     if (message.open && !message.bytes.empty() && used + amdcs(assoc) > RWND
-            && (message.unordered || message.ssn == assoc.inbound_streams[message.stream].next_ssn)) {
+            && (message.unordered || message.ssn == assoc.receive.streams[message.stream].next_ssn)) {
         delivered.push_back(Delivery{std::move(message.bytes), false, message.stream, message.ppid});
         message.bytes.clear();
         message.partially_delivered = true;
         if (!message.unordered) {
-            advance_stream(assoc, message.stream, delivered);
+            advance_stream(assoc.receive, message.stream, delivered);
         }
     }
     // 9.2: in SHUTDOWN-SENT every DATA packet is answered with a SHUTDOWN,
@@ -1391,14 +1405,14 @@ void SCTP_Socket::handle_data_packet(const SCTP_Packet& packet, const Associatio
     bool shutdown_sent = assoc.state == SHUTDOWN_SENT;
     SCTP_Packet shutdown;
     if (shutdown_sent) {
-        shutdown = packet_to(assoc, SHUTDOWN, shutdown_chunk_value{assoc.last_peer_tsn});
-        if (!assoc.tsn_ooo_buffer.empty() || !assoc.duplicate_tsns.empty() || dropped) {
+        shutdown = packet_to(assoc, SHUTDOWN, shutdown_chunk_value{assoc.receive.last_peer_tsn});
+        if (!assoc.receive.ooo.empty() || !assoc.receive.duplicate_tsns.empty() || dropped) {
             shutdown.chunks.push_back(std::move(make_sack(key, assoc).chunks[0]));
         }
     }
-    send_immediately = send_immediately || saw_duplicate || dropped || hole_existed || !assoc.tsn_ooo_buffer.empty();
+    send_immediately = send_immediately || saw_duplicate || dropped || hole_existed || !assoc.receive.ooo.empty();
     if (!shutdown_sent && !send_immediately) {
-        send_immediately = ++assoc.delayed_sack_packet_count >= 2;
+        send_immediately = ++assoc.receive.delayed_sack_packet_count >= 2;
     }
 
     // The window a SACK advertises counts what has been handed up.
@@ -1406,11 +1420,11 @@ void SCTP_Socket::handle_data_packet(const SCTP_Packet& packet, const Associatio
         receives.push(key, std::move(delivery.bytes), delivery.complete, delivery.stream, delivery.ppid);
     }
     if (!invalid_streams.empty()) {
-        reply(packet.header, key, reply_destination(assoc, src), assoc.peer_ver_tag, OP_ERROR, error_chunk_value{std::move(invalid_streams)});
+        reply(packet.header, key, reply_destination(assoc, src), assoc.peer.peer_ver_tag, OP_ERROR, error_chunk_value{std::move(invalid_streams)});
     }
     if (shutdown_sent) {
         cancel_expiration(Expiration_Key{key, Expiration_Timer_Type::DELAYED_SACK});
-        enqueue_packet(Deliverable{key, data_path(assoc).address, std::move(shutdown)});
+        enqueue_packet(Deliverable{key, data_path(assoc).udp_address, std::move(shutdown)});
         restart_t2(key);
     } else if (send_immediately) {
         send_sack(key);
@@ -1421,27 +1435,15 @@ void SCTP_Socket::handle_data_packet(const SCTP_Packet& packet, const Associatio
 
 // Receive buffer space not yet taken by messages waiting for the ULP or by DATA
 // held for reordering or reassembly, in bytes of user data.
-uint32_t SCTP_Socket::receive_window(const Association_Key& key, const Association& assoc) {
-    size_t used = receives.buffered_bytes(key) + held_bytes(assoc);
+uint32_t SCTP_Socket::receive_window(const Association_Key& key, const TCB_Receive_Side& receive) {
+    size_t used = receives.buffered_bytes(key) + held_bytes(receive);
     return used >= RWND ? 0 : static_cast<uint32_t>(RWND - used);
 }
 
 void SCTP_Socket::maybe_send_window_update(const Association_Key& key) {
-    Association* assoc = find_tcb(key);
-    if (assoc != nullptr && receives_data(assoc->state) && receive_window(key, *assoc) >= peer_view_of_window(*assoc) + RWND / 4) {
+    Association_TCB* assoc = find_tcb(key);
+    if (assoc != nullptr && receives_data(assoc->state) && receive_window(key, assoc->receive) >= peer_view_of_window(assoc->receive) + RWND / 4) {
         send_sack(key);
     }
 }
 
-bool SCTP_Socket::read_ooo_buffer(Association& assoc, std::vector<Delivery>& delivered) {
-    uint32_t tsn = assoc.last_peer_tsn + 1;
-    for (auto it = assoc.tsn_ooo_buffer.find(tsn); it != assoc.tsn_ooo_buffer.end(); it = assoc.tsn_ooo_buffer.find(++tsn)) {
-        const Held_Chunk& held = it->second;
-        if (!reassemble(assoc, held.data, !held.assembled && !held.data.user_data.empty(), delivered)) {
-            return false;
-        }
-        assoc.tsn_ooo_buffer.erase(it);
-    }
-    assoc.last_peer_tsn = tsn - 1;
-    return true;
-}

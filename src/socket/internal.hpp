@@ -65,7 +65,7 @@ inline Peer_Key path_key(const sockaddr_in& address) {
 
 inline Peer_Key peer_key(const sockaddr_in& address, uint16_t sctp_port) {
     Peer_Key key = path_key(address);
-    key.address.sin_port = htons(sctp_port);
+    key.sctp_address.sin_port = htons(sctp_port);
     return key;
 }
 
@@ -77,24 +77,24 @@ struct Inbound_Datagram {
 };
 inline thread_local const Inbound_Datagram* inbound_datagram = nullptr;
 
-inline Peer_Path* find_path(Association& assoc, const sockaddr_in& address) {
-    auto path = std::ranges::find_if(assoc.peer_address_list, [&](const Peer_Path& candidate) {
-        return same_destination(candidate.address, address);
+inline Peer_Path* find_path(Association_TCB& assoc, const sockaddr_in& address) {
+    auto path = std::ranges::find_if(assoc.paths.list, [&](const Peer_Path& candidate) {
+        return same_destination(candidate.udp_address, address);
     });
-    return path == assoc.peer_address_list.end() ? nullptr : &*path;
+    return path == assoc.paths.list.end() ? nullptr : &*path;
 }
 
-inline const Peer_Path* find_path(const Association& assoc, const sockaddr_in& address) {
-    return find_path(const_cast<Association&>(assoc), address);
+inline const Peer_Path* find_path(const Association_TCB& assoc, const sockaddr_in& address) {
+    return find_path(const_cast<Association_TCB&>(assoc), address);
 }
 
-inline Peer_Path& primary(Association& assoc) {
-    Peer_Path* path = find_path(assoc, assoc.primary_path);
-    return path != nullptr ? *path : assoc.peer_address_list.front();
+inline Peer_Path& primary(Association_TCB& assoc) {
+    Peer_Path* path = find_path(assoc, assoc.paths.primary);
+    return path != nullptr ? *path : assoc.paths.list.front();
 }
 
-inline const Peer_Path& primary(const Association& assoc) {
-    return primary(const_cast<Association&>(assoc));
+inline const Peer_Path& primary(const Association_TCB& assoc) {
+    return primary(const_cast<Association_TCB&>(assoc));
 }
 
 inline void back_off(Peer_Path& path) {
@@ -110,9 +110,9 @@ inline Peer_Path make_path(const sockaddr_in& address, bool confirmed) {
 
 // 7.3: the smallest PMDCS over the destinations DATA can go to, so a chunk
 // retransmitted to an alternate still fits.
-inline uint32_t amdcs(const Association& assoc) {
+inline uint32_t amdcs(const Association_TCB& assoc) {
     uint32_t smallest = 0;
-    for (const Peer_Path& path : assoc.peer_address_list) {
+    for (const Peer_Path& path : assoc.paths.list) {
         if (path.confirmed && path.active && (smallest == 0 || pmdcs(path) < smallest)) {
             smallest = pmdcs(path);
         }
@@ -122,29 +122,29 @@ inline uint32_t amdcs(const Association& assoc) {
 
 // New DATA goes to the primary while it is active, and otherwise to one
 // alternate, the first active CONFIRMED path (8.2).
-inline Peer_Path& data_path(Association& assoc) {
+inline Peer_Path& data_path(Association_TCB& assoc) {
     Peer_Path& preferred = primary(assoc);
     if (preferred.active) {
         return preferred;
     }
-    auto alternate = std::ranges::find_if(assoc.peer_address_list, [](const Peer_Path& path) {
+    auto alternate = std::ranges::find_if(assoc.paths.list, [](const Peer_Path& path) {
         return path.confirmed && path.active;
     });
-    return alternate == assoc.peer_address_list.end() ? preferred : *alternate;
+    return alternate == assoc.paths.list.end() ? preferred : *alternate;
 }
 
-inline const Peer_Path& data_path(const Association& assoc) {
-    return data_path(const_cast<Association&>(assoc));
+inline const Peer_Path& data_path(const Association_TCB& assoc) {
+    return data_path(const_cast<Association_TCB&>(assoc));
 }
 
 // 6.4: timed-out DATA goes to an active CONFIRMED path other than the one it
 // was last sent to, the next such in list order, if there is one.
-inline Peer_Path& retransmission_path(Association& assoc, const sockaddr_in& last) {
+inline Peer_Path& retransmission_path(Association_TCB& assoc, const sockaddr_in& last) {
     Peer_Path& preferred = data_path(assoc);
-    if (!same_destination(preferred.address, last)) {
+    if (!same_destination(preferred.udp_address, last)) {
         return preferred;
     }
-    auto& paths = assoc.peer_address_list;
+    auto& paths = assoc.paths.list;
     size_t from = static_cast<size_t>(&preferred - paths.data());
     for (size_t step = 1; step < paths.size(); ++step) {
         Peer_Path& candidate = paths[(from + step) % paths.size()];
@@ -155,20 +155,20 @@ inline Peer_Path& retransmission_path(Association& assoc, const sockaddr_in& las
     return preferred;
 }
 
-inline Peer_Path& destination_of(Association& assoc, const Outstanding_Data& outstanding) {
+inline Peer_Path& destination_of(Association_TCB& assoc, const Outstanding_Data& outstanding) {
     Peer_Path* path = find_path(assoc, outstanding.destination);
     return path != nullptr ? *path : primary(assoc);
 }
 
-inline const Peer_Path& destination_of(const Association& assoc, const Outstanding_Data& outstanding) {
-    return destination_of(const_cast<Association&>(assoc), outstanding);
+inline const Peer_Path& destination_of(const Association_TCB& assoc, const Outstanding_Data& outstanding) {
+    return destination_of(const_cast<Association_TCB&>(assoc), outstanding);
 }
 
 // Paths awaiting confirmation are probed every RTO, HB.Max.Burst of them at a
 // time in list order; the rest wait for one of those to confirm or fail.
-inline bool probes_for_confirmation(const Association& assoc, const Peer_Path& path) {
+inline bool probes_for_confirmation(const Association_TCB& assoc, const Peer_Path& path) {
     uint32_t ahead = 0;
-    for (const Peer_Path& candidate : assoc.peer_address_list) {
+    for (const Peer_Path& candidate : assoc.paths.list) {
         bool probing = !candidate.confirmed && candidate.active && candidate.hb_enabled;
         if (&candidate == &path) {
             return probing && ahead < sctp_parameters::HB_MAX_BURST;
@@ -179,9 +179,9 @@ inline bool probes_for_confirmation(const Association& assoc, const Peer_Path& p
 }
 
 // A reply goes back where its packet came from, unless that address is UNCONFIRMED.
-inline sockaddr_in reply_destination(const Association& assoc, const sockaddr_in& src) {
+inline sockaddr_in reply_destination(const Association_TCB& assoc, const sockaddr_in& src) {
     const Peer_Path* path = find_path(assoc, src);
-    return path != nullptr && path->confirmed ? src : data_path(assoc).address;
+    return path != nullptr && path->confirmed ? src : data_path(assoc).udp_address;
 }
 
 // The INIT's source, which the INIT ACK carrying the cookie was sent to.
@@ -197,21 +197,15 @@ inline Peer_Key cookie_key(const State_Cookie& cookie) {
     return peer_key(cookie_source(cookie), cookie.sctp_src_port);
 }
 
-inline bool has_unacknowledged_data(const Association& assoc) {
-    return std::ranges::any_of(assoc.outstanding_data | std::views::values, [](const Outstanding_Data& outstanding) {
-        return !outstanding.gap_acked;
-    });
-}
-
-inline bool has_unacknowledged_data(const Association& assoc, const Peer_Path& path) {
-    return std::ranges::any_of(assoc.outstanding_data | std::views::values, [&](const Outstanding_Data& outstanding) {
+inline bool has_unacknowledged_data(const Association_TCB& assoc, const Peer_Path& path) {
+    return std::ranges::any_of(assoc.send.outstanding | std::views::values, [&](const Outstanding_Data& outstanding) {
         return !outstanding.gap_acked && &destination_of(assoc, outstanding) == &path;
     });
 }
 
-inline size_t bytes_in_flight(const Association& assoc, const Peer_Path* path = nullptr) {
+inline size_t bytes_in_flight(const Association_TCB& assoc, const Peer_Path* path = nullptr) {
     size_t total = 0;
-    for (const auto& [tsn, outstanding] : assoc.outstanding_data) {
+    for (const auto& [tsn, outstanding] : assoc.send.outstanding) {
         if (!outstanding.gap_acked && !outstanding.pending_retransmission
                 && (path == nullptr || &destination_of(assoc, outstanding) == path)) {
             total += data_chunk_wire_size(outstanding.data);
@@ -220,7 +214,7 @@ inline size_t bytes_in_flight(const Association& assoc, const Peer_Path* path = 
     return total;
 }
 
-inline bool cwnd_open(const Association& assoc, const Peer_Path& path) {
+inline bool cwnd_open(const Association_TCB& assoc, const Peer_Path& path) {
     size_t flight = bytes_in_flight(assoc, &path);
     return path.single_packet_in_flight ? flight == 0 : flight < path.cwnd;
 }

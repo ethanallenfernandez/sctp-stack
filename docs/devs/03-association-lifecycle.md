@@ -372,7 +372,7 @@ Details that are easy to miss:
 
 - **Readiness is cumulative.** `do_next_shutdown_step` compares
   `cumulative_tsn_ack` against `next_tsn - 1` and requires `outbound` to be
-  empty. Checking that `outstanding_data` is empty would not be enough: DATA
+  empty. Checking that `send.outstanding` is empty would not be enough: DATA
   can be in the send queue with a TSN but no outstanding entry yet.
 - **SHUTDOWN is treated as a SACK without gap blocks.** `handle_shutdown`
   removes outstanding data up to the Cumulative TSN Ack. Chunks that were

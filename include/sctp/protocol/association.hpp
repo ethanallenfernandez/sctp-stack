@@ -111,10 +111,10 @@ struct Plpmtud {
     uint64_t probe_nonce{0};
 };
 
-// A destination of the peer. sin_port holds not the SCTP port, which is the
-// association's, but the UDP encapsulation port this address last sent from.
+// A destination of the peer, at the UDP encapsulation port this address last
+// sent from. The SCTP port is the association's.
 struct Peer_Path {
-    sockaddr_in address;
+    sockaddr_in udp_address;
     bool confirmed;
     // Our address its packets last arrived at, and so the one we send to it
     // from. INADDR_ANY until then: the first address bound.
@@ -145,56 +145,85 @@ struct Peer_Path {
     Plpmtud plpmtud{};
 };
 
-struct Association {
-    // The peer's SCTP port, host order.
-    uint16_t peer_port;
-    uint32_t peer_ver_tag;
-    uint32_t this_ver_tag;
-    uint32_t local_tie_tag;
-    uint32_t peer_tie_tag;
-    Association_State state;
-    std::vector<Peer_Path> peer_address_list;
-    sockaddr_in primary_path;
-    uint16_t error_count;
-    uint32_t peer_rwnd;
-    uint32_t peer_max_rwnd;
-    bool zero_window_probe_allowed;
-    bool zero_window_probing;
-    bool sack_since_t3;
-    // The a_rwnd we last advertised, and the user data received since, which
-    // the peer still counts against it.
-    uint32_t our_rwnd;
-    uint32_t received_since_sack;
-    uint32_t next_tsn;
-    uint32_t last_peer_tsn;
-    uint16_t init_retransmits;
-    uint16_t cookie_retransmits;
-    uint8_t stale_cookie_retries;
-    uint32_t cumulative_tsn_ack;
-    std::map<uint32_t, Outstanding_Data, Tsn_Less> outstanding_data;
-    std::optional<uint32_t> rtt_measurement_tsn;
-    std::chrono::milliseconds hb_interval;
-    // New-DATA packets sent in the current transmission opportunity.
-    uint32_t burst_count;
+// Who the peer is and the tags that prove it, for the association's life.
+struct TCB_Peer {
+    // Host order. The peer's UDP encapsulation ports are per path.
+    uint16_t sctp_port{};
+    uint32_t this_ver_tag{};
+    uint32_t peer_ver_tag{};
+    uint32_t local_tie_tag{};
+    uint32_t peer_tie_tag{};
+};
+
+// Only while the association forms.
+struct Handshake {
+    uint16_t init_retransmits{};
+    uint16_t cookie_retransmits{};
+    uint8_t stale_cookie_retries{};
+};
+
+struct Paths {
+    std::vector<Peer_Path> list;
+    sockaddr_in primary{};
+    // Association-wide; each path also counts its own.
+    uint16_t error_count{};
+    std::chrono::milliseconds hb_interval{sctp_parameters::HB_INTERVAL};
+};
+
+struct TCB_Send_Side {
+    // ULP messages not yet cut into DATA chunks.
+    uint16_t out_streams{};
+    std::vector<uint16_t> next_ssn; // Indexed into by stream number
+    std::deque<Outbound_Message> outbound;
+    size_t outbound_bytes{};
+
+    uint32_t next_tsn{};
+    // The peer's acknowledgement of our DATA.
+    uint32_t cumulative_tsn_ack{};
+    std::map<uint32_t, Outstanding_Data, Tsn_Less> outstanding;
     // TSN and size of retransmitted chunks recently acked cumulatively, which
     // the peer may yet report as Duplicate TSNs.
     std::deque<Acked_Retransmission> acked_retransmissions;
-    bool in_fast_recovery;
-    uint32_t fast_recovery_exit_tsn;
-    std::map<uint32_t, Held_Chunk, Tsn_Less> tsn_ooo_buffer;
+    std::optional<uint32_t> rtt_measurement_tsn{};
+
+    uint32_t peer_rwnd{};
+    uint32_t peer_max_rwnd{};
+    bool zero_window_probe_allowed{};
+    bool zero_window_probing{};
+    bool sack_since_t3{};
+
+    // cwnd itself is kept per path.
+    bool in_fast_recovery{};
+    uint32_t fast_recovery_exit_tsn{};
+    // New-DATA packets sent in the current transmission opportunity.
+    uint32_t burst_count{};
+};
+
+struct TCB_Receive_Side {
+    uint16_t in_streams{};
+    // Our Cumulative TSN Ack point.
+    uint32_t last_peer_tsn{};
+    std::map<uint32_t, Held_Chunk, Tsn_Less> ooo;
     std::vector<uint32_t> duplicate_tsns;
-    uint8_t delayed_sack_packet_count;
-    uint16_t ack_state;
-    uint16_t in_streams;
-    uint16_t out_streams;
-    std::vector<uint16_t> next_ssn; // Indexed into by stream number
-    std::deque<Outbound_Message> outbound;
-    size_t outbound_bytes;
+    uint8_t delayed_sack_packet_count{};
+    // The a_rwnd we last advertised, and the user data received since, which
+    // the peer still counts against it.
+    uint32_t our_rwnd{RWND};
+    uint32_t received_since_sack{};
     Reassembly reassembly;
-    std::unordered_map<uint16_t, Inbound_Stream> inbound_streams;
+    std::unordered_map<uint16_t, Inbound_Stream> streams;
     // Messages completed while another is part way through partial delivery,
     // which has the ULP's attention until its end arrives.
     std::vector<Delivery> held_deliveries;
+};
+
+struct Association_TCB {
+    Association_State state{COOKIE_WAIT};
+    TCB_Peer peer{};
+    Handshake handshake{};
+    Paths paths{};
+    TCB_Send_Side send{};
+    TCB_Receive_Side receive{};
 };
 
 // Names one association while it lives and while its received data waits to
@@ -204,16 +233,16 @@ enum class Association_Key : uint32_t {};
 // A peer transport address: IPv4 address and SCTP port, network order. With
 // the port 0, one destination within an association.
 struct Peer_Key {
-    sockaddr_in address;
+    sockaddr_in sctp_address;
 
     bool operator==(const Peer_Key& other) const {
-        return address.sin_addr.s_addr == other.address.sin_addr.s_addr && address.sin_port == other.address.sin_port;
+        return sctp_address.sin_addr.s_addr == other.sctp_address.sin_addr.s_addr && sctp_address.sin_port == other.sctp_address.sin_port;
     }
 };
 
 struct Peer_Key_Hash {
     size_t operator()(const Peer_Key& k) const {
-        return std::hash<uint64_t>()(uint64_t{k.address.sin_addr.s_addr} << 16 | k.address.sin_port);
+        return std::hash<uint64_t>()(uint64_t{k.sctp_address.sin_addr.s_addr} << 16 | k.sctp_address.sin_port);
     }
 };
 #endif

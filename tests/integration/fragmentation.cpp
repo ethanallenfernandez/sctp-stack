@@ -37,12 +37,12 @@ struct SCTP_Socket_Test_Access {
         peer.sin_family = AF_INET;
         peer.sin_port = htons(19003);
         sctp_parse_ipv4("127.0.0.1", peer.sin_addr);
-        Association association = stack.init_new_association(peer, ntohs(peer.sin_port));
+        Association_TCB association = stack.init_new_association(peer, ntohs(peer.sin_port));
         association.state = ESTABLISHED;
-        association.peer_ver_tag = 0x10203040;
-        association.next_tsn = INITIAL_TSN;
+        association.peer.peer_ver_tag = 0x10203040;
+        association.send.next_tsn = INITIAL_TSN;
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
-        association.primary_path = peer;
+        association.paths.primary = peer;
         Association_Key key{stack.next_association_id++};
         stack.add_peer_addresses(key, stack.associations.insert_or_assign(key, association).first->second, {peer});
         return key;
@@ -74,14 +74,14 @@ struct SCTP_Socket_Test_Access {
         stack.local_address.sin_family = AF_INET;
         stack.local_address.sin_port = htons(LOCAL_PORT);
         sctp_parse_ipv4("127.0.0.1", stack.local_address.sin_addr);
-        Association association = stack.init_new_association(peer_address(), PEER_PORT);
+        Association_TCB association = stack.init_new_association(peer_address(), PEER_PORT);
         association.state = ESTABLISHED;
-        association.this_ver_tag = OUR_TAG;
-        association.peer_ver_tag = 0x10203040;
-        association.last_peer_tsn = PEER_TSN - 1;
-        association.in_streams = 4;
+        association.peer.this_ver_tag = OUR_TAG;
+        association.peer.peer_ver_tag = 0x10203040;
+        association.receive.last_peer_tsn = PEER_TSN - 1;
+        association.receive.in_streams = 4;
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
-        association.primary_path = peer_address();
+        association.paths.primary = peer_address();
         Association_Key key{stack.next_association_id++};
         stack.add_peer_addresses(key, stack.associations.insert_or_assign(key, association).first->second, {peer_address()});
         return key;
@@ -107,12 +107,12 @@ struct SCTP_Socket_Test_Access {
 
     static uint32_t last_peer_tsn(SCTP_Socket& stack, const Association_Key& key) {
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
-        return stack.associations.at(key).last_peer_tsn;
+        return stack.associations.at(key).receive.last_peer_tsn;
     }
 
     static uint32_t next_tsn(SCTP_Socket& stack, const Association_Key& key) {
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
-        return stack.associations.at(key).next_tsn;
+        return stack.associations.at(key).send.next_tsn;
     }
 };
 

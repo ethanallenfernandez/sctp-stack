@@ -118,13 +118,12 @@ namespace {
     // fragmented only if it cannot fit a packet of its own, and a fragment is cut
     // short to fit the window only if it would still fill half the largest
     // window the peer has offered.
-    std::vector<data_chunk_value> cut_new_data(Association& assoc, Send_Allowance& allowance) {
+    std::vector<data_chunk_value> cut_new_data(TCB_Send_Side& send, size_t chunk_limit, Send_Allowance& allowance) {
         std::vector<data_chunk_value> chunks;
-        size_t chunk_limit = amdcs(assoc);
         size_t full_fragment = (chunk_limit - DATA_CHUNK_HEADER_SIZE) & ~size_t{3};
         size_t packet_bytes = 0;
-        while (!assoc.outbound.empty()) {
-            Outbound_Message& message = assoc.outbound.front();
+        while (!send.outbound.empty()) {
+            Outbound_Message& message = send.outbound.front();
             size_t remaining = message.bytes.size() - message.offset;
             size_t take = std::min(remaining, full_fragment);
             size_t space = chunk_limit - packet_bytes;
@@ -135,7 +134,7 @@ namespace {
             if (wire_size(take) > window) {
                 size_t cut = window > DATA_CHUNK_HEADER_SIZE ? (window - DATA_CHUNK_HEADER_SIZE) & ~size_t{3} : 0;
                 bool fragmenting = message.bytes.size() > full_fragment;
-                if (!fragmenting || cut == 0 || wire_size(cut) < assoc.peer_max_rwnd / 2) {
+                if (!fragmenting || cut == 0 || wire_size(cut) < send.peer_max_rwnd / 2) {
                     if (chunks.empty()) {
                         allowance.rwnd_blocked = true;
                     }
@@ -149,7 +148,7 @@ namespace {
                 | (message.unordered ? DATA_FLAG_U : 0);
             auto begin = message.bytes.begin() + static_cast<long>(message.offset);
             chunks.push_back(data_chunk_value{
-                .tsn = assoc.next_tsn++,
+                .tsn = send.next_tsn++,
                 .stream_identifier = message.stream,
                 .stream_seq_num = message.ssn,
                 .payload_protocal = message.ppid,
@@ -158,9 +157,9 @@ namespace {
             });
             packet_bytes += wire_size(take);
             message.offset += take;
-            assoc.outbound_bytes -= take;
+            send.outbound_bytes -= take;
             if (message.offset == message.bytes.size()) {
-                assoc.outbound.pop_front();
+                send.outbound.pop_front();
             }
             if (probe) {
                 break;
@@ -204,9 +203,9 @@ void SCTP_Socket::packet_sent(const Send_Queue::Pending& pending) {
     std::lock_guard<std::mutex> assoc_lock(associations_mutex);
     sends.commit(pending);
     schedule_expirations_after_send(pending.deliverable, std::chrono::steady_clock::now());
-    Association* assoc = find_tcb(pending.deliverable.location);
+    Association_TCB* assoc = find_tcb(pending.deliverable.location);
     if (assoc != nullptr && pending.priority == Send_Priority::NEW_DATA) {
-        ++assoc->burst_count;
+        ++assoc->send.burst_count;
     }
 }
 
@@ -228,7 +227,7 @@ void SCTP_Socket::requeue_bundled_sack(const Send_Queue::Pending& pending) {
 void SCTP_Socket::start_transmission_opportunity() {
     std::lock_guard<std::mutex> assoc_lock(associations_mutex);
     for (auto& assoc : associations | std::views::values) {
-        assoc.burst_count = 0;
+        assoc.send.burst_count = 0;
     }
 }
 
@@ -239,16 +238,16 @@ Send_Allowances SCTP_Socket::send_allowances() {
         if (!transmits_data(assoc.state)) {
             continue;
         }
-        for (Peer_Path& path : assoc.peer_address_list) {
+        for (Peer_Path& path : assoc.paths.list) {
             decay_idle_cwnd(path, now);
         }
         size_t flight_size = bytes_in_flight(assoc);
         allowances.emplace(key, Send_Allowance{
             .flight_size = flight_size,
             .cwnd_open = cwnd_open(assoc, data_path(assoc)),
-            .burst_spent = assoc.burst_count >= sctp_parameters::MAX_BURST,
-            .rwnd = assoc.peer_rwnd,
-            .zero_window_probe = assoc.zero_window_probe_allowed && flight_size == 0,
+            .burst_spent = assoc.send.burst_count >= sctp_parameters::MAX_BURST,
+            .rwnd = assoc.send.peer_rwnd,
+            .zero_window_probe = assoc.send.zero_window_probe_allowed && flight_size == 0,
         });
     }
     return allowances;
@@ -267,7 +266,7 @@ void SCTP_Socket::prepare_data_packet(Deliverable& deliverable, bool new_data) {
         return;
     }
 
-    Association* assoc = find_tcb(deliverable.location);
+    Association_TCB* assoc = find_tcb(deliverable.location);
     if (assoc == nullptr) {
         return;
     }
@@ -280,7 +279,7 @@ void SCTP_Socket::prepare_data_packet(Deliverable& deliverable, bool new_data) {
         }
     }
     size_t flight_after = bytes_in_flight(*assoc, &sent_on) + (new_data ? data_size : 0);
-    if (flight_after >= sent_on.cwnd || data_size >= assoc->peer_rwnd || assoc->state == SHUTDOWN_PENDING) {
+    if (flight_after >= sent_on.cwnd || data_size >= assoc->send.peer_rwnd || assoc->state == SHUTDOWN_PENDING) {
         last_data->chunk_header.flag |= DATA_IMMEDIATE_SACK_FLAG;
     }
     Expiration_Key delayed_sack{deliverable.location, Expiration_Timer_Type::DELAYED_SACK};
@@ -318,11 +317,11 @@ void SCTP_Socket::refill_new_data(Send_Allowances& allowances) {
         if (!allowance.cwnd_open || allowance.burst_spent || sends.has_new_data_for(key)) {
             continue;
         }
-        Association* assoc = find_tcb(key);
-        std::vector<data_chunk_value> chunks = assoc ? cut_new_data(*assoc, allowance) : std::vector<data_chunk_value>{};
+        Association_TCB* assoc = find_tcb(key);
+        std::vector<data_chunk_value> chunks = assoc ? cut_new_data(assoc->send, amdcs(*assoc), allowance) : std::vector<data_chunk_value>{};
         if (!chunks.empty()) {
-            sends.enqueue(Deliverable{key, data_path(*assoc).address,
-                build_data(ntohs(local_address.sin_port), assoc->peer_port, assoc->peer_ver_tag, std::move(chunks))}, Send_Priority::NEW_DATA);
+            sends.enqueue(Deliverable{key, data_path(*assoc).udp_address,
+                build_data(ntohs(local_address.sin_port), assoc->peer.sctp_port, assoc->peer.peer_ver_tag, std::move(chunks))}, Send_Priority::NEW_DATA);
         }
     }
 }
@@ -335,8 +334,8 @@ void SCTP_Socket::arm_zero_window_probes(const Send_Allowances& allowances) {
             continue;
         }
         Expiration_Key timer{key, Expiration_Timer_Type::ZERO_WINDOW_PROBE};
-        Association* assoc = find_tcb(key);
-        if (!expirations.is_active(timer) && assoc != nullptr && !assoc->zero_window_probe_allowed) {
+        Association_TCB* assoc = find_tcb(key);
+        if (!expirations.is_active(timer) && assoc != nullptr && !assoc->send.zero_window_probe_allowed) {
             schedule_expiration(timer, std::chrono::steady_clock::now() + data_path(*assoc).rto);
         }
     }
@@ -402,7 +401,7 @@ sctp_socket_t SCTP_Socket::sending_socket(const Deliverable& deliverable) {
     in_addr source = deliverable.source;
     if (source.s_addr == INADDR_ANY) {
         std::lock_guard<std::mutex> assoc_lock(associations_mutex);
-        Association* assoc = find_tcb(deliverable.location);
+        Association_TCB* assoc = find_tcb(deliverable.location);
         const Peer_Path* path = assoc ? find_path(*assoc, deliverable.destination) : nullptr;
         if (path != nullptr) {
             source = path->source;
@@ -462,12 +461,12 @@ void SCTP_Socket::schedule_expirations_after_send(const Deliverable& deliverable
             case INIT:
             case COOKIE_ECHO: {
                 bool is_init = type == INIT;
-                Association* assoc = find_tcb(deliverable.location);
+                Association_TCB* assoc = find_tcb(deliverable.location);
                 if (assoc == nullptr || assoc->state != (is_init ? COOKIE_WAIT : COOKIE_ECHOED)) {
                     break;
                 }
                 std::chrono::milliseconds delay = sctp_parameters::RTO_INITIAL;
-                uint16_t retransmits = is_init ? assoc->init_retransmits : assoc->cookie_retransmits;
+                uint16_t retransmits = is_init ? assoc->handshake.init_retransmits : assoc->handshake.cookie_retransmits;
                 for (uint16_t i = 0; i < retransmits && delay < sctp_parameters::RTO_MAX; ++i) {
                     delay = std::min(delay * 2, sctp_parameters::RTO_MAX);
                 }

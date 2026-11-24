@@ -186,7 +186,7 @@ flowchart TB
         pt -- "yes" --> inactive["active = false<br/>stop PLPMTUD<br/>ADDR_UNREACHABLE"]
         pc --> act["active again: restart PLPMTUD<br/>ADDR_AVAILABLE"]
     end
-    subgraph A["Association.error_count"]
+    subgraph A["Association_TCB.paths.error_count"]
         ai["+1: T3 expiry<br/>+1: unanswered heartbeat on the DATA path<br/>+1: T2 expiry"]
         ac["= 0: SACK newly acks anything<br/>= 0: SHUTDOWN cum-acks anything<br/>= 0: HEARTBEAT ACK on the data path<br/>= 0: PLPMTU probe ack on the data path<br/>= 0: any packet in SHUTDOWN_SENT"]
         at{"above Association.Max.Retrans (10)?"}

@@ -214,7 +214,7 @@ struct SCTP_Socket_Test_Access {
     static inline std::map<std::pair<const SCTP_Socket*, uint64_t>, Association_Key> known;
 
     static uint64_t peer_id(const Peer_Key& p) {
-        return uint64_t{p.address.sin_addr.s_addr} << 16 | p.address.sin_port;
+        return uint64_t{p.sctp_address.sin_addr.s_addr} << 16 | p.sctp_address.sin_port;
     }
 
     static void forget_known(SCTP_Socket& s) {
@@ -243,7 +243,7 @@ struct SCTP_Socket_Test_Access {
         return k != Association_Key{} ? k : key(s);
     }
 
-    static Association* tcb(SCTP_Socket& s, Association_Key k = {}) {
+    static Association_TCB* tcb(SCTP_Socket& s, Association_Key k = {}) {
         auto it = s.associations.find(resolve(s, k));
         return it == s.associations.end() ? nullptr : &it->second;
     }
@@ -254,33 +254,33 @@ struct SCTP_Socket_Test_Access {
 
     // A TCB as the handshake would leave it, without running the handshake.
     // Extra addresses are CONFIRMED and active.
-    static Association& establish(SCTP_Socket& s, Association_State state = ESTABLISHED,
+    static Association_TCB& establish(SCTP_Socket& s, Association_State state = ESTABLISHED,
                                   std::vector<const char*> others = {}, uint32_t peer_rwnd = RWND) {
         setup(s);
         Association_Key k{s.next_association_id++};
-        if (Association* existing = s.find_tcb(s.association_at(rfc::peer()))) {
+        if (Association_TCB* existing = s.find_tcb(s.association_at(rfc::peer()))) {
             k = s.association_at(rfc::peer());
             s.forget_peer_addresses(k, *existing);
         }
-        Association assoc = s.init_new_association(rfc::addr(), rfc::PEER_PORT);
+        Association_TCB assoc = s.init_new_association(rfc::addr(), rfc::PEER_PORT);
         assoc.state = state;
-        assoc.this_ver_tag = rfc::OUR_TAG;
-        assoc.peer_ver_tag = rfc::PEER_TAG;
-        assoc.next_tsn = rfc::OUR_TSN;
-        assoc.cumulative_tsn_ack = rfc::OUR_TSN - 1;
-        assoc.last_peer_tsn = rfc::PEER_TSN - 1;
-        assoc.peer_rwnd = peer_rwnd;
-        assoc.peer_max_rwnd = peer_rwnd;
-        assoc.out_streams = 10;
-        assoc.in_streams = 10;
-        assoc.next_ssn.assign(10, 0);
+        assoc.peer.this_ver_tag = rfc::OUR_TAG;
+        assoc.peer.peer_ver_tag = rfc::PEER_TAG;
+        assoc.send.next_tsn = rfc::OUR_TSN;
+        assoc.send.cumulative_tsn_ack = rfc::OUR_TSN - 1;
+        assoc.receive.last_peer_tsn = rfc::PEER_TSN - 1;
+        assoc.send.peer_rwnd = peer_rwnd;
+        assoc.send.peer_max_rwnd = peer_rwnd;
+        assoc.send.out_streams = 10;
+        assoc.receive.in_streams = 10;
+        assoc.send.next_ssn.assign(10, 0);
         auto& tcb = s.associations.insert_or_assign(k, assoc).first->second;
         std::vector<sockaddr_in> addresses{rfc::addr()};
         for (const char* ip : others) {
             addresses.push_back(rfc::addr(ip));
         }
         s.add_peer_addresses(k, tcb, addresses);
-        for (Peer_Path& path : tcb.peer_address_list) {
+        for (Peer_Path& path : tcb.paths.list) {
             path.confirmed = true;
             path.data_sent_at = rfc::Clock::now();
         }
@@ -496,8 +496,8 @@ struct SCTP_Socket_Test_Access {
     }
 
     static uint32_t receive_window(SCTP_Socket& s) {
-        Association* a = tcb(s);
-        return a ? s.receive_window(key(s), *a) : 0;
+        Association_TCB* a = tcb(s);
+        return a ? s.receive_window(key(s), a->receive) : 0;
     }
 
     static void handle_icmp_ptb(SCTP_Socket& s, const sockaddr_in& to, const std::vector<uint8_t>& quoted, uint32_t mtu) {
@@ -522,13 +522,13 @@ struct SCTP_Socket_Test_Access {
     }
 
     static Peer_Path* path(SCTP_Socket& s, const char* ip, Association_Key k = {}) {
-        Association* a = tcb(s, k);
+        Association_TCB* a = tcb(s, k);
         return a ? find_path(*a, rfc::addr(ip)) : nullptr;
     }
 
     static bool data_path_is(SCTP_Socket& s, const char* ip) {
-        Association* a = tcb(s);
-        return a && same_destination(data_path(*a).address, rfc::addr(ip));
+        Association_TCB* a = tcb(s);
+        return a && same_destination(data_path(*a).udp_address, rfc::addr(ip));
     }
 
     static void start_heartbeats_for(SCTP_Socket& s, Association_Key k = {}) {

@@ -46,19 +46,19 @@ struct SCTP_Socket_Test_Access {
         stack.local_address.sin_family = AF_INET;
         stack.local_address.sin_port = htons(LOCAL_PORT);
         sctp_parse_ipv4("127.0.0.1", stack.local_address.sin_addr);
-        Association association = stack.init_new_association(peer_address(), PEER_PORT);
+        Association_TCB association = stack.init_new_association(peer_address(), PEER_PORT);
         association.state = ESTABLISHED;
-        association.this_ver_tag = OUR_TAG;
-        association.peer_ver_tag = PEER_TAG;
-        association.next_tsn = INITIAL_TSN;
-        association.cumulative_tsn_ack = INITIAL_TSN - 1;
-        association.last_peer_tsn = PEER_TSN - 1;
-        association.out_streams = 3;
-        association.next_ssn.assign(3, 0);
-        association.in_streams = 4;
-        association.peer_rwnd = 65535;
+        association.peer.this_ver_tag = OUR_TAG;
+        association.peer.peer_ver_tag = PEER_TAG;
+        association.send.next_tsn = INITIAL_TSN;
+        association.send.cumulative_tsn_ack = INITIAL_TSN - 1;
+        association.receive.last_peer_tsn = PEER_TSN - 1;
+        association.send.out_streams = 3;
+        association.send.next_ssn.assign(3, 0);
+        association.receive.in_streams = 4;
+        association.send.peer_rwnd = 65535;
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
-        association.primary_path = peer_address();
+        association.paths.primary = peer_address();
         Association_Key key{stack.next_association_id++};
         stack.add_peer_addresses(key, stack.associations.insert_or_assign(key, association).first->second, {peer_address()});
         return key;
@@ -98,7 +98,7 @@ struct SCTP_Socket_Test_Access {
         return stack.associations.count(key) != 0;
     }
 
-    static Association tcb(SCTP_Socket& stack, const Association_Key& key) {
+    static Association_TCB tcb(SCTP_Socket& stack, const Association_Key& key) {
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
         return stack.associations.at(key);
     }
@@ -110,7 +110,7 @@ struct SCTP_Socket_Test_Access {
 
     static void set_next_inbound_ssn(SCTP_Socket& stack, const Association_Key& key, uint16_t stream, uint16_t ssn) {
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
-        stack.associations.at(key).inbound_streams[stream].next_ssn = ssn;
+        stack.associations.at(key).receive.streams[stream].next_ssn = ssn;
     }
 
     static void do_next_shutdown_step(SCTP_Socket& stack, const Association_Key& key) {
@@ -184,7 +184,7 @@ static void test_send_streams() {
     }
 
     stack.sctp_send_data(key, {'x'}, 3);
-    check(Access::drain(stack).empty() && Access::tcb(stack, key).outbound.empty(),
+    check(Access::drain(stack).empty() && Access::tcb(stack, key).send.outbound.empty(),
           "a stream past the negotiated outbound count is refused");
 }
 
@@ -237,14 +237,14 @@ static void test_streams_are_independent() {
     check(bytes_of(early) == std::vector<std::string>{"stream 1, first", "stream 1, second"},
           "stream 1 is delivered though TSN +0 is missing");
     check(early.size() == 2 && early[0].stream == 1 && early[1].stream == 1, "and reported as stream 1");
-    check(Access::tcb(stack, key).last_peer_tsn == PEER_TSN - 1, "the Cumulative TSN Ack has not moved");
+    check(Access::tcb(stack, key).receive.last_peer_tsn == PEER_TSN - 1, "the Cumulative TSN Ack has not moved");
 
     Access::deliver(stack, 0, 0, 0, "stream 0, first");
     auto late = read_all(stack, key);
     check(bytes_of(late) == std::vector<std::string>{"stream 0, first", "stream 0, second"},
           "stream 0 follows once its gap is filled");
     check(late.size() == 2 && late[0].stream == 0, "reported as stream 0");
-    check(Access::tcb(stack, key).last_peer_tsn == PEER_TSN + 3, "and every TSN is acknowledged");
+    check(Access::tcb(stack, key).receive.last_peer_tsn == PEER_TSN + 3, "and every TSN is acknowledged");
 }
 
 static void test_fragmented_message_above_a_gap() {
@@ -262,7 +262,7 @@ static void test_fragmented_message_above_a_gap() {
     Access::deliver(stack, 0, 0, 0, "zero");
     check(bytes_of(read_all(stack, key)) == std::vector<std::string>{"zero"},
           "and is not delivered again when the Cumulative TSN Ack passes it");
-    check(Access::has_association(stack, key) && Access::tcb(stack, key).last_peer_tsn == PEER_TSN + 3,
+    check(Access::has_association(stack, key) && Access::tcb(stack, key).receive.last_peer_tsn == PEER_TSN + 3,
           "its fragments still pass the framing checks");
 }
 

@@ -70,7 +70,7 @@ void s9_2_shutdown() {
     section("9.2 Shutdown of an Association");
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         Access::send(s, KB);
         Access::sent(s);
         s.sctp_shutdown(Access::key(s));
@@ -110,14 +110,14 @@ void s9_2_shutdown() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         s.sctp_shutdown(Access::key(s));
         Access::sent(s);
         Access::fire(s, Expiration_Timer_Type::T2_SHUTDOWN);
         Access::sent(s);
         uint64_t before = Access::generation(s, Expiration_Timer_Type::T2_SHUTDOWN);
         Access::receive(s, packet(OUR_TAG, {chunk(HEARTBEAT, heartbeat_chunk_value{{1, 2, 3, 4}})}));
-        req("9260-9.2-6", a.error_count == 0 && Access::generation(s, Expiration_Timer_Type::T2_SHUTDOWN) != before,
+        req("9260-9.2-6", a.paths.error_count == 0 && Access::generation(s, Expiration_Timer_Type::T2_SHUTDOWN) != before,
             "any packet from the peer clears the count and restarts T2-shutdown");
         uint64_t t2 = Access::generation(s, Expiration_Timer_Type::T2_SHUTDOWN);
         Access::receive(s, packet(OUR_TAG, {data_chunk(data(PEER_TSN + 2, {'g'}, DATA_FLAG_U | DATA_FLAG_B | DATA_FLAG_E))}));
@@ -134,7 +134,7 @@ void s9_2_shutdown() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         shutdown_from_peer(s);
         Sctp_Status ignored = s.sctp_shutdown(Access::key(s));
         shutdown_from_peer(s);
@@ -158,7 +158,7 @@ void s9_2_shutdown() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         Access::send(s, KB);
         Access::sent(s);
         shutdown_from_peer(s);
@@ -178,7 +178,7 @@ void s9_2_shutdown() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s, ESTABLISHED);
+        Association_TCB& a = Access::establish(s, ESTABLISHED);
         Access::receive(s, packet(OUR_TAG, {chunk(SHUTDOWN_COMPLETE, empty_chunk_value{})}));
         req("9260-9.2-18", a.state == ESTABLISHED && Access::tcb(s) != nullptr, "SHUTDOWN COMPLETE outside SHUTDOWN-ACK-SENT is discarded");
         SCTP_Socket t;
@@ -190,7 +190,7 @@ void s9_2_shutdown() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s, SHUTDOWN_ACK_SENT);
+        Association_TCB& a = Access::establish(s, SHUTDOWN_ACK_SENT);
         Access::receive(s, packet(0, {chunk(INIT, init_value(0x4444))}));
         auto out = Access::sent(s);
         req("9260-9.2-22", out.any(SHUTDOWN_ACK) && !out.any(INIT_ACK) && a.state == SHUTDOWN_ACK_SENT,
@@ -200,20 +200,20 @@ void s9_2_shutdown() {
         SCTP_Socket s;
         Association_Key k = Access::associate(s);
         Access::sent(s);
-        Association* a = Access::tcb(s, k);
+        Association_TCB* a = Access::tcb(s, k);
         a->state = state;
-        Access::receive(s, packet(a->this_ver_tag, {chunk(SHUTDOWN_ACK, empty_chunk_value{})}));
+        Access::receive(s, packet(a->peer.this_ver_tag, {chunk(SHUTDOWN_ACK, empty_chunk_value{})}));
         auto out = Access::sent(s);
         const Deliverable* complete = out.with(SHUTDOWN_COMPLETE);
-        req("9260-9.2-23", complete && only(complete->packet, SHUTDOWN_COMPLETE) && complete->packet.header.verification_tag == a->this_ver_tag
+        req("9260-9.2-23", complete && only(complete->packet, SHUTDOWN_COMPLETE) && complete->packet.header.verification_tag == a->peer.this_ver_tag
                 && a->state == state && Access::armed(s, Expiration_Timer_Type::T1_INIT),
             "SHUTDOWN ACK during setup draws a lone SHUTDOWN COMPLETE under its tag; T1 runs on");
-        Access::receive(s, packet(a->this_ver_tag, {chunk(SHUTDOWN, shutdown_chunk_value{0})}));
+        Access::receive(s, packet(a->peer.this_ver_tag, {chunk(SHUTDOWN, shutdown_chunk_value{0})}));
         req("9260-9.2-24", Access::sent(s).empty() && a->state == state, "SHUTDOWN during setup is silently discarded");
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s, SHUTDOWN_SENT);
+        Association_TCB& a = Access::establish(s, SHUTDOWN_SENT);
         shutdown_from_peer(s);
         auto out = Access::sent(s);
         req("9260-9.2-25", out.any(SHUTDOWN_ACK) && a.state == SHUTDOWN_ACK_SENT && Access::armed(s, Expiration_Timer_Type::T2_SHUTDOWN),
@@ -239,7 +239,7 @@ void s10_icmp() {
         SCTP_Socket s;
         Access::establish(s);
         Access::start_heartbeats_for(s);
-        Association* a = Access::tcb(s);
+        Association_TCB* a = Access::tcb(s);
         auto quoted = serialize_sctp_packet(build_packet(LOCAL_PORT, PEER_PORT, PEER_TAG, HEARTBEAT, heartbeat_chunk_value{{1, 2, 3, 4}}));
         Access::handle_icmp_ptb(s, addr(), quoted, 1020);
         bool used = a && primary(*a).plpmtud.state == Plpmtud_State::ERROR;
@@ -252,7 +252,7 @@ void s10_icmp() {
         SCTP_Socket s;
         Access::establish(s);
         Access::start_heartbeats_for(s);
-        Association* a = Access::tcb(s);
+        Association_TCB* a = Access::tcb(s);
         auto before = a ? primary(*a).plpmtud.state : Plpmtud_State::DISABLED;
         Access::handle_icmp_ptb(s, addr("127.0.0.9"), serialize_sctp_packet(build_packet(LOCAL_PORT, PEER_PORT, PEER_TAG, HEARTBEAT, heartbeat_chunk_value{{1}})), 1020);
         bool unknown = a && primary(*a).plpmtud.state == before;
@@ -267,11 +267,11 @@ void s10_icmp() {
         Access::setup(s);
         Association_Key k = Access::associate(s);
         auto init = Access::sent(s);
-        Association* a = Access::tcb(s, k);
-        a->peer_address_list[0].plpmtud.state = Plpmtud_State::BASE;
-        a->peer_address_list[0].plpmtud.probed_size = 1400;
+        Association_TCB* a = Access::tcb(s, k);
+        a->paths.list[0].plpmtud.state = Plpmtud_State::BASE;
+        a->paths.list[0].plpmtud.probed_size = 1400;
         Access::handle_icmp_ptb(s, addr(), init.empty() ? std::vector<uint8_t>{} : serialize_sctp_packet(init[0]), 1020);
-        req("9260-10-5", a->peer_address_list[0].plpmtud.state != Plpmtud_State::BASE,
+        req("9260-10-5", a->paths.list[0].plpmtud.state != Plpmtud_State::BASE,
             "with a quoted tag of 0, an INIT whose Initiate Tag is ours is accepted");
     }
     {
@@ -375,7 +375,7 @@ void s14_tcb_and_s16_parameters() {
         && SACK_DELAY == milliseconds(200);
     req("9260-16-1", recommended, "the protocol parameters take the recommended values");
     SCTP_Socket s;
-    Association& a = Access::establish(s);
+    Association_TCB& a = Access::establish(s);
     Peer_Path& p = primary(a);
     SCTP_Socket_Test_Access::send(s, KB);
     Access::sent(s);

@@ -93,7 +93,7 @@ flowchart LR
 - **§x.y** refers to a section of RFC 9260 unless another RFC is named
   (RFC 6951 is UDP encapsulation, RFC 8899 is DPLPMTUD, RFC 4820 is the PAD chunk).
 - `file.cpp: function()` points at code. Paths are relative to the repository root.
-- "TCB" and `Association` mean the same thing: the per-association state of
+- "TCB" and `Association_TCB` mean the same thing: the per-association state of
   §14.
 - "ULP" is the application using the library.
 - Identifiers such as `COOKIE_ECHOED` or `T3_RTX` are spelled as they are in the code.

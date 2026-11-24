@@ -44,11 +44,11 @@ bool is_assoc_change(const std::optional<Notification>& n, Assoc_Change_State st
 
 struct SCTP_Socket_Test_Access {
     static void add_association(SCTP_Socket& stack, Association_State state) {
-        Association assoc = stack.init_new_association(peer_address(), PEER_PORT);
+        Association_TCB assoc = stack.init_new_association(peer_address(), PEER_PORT);
         assoc.state = state;
-        assoc.this_ver_tag = OUR_TAG;
-        assoc.peer_ver_tag = PEER_TAG;
-        assoc.primary_path = peer_address();
+        assoc.peer.this_ver_tag = OUR_TAG;
+        assoc.peer.peer_ver_tag = PEER_TAG;
+        assoc.paths.primary = peer_address();
         Association_Key key{stack.next_association_id++};
         stack.add_peer_addresses(key, stack.associations.insert_or_assign(key, assoc).first->second, {peer_address()});
     }

@@ -38,7 +38,7 @@ void s7_1_and_7_2() {
     section("7.1 / 7.2 SCTP Differences from TCP Congestion Control, SCTP Slow-Start and Congestion Avoidance");
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         Peer_Path& p = primary(a);
         p.cwnd = 50000;
         p.data_sent_at = Clock::now() - std::chrono::seconds(10);
@@ -47,7 +47,7 @@ void s7_1_and_7_2() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         Peer_Path& p = primary(a);
         uint32_t initial = p.cwnd;
         req("9260-7.2.1-1", initial == std::min(4 * pmdcs(p), std::max(2 * pmdcs(p), 4404U)), "the initial cwnd is min(4 PMDCS, max(2 PMDCS, 4404))");
@@ -64,15 +64,15 @@ void s7_1_and_7_2() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         Peer_Path& p = primary(a);
         p.cwnd = 20000;
         Access::send(s, KB);
         Access::sent(s);
         sack(s, OUR_TSN);
         bool idle_held = p.cwnd == 20000;
-        a.in_fast_recovery = true;
-        a.fast_recovery_exit_tsn = OUR_TSN + 100;
+        a.send.in_fast_recovery = true;
+        a.send.fast_recovery_exit_tsn = OUR_TSN + 100;
         fill(s, 24);
         sack(s, OUR_TSN + 1, {{3, 3}});
         req("9260-7.2.1-5", idle_held && p.cwnd <= 20000, "slow start grows cwnd only when it is full and not in Fast Recovery");
@@ -80,18 +80,18 @@ void s7_1_and_7_2() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         Access::send(s, {1, 2, 3, 4, 5});
         Access::sent(s);
         req("9260-7.2-4", bytes_in_flight(a) == DATA_CHUNK_HEADER_SIZE + 8, "congestion arithmetic counts DATA chunks with their padding");
-        req("9260-7.2.1-3", primary(a).ssthresh >= a.peer_max_rwnd, "the initial ssthresh is at least the largest window offered");
+        req("9260-7.2.1-3", primary(a).ssthresh >= a.send.peer_max_rwnd, "the initial ssthresh is at least the largest window offered");
         req("9260-7.2.1-4", true && primary(a).cwnd > 0, "limited overbooking (6.1 rule B) is supported");
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s, ESTABLISHED, {"127.0.0.2"});
-        Peer_Path& one = a.peer_address_list[0];
-        Peer_Path& two = a.peer_address_list[1];
+        Association_TCB& a = Access::establish(s, ESTABLISHED, {"127.0.0.2"});
+        Peer_Path& one = a.paths.list[0];
+        Peer_Path& two = a.paths.list[1];
         s.sctp_set_primary(Access::key(s), addr("127.0.0.2"));
         fill(s, 8);
         uint32_t one_before = one.cwnd, two_before = two.cwnd;
@@ -101,7 +101,7 @@ void s7_1_and_7_2() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         Peer_Path& p = primary(a);
         p.cwnd = 40000;
         p.ssthresh = 100000;
@@ -118,7 +118,7 @@ void s7_1_and_7_2() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         Peer_Path& p = primary(a);
         p.cwnd = 6000;
         p.ssthresh = 5000;
@@ -133,13 +133,13 @@ void s7_1_and_7_2() {
         p.partial_bytes_acked = 0;
         uint32_t at = p.cwnd;
         fill(s, 20);
-        uint32_t highest = a.outstanding_data.empty() ? OUR_TSN : a.outstanding_data.rbegin()->first;
+        uint32_t highest = a.send.outstanding.empty() ? OUR_TSN : a.send.outstanding.rbegin()->first;
         sack(s, highest);
         req("9260-7.2.2-3", p.cwnd <= at + pmdcs(p), "never more than PMDCS per round trip");
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         Peer_Path& p = primary(a);
         p.cwnd = 30000;
         fill(s, 9);
@@ -150,11 +150,11 @@ void s7_1_and_7_2() {
             "loss reported by SACK: ssthresh = max(cwnd / 2, 4 PMDCS), cwnd = ssthresh");
         uint32_t held = p.cwnd;
         sack(s, OUR_TSN - 1, {{2, 5}, {7, 7}});
-        req("9260-7.2.4-5", Access::tcb(s) && a.in_fast_recovery && p.cwnd == held, "a later loss in Fast Recovery does not cut cwnd again");
+        req("9260-7.2.4-5", Access::tcb(s) && a.send.in_fast_recovery && p.cwnd == held, "a later loss in Fast Recovery does not cut cwnd again");
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         Peer_Path& p = primary(a);
         p.cwnd = 30000;
         fill(s, 3);
@@ -169,7 +169,7 @@ void s7_1_and_7_2() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         Peer_Path& p = primary(a);
         p.cwnd = 20000;
         p.ssthresh = 1000000;
@@ -181,7 +181,7 @@ void s7_1_and_7_2() {
         bool full = bytes_in_flight(a) >= before;
         sack(s, OUR_TSN + 1, {{2, 4}});
         uint32_t grown = before + std::min<uint32_t>(3 * CHUNK, pmdcs(p));
-        req("9260-7.2.4-6", full && a.in_fast_recovery && p.ssthresh == std::max(grown / 2, 4 * pmdcs(p)),
+        req("9260-7.2.4-6", full && a.send.in_fast_recovery && p.ssthresh == std::max(grown / 2, 4 * pmdcs(p)),
             "a SACK that also advances the Cumulative TSN Ack grows cwnd before the Fast Retransmit cut");
     }
 }
@@ -201,14 +201,14 @@ void s7_2_4_fast_retransmit() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         primary(a).cwnd = 30000;
         fill(s, 6);
         sack(s, OUR_TSN - 1, {{2, 2}});
         sack(s, OUR_TSN - 1, {{2, 3}});
         bool waited = Access::sent(s).data().empty();
         sack(s, OUR_TSN - 1, {{2, 3}});
-        bool htna = a.outstanding_data.at(OUR_TSN).missing_reports == 2;
+        bool htna = a.send.outstanding.at(OUR_TSN).missing_reports == 2;
         sack(s, OUR_TSN - 1, {{2, 4}});
         primary(a).cwnd = 0;
         auto out = Access::sent(s).data();
@@ -222,7 +222,7 @@ void s7_2_5_and_7_3() {
     section("7.2.5 Reinitialization, 7.3 PMTU Discovery");
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         Access::add_local(s, "127.0.0.2");
         Peer_Path& p = primary(a);
         p.source = ipv4("127.0.0.1");
@@ -235,12 +235,12 @@ void s7_2_5_and_7_3() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s, ESTABLISHED, {"127.0.0.2"});
+        Association_TCB& a = Access::establish(s, ESTABLISHED, {"127.0.0.2"});
         Access::start_heartbeats_for(s);
-        a.peer_address_list[1].plpmtud.plpmtu = 1000;
-        req("9260-7.3-1", a.peer_address_list[0].plpmtud.state != Plpmtud_State::DISABLED
-                && a.peer_address_list[1].plpmtud.state != Plpmtud_State::DISABLED, "PMTU discovery runs per destination");
-        req("9260-7.3-2", a.peer_address_list[0].plpmtud.plpmtu != a.peer_address_list[1].plpmtud.plpmtu,
+        a.paths.list[1].plpmtud.plpmtu = 1000;
+        req("9260-7.3-1", a.paths.list[0].plpmtud.state != Plpmtud_State::DISABLED
+                && a.paths.list[1].plpmtud.state != Plpmtud_State::DISABLED, "PMTU discovery runs per destination");
+        req("9260-7.3-2", a.paths.list[0].plpmtud.plpmtu != a.paths.list[1].plpmtud.plpmtu,
             "each destination has its own PMTU estimate");
     }
 }
@@ -249,30 +249,30 @@ void s8_1_endpoint_failure() {
     section("8.1 Endpoint Failure Detection");
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s, ESTABLISHED, {"127.0.0.2"});
+        Association_TCB& a = Access::establish(s, ESTABLISHED, {"127.0.0.2"});
         Access::send(s, KB);
         Access::sent(s);
         Access::fire(s, Expiration_Timer_Type::T3_RTX, PEER_IP);
         Access::sent(s);
-        uint16_t after_t3 = a.error_count;
+        uint16_t after_t3 = a.paths.error_count;
         Access::start_heartbeats_for(s);
         Access::fire(s, Expiration_Timer_Type::HEARTBEAT, "127.0.0.2");
         Access::sent(s);
         Access::fire(s, Expiration_Timer_Type::HEARTBEAT, "127.0.0.2");
         req("9260-8.1-1", after_t3 == 1, "each retransmission timeout counts against the association");
-        req("9260-8.1-2", a.error_count == after_t3, "an unanswered heartbeat on an alternate path does not");
+        req("9260-8.1-2", a.paths.error_count == after_t3, "an unanswered heartbeat on an alternate path does not");
         Access::sent(s);
-        sack(s, a.next_tsn - 1, {}, addr("127.0.0.2"));
-        req("9260-8.1-5", a.error_count == 0, "a SACK acknowledging DATA resets the counter");
+        sack(s, a.send.next_tsn - 1, {}, addr("127.0.0.2"));
+        req("9260-8.1-5", a.paths.error_count == 0, "a SACK acknowledging DATA resets the counter");
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         Access::start_heartbeats_for(s);
-        a.error_count = 3;
+        a.paths.error_count = 3;
         Access::fire(s, Expiration_Timer_Type::HEARTBEAT, PEER_IP);
         hb_ack_for(s, PEER_IP, Access::sent(s));
-        req("9260-8.1-6", a.error_count == 0, "a HEARTBEAT ACK resets it too");
+        req("9260-8.1-6", a.paths.error_count == 0, "a HEARTBEAT ACK resets it too");
     }
     {
         SCTP_Socket s;
@@ -292,7 +292,7 @@ void s8_1_endpoint_failure() {
 void s8_2_path_failure() {
     section("8.2 Path Failure Detection");
     SCTP_Socket s;
-    Association& a = Access::establish(s, ESTABLISHED, {"127.0.0.2", "127.0.0.3"});
+    Association_TCB& a = Access::establish(s, ESTABLISHED, {"127.0.0.2", "127.0.0.3"});
     Access::start_heartbeats_for(s);
     Access::notifications(s);
     for (int i = 0; i <= sctp_parameters::PATH_MAX_RETRANS; ++i) {
@@ -329,7 +329,7 @@ void s8_3_heartbeat() {
         req("9260-8.3-1", Access::armed(s, Expiration_Timer_Type::HEARTBEAT, PEER_IP) && Access::armed(s, Expiration_Timer_Type::HEARTBEAT, "127.0.0.2"),
             "every idle destination is heartbeated by default");
         auto left = Access::remaining(s, Expiration_Timer_Type::HEARTBEAT, PEER_IP);
-        Association* a = Access::tcb(s);
+        Association_TCB* a = Access::tcb(s);
         auto rto = a ? std::chrono::duration_cast<std::chrono::milliseconds>(primary(*a).rto) : std::chrono::milliseconds{};
         req("9260-8.3-13", left && *left >= sctp_parameters::HB_INTERVAL + rto / 2 - std::chrono::milliseconds(5)
                 && *left <= sctp_parameters::HB_INTERVAL + rto * 3 / 2,
@@ -348,7 +348,7 @@ void s8_3_heartbeat() {
         "HEARTBEAT is answered from COOKIE-ECHOED or ESTABLISHED until SHUTDOWN-SENT or SHUTDOWN-ACK-SENT");
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s, ESTABLISHED, {"127.0.0.2"});
+        Association_TCB& a = Access::establish(s, ESTABLISHED, {"127.0.0.2"});
         Access::start_heartbeats_for(s);
         Access::notifications(s);
         Peer_Path* two = Access::path(s, "127.0.0.2");
@@ -386,9 +386,9 @@ void s8_3_heartbeat() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         Access::start_heartbeats_for(s);
-        a.error_count = 2;
+        a.paths.error_count = 2;
         Access::fire(s, Expiration_Timer_Type::HEARTBEAT, PEER_IP);
         auto out = Access::sent(s);
         const auto* hb = out.empty() ? nullptr : find_value<heartbeat_chunk_value>(out[0], HEARTBEAT);
@@ -396,7 +396,7 @@ void s8_3_heartbeat() {
                 && hb->info.size() >= HEARTBEAT_INFO_SIZE + 8,
             "the Heartbeat Info carries the send time and the destination");
         hb_ack_for(s, PEER_IP, out);
-        req("9260-8.3-11", a.error_count == 0, "a HEARTBEAT ACK clears the association's error count");
+        req("9260-8.3-11", a.paths.error_count == 0, "a HEARTBEAT ACK clears the association's error count");
     }
     {
         SCTP_Socket s;
@@ -537,7 +537,7 @@ void s8_5_tags() {
         "and is ignored outside SHUTDOWN-ACK-SENT");
     for (Association_State state : {COOKIE_WAIT, COOKIE_ECHOED}) {
         SCTP_Socket s;
-        Association& a = Access::establish(s, state);
+        Association_TCB& a = Access::establish(s, state);
         Access::receive(s, packet(OUR_TAG, {chunk(SHUTDOWN_ACK, empty_chunk_value{})}));
         auto out = Access::sent(s);
         const Deliverable* complete = out.with(SHUTDOWN_COMPLETE);

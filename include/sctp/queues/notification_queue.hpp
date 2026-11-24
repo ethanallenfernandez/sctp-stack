@@ -36,7 +36,8 @@ enum class Peer_Addr_State {
 };
 
 struct Peer_Addr_Change {
-    sockaddr_in address;
+    // The peer's IPv4 address and SCTP port.
+    sockaddr_in sctp_address;
     Peer_Addr_State state;
 };
 

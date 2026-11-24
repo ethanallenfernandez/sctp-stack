@@ -76,16 +76,16 @@ struct SCTP_Socket_Test_Access {
             socket.local_address.sin_port = htons(LOCAL_PORT);
             sctp_parse_ipv4("127.0.0.1", socket.local_address.sin_addr);
 
-            Association assoc = socket.init_new_association(peer_address(), PEER_PORT);
-            assoc.this_ver_tag = OUR_TAG;
-            assoc.peer_ver_tag = PEER_TAG;
+            Association_TCB assoc = socket.init_new_association(peer_address(), PEER_PORT);
+            assoc.peer.this_ver_tag = OUR_TAG;
+            assoc.peer.peer_ver_tag = PEER_TAG;
             assoc.state = state;
-            assoc.next_tsn = NEXT_TSN;
-            assoc.cumulative_tsn_ack = cumulative_tsn_ack;
-            assoc.last_peer_tsn = LAST_PEER_TSN;
-            assoc.primary_path = peer_address();
+            assoc.send.next_tsn = NEXT_TSN;
+            assoc.send.cumulative_tsn_ack = cumulative_tsn_ack;
+            assoc.receive.last_peer_tsn = LAST_PEER_TSN;
+            assoc.paths.primary = peer_address();
             key = Association_Key{socket.next_association_id++};
-            Association& tcb = socket.associations.insert_or_assign(key, assoc).first->second;
+            Association_TCB& tcb = socket.associations.insert_or_assign(key, assoc).first->second;
             socket.add_peer_addresses(key, tcb, {peer_address()});
             socket.start_heartbeats(key, tcb);
         }
@@ -93,7 +93,7 @@ struct SCTP_Socket_Test_Access {
         void add_outstanding(uint32_t tsn, bool gap_acked) {
             auto now = std::chrono::steady_clock::now();
             data_chunk_value data{tsn, 0, 0, 0, {'h', 'i'}};
-            socket.associations.at(key).outstanding_data.emplace(tsn, Outstanding_Data{data, now, now, false, gap_acked, 0, false, false});
+            socket.associations.at(key).send.outstanding.emplace(tsn, Outstanding_Data{data, now, now, false, gap_acked, 0, false, false});
         }
 
         Result collect() {
@@ -102,12 +102,12 @@ struct SCTP_Socket_Test_Access {
             result.has_association = it != socket.associations.end();
             if (result.has_association) {
                 result.state = it->second.state;
-                result.outstanding = it->second.outstanding_data.size();
-                auto gap = it->second.outstanding_data.find(NEXT_TSN - 1);
-                result.gap_ack_kept = gap != it->second.outstanding_data.end() && gap->second.gap_acked;
-                result.error_count = it->second.error_count;
+                result.outstanding = it->second.send.outstanding.size();
+                auto gap = it->second.send.outstanding.find(NEXT_TSN - 1);
+                result.gap_ack_kept = gap != it->second.send.outstanding.end() && gap->second.gap_acked;
+                result.error_count = it->second.paths.error_count;
                 result.rto = primary(it->second).rto;
-                result.peer_tag = it->second.peer_ver_tag;
+                result.peer_tag = it->second.peer.peer_ver_tag;
             }
             result.delivered = messages(socket, key);
             auto now = std::chrono::steady_clock::now();
@@ -134,7 +134,7 @@ struct SCTP_Socket_Test_Access {
 
     static Result advance_at_wrap() {
         Stack stack(SHUTDOWN_PENDING, 0xFFFFFFFF);
-        stack.socket.associations.at(stack.key).next_tsn = 0;
+        stack.socket.associations.at(stack.key).send.next_tsn = 0;
         stack.socket.do_next_shutdown_step(stack.key);
         return stack.collect();
     }
@@ -153,7 +153,7 @@ struct SCTP_Socket_Test_Access {
     static Result deliver_tagged(const Association_State* state, SCTP_Packet packet, uint32_t tag, uint16_t error_count = 0) {
         Stack stack(state ? *state : ESTABLISHED, NEXT_TSN - 1);
         if (state) {
-            stack.socket.associations.at(stack.key).error_count = error_count;
+            stack.socket.associations.at(stack.key).paths.error_count = error_count;
         } else {
             stack.socket.associations.erase(stack.key);
             stack.socket.expirations.cancel_all(stack.key);
@@ -171,9 +171,9 @@ struct SCTP_Socket_Test_Access {
     // A COOKIE ECHO whose cookie this stack really minted, as Table 12 sees it.
     static Result cookie_echo(Association_State state, uint32_t local_tag, uint32_t peer_tag, uint32_t local_tie_tag, uint32_t peer_tie_tag) {
         Stack stack(state, NEXT_TSN - 1);
-        Association& assoc = stack.socket.associations.at(stack.key);
-        assoc.local_tie_tag = TIE_TAG_LOCAL;
-        assoc.peer_tie_tag = TIE_TAG_PEER;
+        Association_TCB& assoc = stack.socket.associations.at(stack.key);
+        assoc.peer.local_tie_tag = TIE_TAG_LOCAL;
+        assoc.peer.peer_tie_tag = TIE_TAG_PEER;
 
         SCTP_Common_Header init_header{PEER_PORT, LOCAL_PORT, 0, 0};
         init_chunk_value init{peer_tag, RWND, 1, 1, 9000, {}};
@@ -242,9 +242,9 @@ struct SCTP_Socket_Test_Access {
 
     static Result t2_expires(Association_State state, uint16_t error_count) {
         Stack stack(state, NEXT_TSN - 1);
-        Association& assoc = stack.socket.associations.at(stack.key);
-        assoc.error_count = error_count;
-        assoc.last_peer_tsn = LAST_PEER_TSN + 5;
+        Association_TCB& assoc = stack.socket.associations.at(stack.key);
+        assoc.paths.error_count = error_count;
+        assoc.receive.last_peer_tsn = LAST_PEER_TSN + 5;
         stack.socket.expirations.cancel_all(stack.key);
         stack.socket.handle_expiration(Expiration_Fallback{
             Expiration_Key{stack.key, Expiration_Timer_Type::T2_SHUTDOWN}, std::chrono::steady_clock::now(), 0, Deliverable{}});
@@ -269,7 +269,7 @@ struct SCTP_Socket_Test_Access {
     static Result data_sent_then_t3(Association_State state) {
         Stack stack(state, NEXT_TSN - 1);
         data_chunk_value data{NEXT_TSN, 0, 0, 0, {'h', 'i'}};
-        stack.socket.associations.at(stack.key).next_tsn = NEXT_TSN + 1;
+        stack.socket.associations.at(stack.key).send.next_tsn = NEXT_TSN + 1;
         stack.socket.record_data_sent(stack.key, peer_address(), data, std::chrono::steady_clock::now());
         stack.socket.handle_t3_expiration(stack.key, peer_address());
         return stack.collect();
@@ -293,7 +293,7 @@ struct SCTP_Socket_Test_Access {
         Stack stack(state, NEXT_TSN - 1);
         stack.socket.sctp_send_data(stack.key, {'h', 'i'});
         Result result = stack.collect();
-        result.state = stack.socket.associations.at(stack.key).next_tsn == NEXT_TSN ? state : ESTABLISHED;
+        result.state = stack.socket.associations.at(stack.key).send.next_tsn == NEXT_TSN ? state : ESTABLISHED;
         return result;
     }
 };

@@ -29,11 +29,11 @@ Sources: `src/socket/event_loop.cpp` (send pass, `cut_new_data`,
 
 ```mermaid
 flowchart LR
-    u["sctp_send_data()"] --> ob["Association.outbound<br/>Outbound_Message<br/>SSN assigned, no TSN"]
+    u["sctp_send_data()"] --> ob["send.outbound<br/>Outbound_Message<br/>SSN assigned, no TSN"]
     ob -- "refill_new_data()<br/>cut_new_data()" --> nd["Send_Queue NEW_DATA<br/>DATA chunks with TSNs"]
     nd -- "peek() admits" --> pr["prepare_data_packet()<br/>I bit, bundled SACK"]
     pr --> tx["sendto()"]
-    tx -- "packet_sent()" --> os["outstanding_data[TSN]<br/>T3-rtx running"]
+    tx -- "packet_sent()" --> os["send.outstanding[TSN]<br/>T3-rtx running"]
     os -- "SACK: gap block" --> ga["gap_acked"]
     os -- "T3 or 3 miss reports" --> rt["pending_retransmission"]
     rt -- "schedule_pending_retransmission()" --> rq["Send_Queue RETRANSMISSION"] --> tx
@@ -75,7 +75,7 @@ can actually leave. This has three consequences:
   true). TSNs therefore reach the wire in the order they were assigned.
 - `next_tsn - 1` is the highest TSN ever cut, which may be queued but not yet
   sent. That is why the shutdown check compares against `next_tsn` rather than
-  `outstanding_data`.
+  `send.outstanding`.
 
 ---
 
@@ -255,7 +255,7 @@ chunks:
 
 | Chunk | Bookkeeping |
 |---|---|
-| DATA, new TSN | `outstanding_data[tsn]` created (first and last sent, destination). `peer_rwnd -= size`. `new_data_sent_at` and `data_sent_at` updated (heartbeat idleness, cwnd decay). Becomes the RTT measurement TSN if none is pending. The zero window probe flags update. |
+| DATA, new TSN | `send.outstanding[tsn]` created (first and last sent, destination). `peer_rwnd -= size`. `new_data_sent_at` and `data_sent_at` updated (heartbeat idleness, cwnd decay). Becomes the RTT measurement TSN if none is pending. The zero window probe flags update. |
 | DATA, retransmitted | `retransmitted = true`, `gap_acked = false`, `last_sent`, destination updated. `peer_rwnd -= size`. Any RTT measurement at or above this TSN is abandoned (Karn). |
 | HEARTBEAT | `hb_sent_at` is set to the real send time, so RTT excludes time spent queued. |
 | INIT / COOKIE ECHO | T1 armed with the packet stored for retry. |
@@ -304,7 +304,7 @@ flowchart TD
     un -- "no" --> old{"cum ack below<br/>our cumulative_tsn_ack?"}
     old -- "yes" --> ig
     old -- "no" --> snap["snapshot flight_before per path"]
-    snap --> walk["walk outstanding_data in TSN order:<br/>newly acked: bytes_acked, RTT sample<br/>≤ cum: erase (remember if retransmitted)<br/>in a gap block: gap_acked, not pending<br/>was gap_acked, now not: renege"]
+    snap --> walk["walk send.outstanding in TSN order:<br/>newly acked: bytes_acked, RTT sample<br/>≤ cum: erase (remember if retransmitted)<br/>in a gap block: gap_acked, not pending<br/>was gap_acked, now not: renege"]
     walk --> cum["cumulative_tsn_ack = cum ack"]
     cum --> dup["credit duplicate TSN bytes per path"]
     dup --> err["newly acked: assoc error_count = 0<br/>per path: clear errors, end single-packet mode,<br/>grow_cwnd()"]
@@ -363,7 +363,7 @@ grow cwnd.
 
 A Duplicate TSN in a SACK means a retransmission was not needed but still used
 the network. `duplicate_bytes()` finds the size and destination of each
-reported duplicate: in `outstanding_data`, or in `acked_retransmissions` (a
+reported duplicate: in `send.outstanding`, or in `acked_retransmissions` (a
 64-entry memory of retransmitted chunks already acked cumulatively). It credits
 those bytes to the path's `partial_bytes_acked` in congestion avoidance. Each
 remembered entry is consumed once, so a repeated report is not counted twice.

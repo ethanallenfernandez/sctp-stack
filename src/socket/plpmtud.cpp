@@ -27,11 +27,11 @@ namespace {
     }
 
     Expiration_Key probe_timer(const Association_Key& key, const Peer_Path& path) {
-        return Expiration_Key{key, Expiration_Timer_Type::PLPMTU_PROBE, path_key(path.address)};
+        return Expiration_Key{key, Expiration_Timer_Type::PLPMTU_PROBE, path_key(path.udp_address)};
     }
 
     Expiration_Key raise_timer(const Association_Key& key, const Peer_Path& path) {
-        return Expiration_Key{key, Expiration_Timer_Type::PMTU_RAISE, path_key(path.address)};
+        return Expiration_Key{key, Expiration_Timer_Type::PMTU_RAISE, path_key(path.udp_address)};
     }
 }
 
@@ -89,21 +89,21 @@ void SCTP_Socket::check_for_black_hole(const Association_Key& key, Peer_Path& pa
     schedule_plpmtu_probe(key, path);
 }
 
-Deliverable SCTP_Socket::make_plpmtu_probe(const Association_Key& key, const Association& assoc, Peer_Path& path) {
+Deliverable SCTP_Socket::make_plpmtu_probe(const Association_Key& key, const Association_TCB& assoc, Peer_Path& path) {
     generate_random(path.plpmtud.probe_nonce);
     path.plpmtud.probe_outstanding = true;
-    return Deliverable{key, path.address, build_plpmtu_probe(ntohs(local_address.sin_port), assoc.peer_port,
-        assoc.peer_ver_tag, heartbeat_info(path.plpmtud.probe_nonce, path.address), path.plpmtud.probed_size)};
+    return Deliverable{key, path.udp_address, build_plpmtu_probe(ntohs(local_address.sin_port), assoc.peer.sctp_port,
+        assoc.peer.peer_ver_tag, heartbeat_info(path.plpmtud.probe_nonce, path.udp_address), path.plpmtud.probed_size)};
 }
 
-void SCTP_Socket::handle_plpmtu_probe_ack(const Association_Key& key, Association& assoc, Peer_Path& path) {
+void SCTP_Socket::handle_plpmtu_probe_ack(const Association_Key& key, Association_TCB& assoc, Peer_Path& path) {
     Plpmtud& plpmtud = path.plpmtud;
     plpmtud.probe_outstanding = false;
     plpmtud.probe_count = 0;
     plpmtud.plpmtu = plpmtud.probed_size;
     clear_path_errors(key, path);
     if (&data_path(assoc) == &path) {
-        assoc.error_count = 0;
+        assoc.paths.error_count = 0;
     }
 
     if (plpmtud.confirming) {
@@ -116,7 +116,7 @@ void SCTP_Socket::handle_plpmtu_probe_ack(const Association_Key& key, Associatio
 }
 
 void SCTP_Socket::handle_plpmtu_probe_expiration(const Association_Key& location, const sockaddr_in& destination) {
-    Association* assoc = find_tcb(location);
+    Association_TCB* assoc = find_tcb(location);
     Peer_Path* path = assoc && transmits_data(assoc->state) ? find_path(*assoc, destination) : nullptr;
     if (path == nullptr) {
         return;
@@ -150,7 +150,7 @@ void SCTP_Socket::handle_plpmtu_probe_expiration(const Association_Key& location
 }
 
 void SCTP_Socket::handle_pmtu_raise_expiration(const Association_Key& location, const sockaddr_in& destination) {
-    Association* assoc = find_tcb(location);
+    Association_TCB* assoc = find_tcb(location);
     Peer_Path* path = assoc && transmits_data(assoc->state) ? find_path(*assoc, destination) : nullptr;
     if (path == nullptr) {
         return;
@@ -176,13 +176,13 @@ void SCTP_Socket::handle_icmp_ptb(const sockaddr_in& destination, const uint8_t*
     if (length < 8 || ptb_size <= IPV4_HEADER_SIZE) {
         return;
     }
-    uint16_t peer_port = static_cast<uint16_t>(quoted[2] << 8 | quoted[3]);
+    uint16_t peer_sctp_port = static_cast<uint16_t>(quoted[2] << 8 | quoted[3]);
     uint32_t tag = read_be32(quoted + 4);
 
     std::lock_guard<std::mutex> assoc_lock(associations_mutex);
-    Association_Key key = association_at(peer_key(destination, peer_port));
-    Association* assoc = find_tcb(key);
-    Peer_Path* path = assoc && tag != 0 && tag == assoc->peer_ver_tag ? find_path(*assoc, destination) : nullptr;
+    Association_Key key = association_at(peer_key(destination, peer_sctp_port));
+    Association_TCB* assoc = find_tcb(key);
+    Peer_Path* path = assoc && tag != 0 && tag == assoc->peer.peer_ver_tag ? find_path(*assoc, destination) : nullptr;
     if (path == nullptr || path->plpmtud.state == Plpmtud_State::DISABLED) {
         return;
     }

@@ -209,11 +209,11 @@ flowchart LR
     wire["DATA chunks<br/>any TSN order"] --> ooo
     wire --> cum
 
-    subgraph TCB["Association (receive side)"]
+    subgraph TCB["Association_TCB receive side"]
         cum["last_peer_tsn<br/>Cumulative TSN Ack point"]
-        ooo["tsn_ooo_buffer<br/>TSN to Held_Chunk<br/>(above the ack point)"]
+        ooo["receive.ooo<br/>TSN to Held_Chunk<br/>(above the ack point)"]
         re["reassembly<br/>the one message being<br/>consumed in TSN order"]
-        st["inbound_streams[id]<br/>next_ssn + early: SSN to Delivery"]
+        st["receive.streams[id]<br/>next_ssn + early: SSN to Delivery"]
         hd["held_deliveries<br/>complete messages waiting<br/>out a partial delivery"]
         dup["duplicate_tsns"]
     end
@@ -232,9 +232,9 @@ flowchart LR
 | Structure | Holds | Emptied by |
 |---|---|---|
 | `last_peer_tsn` | highest TSN with no gaps below it | advanced in place |
-| `tsn_ooo_buffer` | chunks above `last_peer_tsn`. An entry whose message was taken out early stays with `assembled = true` and no bytes, so the SACK keeps reporting it. | `read_ooo_buffer()` once the gap fills |
+| `receive.ooo` | chunks above `last_peer_tsn`. An entry whose message was taken out early stays with `assembled = true` and no bytes, so the SACK keeps reporting it. | `read_ooo_buffer()` once the gap fills |
 | `reassembly` | the message currently open in TSN order (`open`, `partially_delivered`, stream, SSN, PPID, bytes) | completing the message |
-| `inbound_streams[id]` | `next_ssn` and `early`: complete ordered messages ahead of `next_ssn` | `advance_stream()` |
+| `receive.streams[id]` | `next_ssn` and `early`: complete ordered messages ahead of `next_ssn` | `advance_stream()` |
 | `held_deliveries` | messages completed while a different message is in partial delivery | the end of that partial delivery |
 | `Receive_Queue` | delivered bytes the ULP has not read | `sctp_recv_data*` |
 
@@ -248,7 +248,7 @@ flowchart TD
     st -- "no" --> ret(["return"])
     st -- "yes" --> loop["for each DATA chunk"]
     loop --> ib["note I bit<br/>received_since_sack += size"]
-    ib --> dup{"TSN ≤ last_peer_tsn or<br/>already in tsn_ooo_buffer?"}
+    ib --> dup{"TSN ≤ last_peer_tsn or<br/>already in receive.ooo?"}
     dup -- "yes" --> rd["record duplicate"] --> loop
     dup -- "no" --> room{"TSN - last_peer_tsn > 65535, or<br/>buffer full and no room?"}
     room -- "yes" --> dr["dropped = true"] --> loop
@@ -257,7 +257,7 @@ flowchart TD
     vs -- "yes" --> used["used += size"]
     inv & used --> nx{"TSN == last_peer_tsn + 1?"}
     nx -- "yes" --> adv["last_peer_tsn = TSN<br/>reassemble() then read_ooo_buffer()"]
-    nx -- "no" --> hold["insert into tsn_ooo_buffer<br/>assemble_early(TSN)"]
+    nx -- "no" --> hold["insert into receive.ooo<br/>assemble_early(TSN)"]
     adv & hold --> fr{"framing valid?"}
     fr -- "no" --> abort2["ABORT: Protocol Violation"]
     fr -- "yes" --> loop
@@ -279,8 +279,8 @@ association. Occupancy is:
 ```
 used = Receive_Queue::buffered_bytes(key)          delivered, unread
      + reassembly.bytes                            open message
-     + Σ tsn_ooo_buffer user_data                  held for reordering
-     + Σ inbound_streams[*].early bytes            complete, out of SSN order
+     + Σ receive.ooo user_data                  held for reordering
+     + Σ receive.streams[*].early bytes            complete, out of SSN order
      + Σ held_deliveries bytes                     waiting out a partial delivery
 ```
 
@@ -341,7 +341,7 @@ ack point. It walks backwards from the new chunk to a B and forwards to an E,
 through **contiguous** held TSNs of the same stream, U flag and SSN:
 
 ```
- last_peer_tsn = 99           tsn_ooo_buffer
+ last_peer_tsn = 99           receive.ooo
                     ┌─────┬─────┬─────┬─────┐
       (100 missing) │ 101 │ 102 │ 103 │ 104 │
                     │ s0  │ s1  │ s1  │ s1  │
@@ -369,7 +369,7 @@ complete. After each packet, `handle_data_packet` checks:
 ```
 reassembly.open  and  reassembly.bytes non-empty
 and  used + AMDCS > RWND                       (no room for another full chunk)
-and  (unordered  or  reassembly.ssn == inbound_streams[stream].next_ssn)
+and  (unordered  or  reassembly.ssn == receive.streams[stream].next_ssn)
 ```
 
 If this holds, the bytes collected so far are delivered with `complete =
@@ -435,7 +435,7 @@ A delayed SACK is also sent early when outgoing DATA has room for it:
 
 ## Building a SACK
 
-`make_sack()` walks `tsn_ooo_buffer` in TSN order and merges consecutive TSNs
+`make_sack()` walks `receive.ooo` in TSN order and merges consecutive TSNs
 into blocks. Offsets are relative to `last_peer_tsn`.
 
 ```

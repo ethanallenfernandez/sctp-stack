@@ -10,6 +10,7 @@
 
 struct Deliverable {
     Association_Key location{};
+    // The peer's IPv4 address and UDP encapsulation port.
     sockaddr_in destination;
     SCTP_Packet packet;
     // Sent without DF: it holds a chunk cut before its path's PMTU fell, and

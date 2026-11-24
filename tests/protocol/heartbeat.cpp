@@ -61,14 +61,14 @@ struct SCTP_Socket_Test_Access {
         stack.local_address.sin_port = htons(LOCAL_PORT);
         sctp_parse_ipv4("127.0.0.1", stack.local_address.sin_addr);
 
-        Association assoc = stack.init_new_association(peer, ntohs(peer.sin_port));
-        assoc.this_ver_tag = OUR_TAG;
-        assoc.peer_ver_tag = PEER_TAG;
+        Association_TCB assoc = stack.init_new_association(peer, ntohs(peer.sin_port));
+        assoc.peer.this_ver_tag = OUR_TAG;
+        assoc.peer.peer_ver_tag = PEER_TAG;
         assoc.state = ESTABLISHED;
-        assoc.last_peer_tsn = 0;
-        assoc.primary_path = peer;
+        assoc.receive.last_peer_tsn = 0;
+        assoc.paths.primary = peer;
         Association_Key key{stack.next_association_id++};
-        Association& tcb = stack.associations.insert_or_assign(key, assoc).first->second;
+        Association_TCB& tcb = stack.associations.insert_or_assign(key, assoc).first->second;
         stack.add_peer_addresses(key, tcb, {peer});
         stack.start_heartbeats(key, tcb);
         return key;
@@ -81,7 +81,7 @@ struct SCTP_Socket_Test_Access {
 
     // Further peer addresses, UNCONFIRMED, with their timers armed as at establishment.
     static void add_paths(SCTP_Socket& stack, const Association_Key& key, const std::vector<sockaddr_in>& addresses) {
-        Association& assoc = stack.associations.at(key);
+        Association_TCB& assoc = stack.associations.at(key);
         stack.add_peer_addresses(key, assoc, addresses);
         stack.start_heartbeats(key, assoc);
     }
@@ -137,7 +137,7 @@ struct SCTP_Socket_Test_Access {
         return stack.associations.find(key) != stack.associations.end();
     }
 
-    static Association& tcb(SCTP_Socket& stack, const Association_Key& key) {
+    static Association_TCB& tcb(SCTP_Socket& stack, const Association_Key& key) {
         return stack.associations.at(key);
     }
 
@@ -171,8 +171,8 @@ struct SCTP_Socket_Test_Access {
 
     // Marks one TSN outstanding, which is what makes a destination non-idle.
     static void add_outstanding_data(SCTP_Socket& stack, const Association_Key& key) {
-        Association& assoc = stack.associations.at(key);
-        data_chunk_value data{assoc.next_tsn++, 0, 0, 0, {'x'}};
+        Association_TCB& assoc = stack.associations.at(key);
+        data_chunk_value data{assoc.send.next_tsn++, 0, 0, 0, {'x'}};
         stack.record_data_sent(key, peer_address(), data, Clock::now());
     }
 };
@@ -275,13 +275,13 @@ void test_matching_ack_clears_the_path() {
         return;
     }
 
-    Access::tcb(stack, key).error_count = 3;
+    Access::tcb(stack, key).paths.error_count = 3;
     Access::primary_path(stack, key).error_count = 3;
     Access::deliver(stack, inbound(OUR_TAG, HEARTBEAT_ACK, info_of(sent[0])));
 
     const Peer_Path& path = Access::primary_path(stack, key);
     check(!path.hb_outstanding, "the probe is no longer outstanding");
-    check(Access::tcb(stack, key).error_count == 0, "the association error count is cleared");
+    check(Access::tcb(stack, key).paths.error_count == 0, "the association error count is cleared");
     check(path.error_count == 0, "and the path's");
     check(path.has_srtt, "the round trip fed the path's RTO estimator");
     check(Access::drain_sends(stack).empty(), "a HEARTBEAT ACK is never answered");
@@ -299,14 +299,14 @@ void test_ack_with_a_foreign_nonce_is_ignored() {
         return;
     }
 
-    Access::tcb(stack, key).error_count = 3;
+    Access::tcb(stack, key).paths.error_count = 3;
     std::vector<uint8_t> forged = info_of(sent[0]);
     forged[7] ^= 0xFF;
     Access::deliver(stack, inbound(OUR_TAG, HEARTBEAT_ACK, forged));
 
     const Peer_Path& path = Access::primary_path(stack, key);
     check(path.hb_outstanding, "the probe is still outstanding");
-    check(Access::tcb(stack, key).error_count == 3, "the error count is untouched");
+    check(Access::tcb(stack, key).paths.error_count == 3, "the error count is untouched");
     check(!path.has_srtt, "and no round trip was measured from it");
 }
 
@@ -316,11 +316,11 @@ void test_unsolicited_ack_is_ignored() {
     SCTP_Socket stack;
     Association_Key key = Access::establish(stack);
 
-    Access::tcb(stack, key).error_count = 2;
+    Access::tcb(stack, key).paths.error_count = 2;
     sockaddr_in destination = peer_address();
     Access::deliver(stack, inbound(OUR_TAG, HEARTBEAT_ACK, heartbeat_info(0, destination)));
 
-    check(Access::tcb(stack, key).error_count == 2, "the error count is untouched");
+    check(Access::tcb(stack, key).paths.error_count == 2, "the error count is untouched");
     check(!Access::primary_path(stack, key).has_srtt, "no round trip measured");
 }
 
@@ -335,7 +335,7 @@ void test_unanswered_probes_end_the_association() {
     for (int i = 0; i <= threshold; i++) {
         Access::fire_heartbeat_timer(stack, key);
         if (i == 0) {
-            check(Access::tcb(stack, key).error_count == 0,
+            check(Access::tcb(stack, key).paths.error_count == 0,
                   "the firing that sends a probe counts nothing");
         }
         Access::fire_heartbeat_timer(stack, key);
@@ -389,7 +389,7 @@ std::vector<Peer_Addr_Change> address_changes(SCTP_Socket& stack) {
 
 bool reports(const std::vector<Peer_Addr_Change>& changes, const sockaddr_in& address, Peer_Addr_State state) {
     for (const auto& change : changes) {
-        if (same_transport_address(change.address, address) && change.state == state) {
+        if (same_transport_address(change.sctp_address, address) && change.state == state) {
             return true;
         }
     }
@@ -475,7 +475,7 @@ void test_unconfirmed_path_that_never_answers() {
     const Peer_Path& path = *find_path(Access::tcb(stack, key), second_address());
     check(!path.active && !path.confirmed, "is marked inactive past Path.Max.Retrans");
     check(path.error_count == sctp_parameters::PATH_MAX_RETRANS + 1, "its error count stops there");
-    check(Access::tcb(stack, key).error_count == 0, "the association error count is not touched");
+    check(Access::tcb(stack, key).paths.error_count == 0, "the association error count is not touched");
     check(reports(address_changes(stack), second_address(), Peer_Addr_State::ADDR_UNREACHABLE),
           "the upper layer is told it is unreachable");
     check(Access::due_within(stack, key, third_address(), Clock::duration::zero()),
@@ -499,7 +499,7 @@ void test_alternate_path_failure_and_recovery() {
     unanswered(stack, key, second_address());
     const Peer_Path& path = *find_path(Access::tcb(stack, key), second_address());
     check(path.error_count == 1, "an unanswered probe counts against the path");
-    check(Access::tcb(stack, key).error_count == 0, "but not the association: it carries no data");
+    check(Access::tcb(stack, key).paths.error_count == 0, "but not the association: it carries no data");
     check(path.rto == 2 * std::chrono::microseconds(sctp_parameters::RTO_INITIAL), "and backs off the path's RTO");
     check(Access::primary_path(stack, key).rto == std::chrono::microseconds(sctp_parameters::RTO_INITIAL),
           "leaving the primary's alone");
@@ -527,7 +527,7 @@ void test_unanswered_primary_probe() {
     unanswered(stack, key, peer_address());
 
     check(Access::primary_path(stack, key).error_count == 1, "counts against the path");
-    check(Access::tcb(stack, key).error_count == 1, "and the association: it is the path carrying data");
+    check(Access::tcb(stack, key).paths.error_count == 1, "and the association: it is the path carrying data");
     check(Access::primary_path(stack, key).rto == 2 * std::chrono::microseconds(sctp_parameters::RTO_INITIAL),
           "and backs off its RTO");
 }
@@ -610,15 +610,15 @@ void test_alternate_ack_leaves_the_association_count() {
     Association_Key key = Access::establish(stack);
     confirm_second_path(stack, key);
 
-    Access::tcb(stack, key).error_count = 3;
+    Access::tcb(stack, key).paths.error_count = 3;
     if (auto sent = probe(stack, key, second_address())) {
         acknowledge(stack, *sent);
     }
-    check(Access::tcb(stack, key).error_count == 3, "does not clear the association error count");
+    check(Access::tcb(stack, key).paths.error_count == 3, "does not clear the association error count");
     if (auto sent = probe(stack, key, peer_address())) {
         acknowledge(stack, *sent);
     }
-    check(Access::tcb(stack, key).error_count == 0, "one on the primary does");
+    check(Access::tcb(stack, key).paths.error_count == 0, "one on the primary does");
 }
 
 void test_change_heartbeat() {
@@ -635,7 +635,7 @@ void test_change_heartbeat() {
     check(Access::drain_sends(stack).empty(), "and nothing is probed");
 
     check(api.sctp_change_heartbeat(key, peer_address(), true, std::chrono::seconds(120)) == Sctp_Status::OK, "re-enabled with a new interval");
-    check(Access::tcb(stack, key).hb_interval == std::chrono::seconds(120), "the interval is the association's");
+    check(Access::tcb(stack, key).paths.hb_interval == std::chrono::seconds(120), "the interval is the association's");
     check(Access::timer_armed(stack, key)
           && !Access::due_within(stack, key, peer_address(), std::chrono::seconds(120)),
           "and the next probe is at least that far off");
@@ -678,7 +678,7 @@ void test_set_primary() {
         acknowledge(stack, *sent);
     }
     check(Access::api(stack).sctp_set_primary(key, second_address()) == Sctp_Status::OK, "accepted once it is CONFIRMED");
-    check(same_transport_address(Access::tcb(stack, key).primary_path, second_address()), "and it is the primary");
+    check(same_transport_address(Access::tcb(stack, key).paths.primary, second_address()), "and it is the primary");
 }
 
 } // namespace

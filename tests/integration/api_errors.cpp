@@ -26,9 +26,9 @@ sockaddr_in address(const char* ip, uint16_t port) {
 
 struct SCTP_Socket_Test_Access {
     static Association_Key insert(SCTP_Socket& stack, Association_State state) {
-        Association assoc = stack.init_new_association(address("127.0.0.1", 5000), 5000);
+        Association_TCB assoc = stack.init_new_association(address("127.0.0.1", 5000), 5000);
         assoc.state = state;
-        assoc.peer_ver_tag = 0x01020304;
+        assoc.peer.peer_ver_tag = 0x01020304;
         Association_Key key{stack.next_association_id++};
         stack.add_peer_addresses(key, stack.associations.insert_or_assign(key, assoc).first->second, {address("127.0.0.1", 5000)});
         return key;

@@ -7,7 +7,7 @@ public call goes. The later documents look at each subsystem in detail.
 - [Directory map](#directory-map)
 - [`SCTP_Socket` and its translation units](#sctp_socket-and-its-translation-units)
 - [Ownership and data model](#ownership-and-data-model)
-- [The TCB (`Association`)](#the-tcb-association)
+- [The TCB (`Association_TCB`)](#the-tcb-association_tcb)
 - [Identity: association ids and peer addresses](#identity-association-ids-and-peer-addresses)
 - [Public API to internals](#public-api-to-internals)
 - [Notifications](#notifications)
@@ -149,14 +149,13 @@ classDiagram
         reader
         writer
     }
-    class Association {
+    class Association_TCB {
         state : Association_State
-        tags, TSNs, windows
-        outstanding_data : TSN map
-        tsn_ooo_buffer : TSN map
-        outbound : deque of Outbound_Message
-        inbound_streams
-        reassembly
+        peer : TCB_Peer
+        handshake : Handshake
+        paths : Paths
+        send : TCB_Send_Side
+        receive : TCB_Receive_Side
     }
     class Peer_Path {
         address, confirmed, active
@@ -189,9 +188,9 @@ classDiagram
     SCTP_Socket *-- Notification_Queue
     SCTP_Socket *-- Cookie_Auth
     SCTP_Socket *-- Wakeup_Pair
-    SCTP_Socket "1" *-- "many" Association
-    Association "1" *-- "1..n" Peer_Path : peer_address_list
-    Association "1" *-- "many" Outstanding_Data
+    SCTP_Socket "1" *-- "many" Association_TCB
+    Association_TCB "1" *-- "1..n" Peer_Path : paths.list
+    Association_TCB "1" *-- "many" Outstanding_Data : send.outstanding
     Peer_Path *-- Plpmtud
     Send_Queue o-- Deliverable
     Expiration_Queue o-- Deliverable : retry packet
@@ -215,56 +214,73 @@ Things to notice:
 
 ---
 
-## The TCB (`Association`)
+## The TCB (`Association_TCB`)
 
-`include/sctp/protocol/association.hpp`. The fields fall into these groups:
+`include/sctp/protocol/association.hpp`. Besides `state`, the TCB is five
+groups, one struct each:
 
 ```mermaid
 flowchart TB
-    subgraph A["Association"]
+    subgraph A["Association_TCB"]
         direction LR
-        subgraph HS["Handshake and identity"]
-            hs0["peer_port: the peer's SCTP port"]
+        top["state"]
+        subgraph PEER["peer : TCB_Peer"]
+            pe0["sctp_port: the peer's SCTP port"]
             hs1["this_ver_tag / peer_ver_tag"]
             hs2["local_tie_tag / peer_tie_tag"]
-            hs3["state"]
+        end
+        subgraph HS["handshake : Handshake"]
             hs4["init_retransmits / cookie_retransmits<br/>stale_cookie_retries"]
         end
-        subgraph SEND["Send side"]
-            s1["next_tsn"]
-            s2["cumulative_tsn_ack: peer's ack of our data"]
-            s3["outstanding_data: TSN to Outstanding_Data"]
-            s4["outbound: messages not yet chunked<br/>outbound_bytes"]
-            s5["next_ssn per outbound stream"]
-            s6["peer_rwnd / peer_max_rwnd"]
-            s7["in_fast_recovery / fast_recovery_exit_tsn"]
-            s8["rtt_measurement_tsn"]
-            s9["burst_count, zero window flags"]
-            s10["acked_retransmissions"]
-        end
-        subgraph RECV["Receive side"]
-            r1["last_peer_tsn: our cumulative ack point"]
-            r2["tsn_ooo_buffer: TSN to Held_Chunk"]
-            r3["duplicate_tsns"]
-            r4["reassembly: the open message"]
-            r5["inbound_streams: next_ssn + early"]
-            r6["held_deliveries"]
-            r7["our_rwnd / received_since_sack"]
-            r8["delayed_sack_packet_count"]
-        end
-        subgraph PATHS["Paths and faults"]
-            p1["peer_address_list: Peer_Path"]
-            p2["primary_path"]
+        subgraph PATHS["paths : Paths"]
+            p1["list: Peer_Path"]
+            p2["primary"]
             p3["error_count: association-wide"]
             p4["hb_interval"]
+        end
+        subgraph SEND["send : TCB_Send_Side"]
+            s5["out_streams, next_ssn per stream"]
+            s4["outbound: messages not yet chunked<br/>outbound_bytes"]
+            s1["next_tsn"]
+            s2["cumulative_tsn_ack: peer's ack of our data"]
+            s3["outstanding: TSN to Outstanding_Data"]
+            s10["acked_retransmissions"]
+            s8["rtt_measurement_tsn"]
+            s6["peer_rwnd / peer_max_rwnd<br/>zero window flags, sack_since_t3"]
+            s7["in_fast_recovery / fast_recovery_exit_tsn<br/>burst_count"]
+        end
+        subgraph RECV["receive : TCB_Receive_Side"]
+            r0["in_streams"]
+            r1["last_peer_tsn: our cumulative ack point"]
+            r2["ooo: TSN to Held_Chunk"]
+            r3["duplicate_tsns"]
+            r8["delayed_sack_packet_count"]
+            r7["our_rwnd / received_since_sack"]
+            r4["reassembly: the open message"]
+            r5["streams: next_ssn + early"]
+            r6["held_deliveries"]
         end
     end
 ```
 
-> **Naming trap.** `cumulative_tsn_ack` is the peer's acknowledgement of *our*
-> DATA, which is the send side. `last_peer_tsn` is *our* Cumulative TSN Ack
-> point for the peer's DATA, which is the receive side. The SACKs we send carry
-> `last_peer_tsn`.
+The group names say which side a field belongs to: `assoc.send.cumulative_tsn_ack`
+is the peer's acknowledgement of *our* DATA, and `assoc.receive.last_peer_tsn`
+is *our* Cumulative TSN Ack point for the peer's DATA, which the SACKs we send
+carry. Congestion state other than fast recovery (cwnd, ssthresh, RTO) is per
+destination, on `Peer_Path`.
+
+Each struct gives every field its starting value: zero, or `COOKIE_WAIT`,
+`HB.interval` and `RWND` where the RFC names one. `init_new_association()` only
+fills in what is random or comes from the peer.
+
+Code that needs only one side takes only that side, so a signature shows what a
+function can change:
+
+| Takes | Functions |
+|---|---|
+| `TCB_Receive_Side&` | `reassemble`, `read_ooo_buffer`, `assemble_early`, `order_message`, `advance_stream`, `hand_up`, `make_room`, `held_bytes`, `peer_view_of_window`, `blocked_on_cumulative_tsn`, `receive_window`, `abandon_partial_delivery` |
+| `TCB_Send_Side&` | `cut_new_data` (given the AMDCS), `grow_cwnd` |
+| `Association_TCB&` | everything that also needs the paths, the tags or the state |
 
 ---
 
@@ -282,7 +298,7 @@ flowchart LR
     PK -- "peer_addresses<br/>association_at()" --> ID["Association_Key<br/>id"]
     ID -- "associations" --> TCB[("TCB")]
     ID -- "names it in" --> Q["Send_Queue, Receive_Queue,<br/>Expiration_Key.location,<br/>notifications, the ULP's handle"]
-    TCB -- "peer_address_list" --> PP["Peer_Path.address<br/>peer IPv4 + UDP port: where to send"]
+    TCB -- "paths.list" --> PP["Peer_Path.udp_address<br/>peer IPv4 + UDP port: where to send"]
     PP -- "path_key()" --> PATH["Peer_Key, port 0<br/>Expiration_Key.path"]
 ```
 
@@ -291,7 +307,7 @@ flowchart LR
 | `Association_Key` | `enum class Association_Key : uint32_t`, drawn from `next_association_id`: starts at 1 and is never reused, and `Association_Key{}` (0) names no association. A scoped enum rather than a plain `uint32_t`, so a tag, TSN or PPID cannot be passed where an id belongs, and `std::hash` works without a custom hasher. | The association's identity: `associations`, `Receive_Queue`, `Send_Queue` (`Deliverable.location`), `Expiration_Key.location`, `Notification.src`, and the handle the ULP gets from `sctp_associate` or a COMM UP notification |
 | `Peer_Key` from `peer_key(addr, sctp_port)` | peer IPv4 + peer **SCTP** port. The UDP port is dropped. | Key of `peer_addresses`, which maps **every** peer address, the first one included, to its association. `association_at()` looks it up and returns id 0 if the address is unknown. |
 | `Peer_Key` from `path_key(addr)` | peer IPv4 only, port 0 | `Expiration_Key.path`, naming one destination for per-path timers (T3-rtx, HEARTBEAT, PLPMTU_PROBE, PMTU_RAISE) |
-| `Peer_Path.address` | peer IPv4 + the **UDP encapsulation port** it last sent from | The `sendto()` destination. Not a key. |
+| `Peer_Path.udp_address` | peer IPv4 + the **UDP encapsulation port** it last sent from | The `sendto()` destination. Not a key. |
 
 Lifecycle of the mapping:
 
@@ -304,8 +320,8 @@ Lifecycle of the mapping:
   association, so an address another association already held is never taken
   from it. `remove_association()` and a restart call it.
 - **The primary is a path choice, not an identity.** `sctp_set_primary()`
-  changes `primary_path` only. The id does not change.
-- **The peer's SCTP port** is stored on the TCB (`Association::peer_port`, host
+  changes `paths.primary` only. The id does not change.
+- **The peer's SCTP port** is stored on the TCB (`Association_TCB::peer.sctp_port`, host
   order). Every packet the association originates is addressed to it.
 - **Passive associations**: a ULP that did not call `sctp_associate` learns the
   id from the COMM UP notification's `src`.
@@ -358,7 +374,7 @@ sequenceDiagram
 | `sctp_recv_notification()` | none | Pops `Notification_Queue`. |
 | `sctp_change_heartbeat(key, dest, enabled, interval)` | `NO_ASSOCIATION`, `UNKNOWN_DESTINATION` | Toggles `hb_enabled` on one path. A new interval applies to all paths. Re-plans and re-arms HEARTBEAT timers. |
 | `sctp_request_heartbeat(key, dest)` | `+ NOT_ESTABLISHED / SHUTTING_DOWN` | Enqueues a HEARTBEAT immediately and arms that path's timer. |
-| `sctp_set_primary(key, dest)` | `+ UNCONFIRMED_DESTINATION` | Sets `primary_path`. |
+| `sctp_set_primary(key, dest)` | `+ UNCONFIRMED_DESTINATION` | Sets `paths.primary`. |
 
 `Sctp_Status` values are defined in `include/sctp/status.hpp`.
 

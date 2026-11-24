@@ -73,8 +73,8 @@ struct SCTP_Socket_Test_Access {
         if (it == stack.associations.end()) {
             return std::nullopt;
         }
-        for (const Peer_Path& path : it->second.peer_address_list) {
-            if (path.address.sin_addr.s_addr == it->second.primary_path.sin_addr.s_addr) {
+        for (const Peer_Path& path : it->second.paths.list) {
+            if (path.udp_address.sin_addr.s_addr == it->second.paths.primary.sin_addr.s_addr) {
                 return path.plpmtud;
             }
         }

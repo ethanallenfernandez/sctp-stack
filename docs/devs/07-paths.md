@@ -41,13 +41,13 @@ flowchart LR
 How that peer is represented:
 
 ```
-associations        id 7 → TCB (peer_port = 5000)
+associations        id 7 → TCB (peer.sctp_port = 5000)
 peer_addresses      {192.0.2.1,    SCTP 5000} → id 7       ← every peer address, keyed by IP + SCTP port
                     {198.51.100.7, SCTP 5000} → id 7
 
-Association.peer_address_list
-  [0] Peer_Path{ address = 192.0.2.1:40001    confirmed, source = 10.0.0.1 }
-  [1] Peer_Path{ address = 198.51.100.7:40777 confirmed, source = 10.0.1.1 }
+Association_TCB.paths.list
+  [0] Peer_Path{ udp_address = 192.0.2.1:40001    confirmed, source = 10.0.0.1 }
+  [1] Peer_Path{ udp_address = 198.51.100.7:40777 confirmed, source = 10.0.1.1 }
                          └── sin_port is the UDP port, not the SCTP port
 
 per-path timers     Expiration_Key{ location = id 7, type, path = {198.51.100.7, port 0} }
@@ -141,7 +141,7 @@ flowchart TD
     end
 ```
 
-`primary(assoc)` is the path matching `primary_path`. If it is missing, the
+`primary(assoc)` is the path matching `paths.primary`. If it is missing, the
 first path in the list is used. `amdcs(assoc)` is the smallest PMDCS over
 CONFIRMED, active paths (`BASE_PMDCS` if there are none). New DATA is cut to
 this size so it fits whichever path a retransmission ends up on.
@@ -283,7 +283,7 @@ sequenceDiagram
 |---|---|
 | `sctp_change_heartbeat(key, dest, enabled, interval?)` | Sets `hb_enabled` on that path. A new `interval` replaces `hb_interval` for **every** path. Each affected path without a probe out is re-planned (probed at once if it is its turn for confirmation) and re-armed, then the confirmation turns are re-armed. In forming or closing states the settings are stored but no timers are armed. |
 | `sctp_request_heartbeat(key, dest)` | Sends a HEARTBEAT to that path now (fresh nonce) and arms its timer for the answer. Only in `transmits_data` states. |
-| `sctp_set_primary(key, dest)` | Sets `primary_path`. Refused (`UNCONFIRMED_DESTINATION`) for a path that is not CONFIRMED. |
+| `sctp_set_primary(key, dest)` | Sets `paths.primary`. Refused (`UNCONFIRMED_DESTINATION`) for a path that is not CONFIRMED. |
 
 Destinations are matched by IP only, so the port in the `sockaddr_in` the ULP
 passes does not matter.
@@ -337,7 +337,7 @@ RFC 6951 puts SCTP inside UDP. The UDP port and the SCTP port are separate:
 | | SCTP port | UDP port |
 |---|---|---|
 | Ours | `local_address.sin_port`. Our SCTP port **is** our UDP port. | same |
-| Peer | `Association::peer_port`, fixed for the association, and part of every `Peer_Key` | per path in `Peer_Path.address.sin_port`, learned |
+| Peer | `Association_TCB::peer.sctp_port`, fixed for the association, and part of every `Peer_Key` (`sctp_address`) | per path in `Peer_Path.udp_address.sin_port`, learned |
 
 - `sctp_associate(ip, port, out, udp_port)`: `port` is the peer's SCTP port.
   `udp_port` (default: the same as `port`) is where to send the INIT.

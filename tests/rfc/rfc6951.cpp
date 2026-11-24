@@ -32,12 +32,12 @@ void s5_1_and_5_4_ports() {
         Access::receive(s, packet(OUR_TAG, {chunk(HEARTBEAT, heartbeat_chunk_value{{1, 2, 3, 4}})}), addr("127.0.0.2", 5555));
         Peer_Path* one = Access::path(s, PEER_IP);
         Peer_Path* two = Access::path(s, "127.0.0.2");
-        req("6951-5.1-1", one && two && ntohs(two->address.sin_port) == 5555 && ntohs(one->address.sin_port) == PEER_PORT,
+        req("6951-5.1-1", one && two && ntohs(two->udp_address.sin_port) == 5555 && ntohs(one->udp_address.sin_port) == PEER_PORT,
             "each destination keeps its own remote UDP port");
         Access::receive(s, packet(OUR_TAG, {chunk(HEARTBEAT, heartbeat_chunk_value{{1, 2, 3, 4}})}), addr(PEER_IP, 6666));
-        bool updated = one && ntohs(one->address.sin_port) == 6666;
+        bool updated = one && ntohs(one->udp_address.sin_port) == 6666;
         Access::receive(s, packet(OUR_TAG ^ 1, {chunk(HEARTBEAT, heartbeat_chunk_value{{1, 2, 3, 4}})}), addr(PEER_IP, 7777));
-        req("6951-5.4-1", updated && ntohs(one->address.sin_port) == 6666,
+        req("6951-5.4-1", updated && ntohs(one->udp_address.sin_port) == 6666,
             "the UDP source port is stored for its destination once the tag checks out, and not before");
         Access::send(s, {'p'});
         auto out = Access::sent(s);
@@ -56,8 +56,8 @@ void s5_3_udp_header() {
 
     SCTP_Socket s;
     bool bound = Access::bind_real(s);
-    Association& a = Access::establish(s);
-    primary(a).address.sin_port = at.sin_port;
+    Association_TCB& a = Access::establish(s);
+    primary(a).udp_address.sin_port = at.sin_port;
     Access::send(s, std::vector<uint8_t>(333, 'u'));
     Access::flush(s);
 
@@ -90,7 +90,7 @@ void s5_5_and_5_6_pmtu() {
     section("5.5 / 5.6 PMTU without relying on ICMP");
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         Access::start_heartbeats_for(s);
         Peer_Path& p = primary(a);
         bool raised = false;

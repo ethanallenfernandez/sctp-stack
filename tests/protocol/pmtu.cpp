@@ -49,18 +49,18 @@ struct SCTP_Socket_Test_Access {
         stack.local_address.sin_port = htons(LOCAL_PORT);
         sctp_parse_ipv4("127.0.0.1", stack.local_address.sin_addr);
 
-        Association assoc = stack.init_new_association(peer, ntohs(peer.sin_port));
-        assoc.this_ver_tag = OUR_TAG;
-        assoc.peer_ver_tag = PEER_TAG;
+        Association_TCB assoc = stack.init_new_association(peer, ntohs(peer.sin_port));
+        assoc.peer.this_ver_tag = OUR_TAG;
+        assoc.peer.peer_ver_tag = PEER_TAG;
         assoc.state = ESTABLISHED;
-        assoc.next_tsn = INITIAL_TSN;
-        assoc.cumulative_tsn_ack = INITIAL_TSN - 1;
-        assoc.last_peer_tsn = 0;
-        assoc.peer_rwnd = 1 << 20;
-        assoc.peer_max_rwnd = 1 << 20;
-        assoc.primary_path = peer;
+        assoc.send.next_tsn = INITIAL_TSN;
+        assoc.send.cumulative_tsn_ack = INITIAL_TSN - 1;
+        assoc.receive.last_peer_tsn = 0;
+        assoc.send.peer_rwnd = 1 << 20;
+        assoc.send.peer_max_rwnd = 1 << 20;
+        assoc.paths.primary = peer;
         Association_Key key{stack.next_association_id++};
-        Association& tcb = stack.associations.insert_or_assign(key, assoc).first->second;
+        Association_TCB& tcb = stack.associations.insert_or_assign(key, assoc).first->second;
         stack.add_peer_addresses(key, tcb, {peer});
         stack.start_heartbeats(key, tcb);
         return key;
@@ -108,7 +108,7 @@ struct SCTP_Socket_Test_Access {
         stack.handle_icmp_ptb(peer_address(), quoted.data(), quoted.size(), mtu);
     }
 
-    static Association& tcb(SCTP_Socket& stack, const Association_Key& key) {
+    static Association_TCB& tcb(SCTP_Socket& stack, const Association_Key& key) {
         return stack.associations.at(key);
     }
 
@@ -226,7 +226,7 @@ void test_lost_probes_narrow_the_search() {
         }
     }
     check(sizes == std::vector<size_t>{1480, 1480, 1480, 1340}, "MAX_PLPMTU three times, then the midpoint 1340");
-    check(primary(Access::tcb(stack, key)).error_count == 0 && Access::tcb(stack, key).error_count == 0,
+    check(primary(Access::tcb(stack, key)).error_count == 0 && Access::tcb(stack, key).paths.error_count == 0,
           "a lost probe counts no error against the path or the association");
     check(plpmtud(stack, key).plpmtu == 1200, "the PLPMTU stays at what was confirmed");
 
@@ -259,15 +259,15 @@ void test_amdcs_is_the_smallest_pmdcs() {
     Association_Key key = Access::establish(stack);
     complete_search(stack, key);
 
-    Association& assoc = Access::tcb(stack, key);
+    Association_TCB& assoc = Access::tcb(stack, key);
     Peer_Path second = make_path(address_of("127.0.0.2"), true);
     second.plpmtud.plpmtu = 1300;
-    assoc.peer_address_list.push_back(second);
+    assoc.paths.list.push_back(second);
     check(amdcs(assoc) == 1280, "the smallest PMDCS among confirmed paths");
 
-    assoc.peer_address_list.back().active = false;
+    assoc.paths.list.back().active = false;
     check(amdcs(assoc) == 1460, "an inactive path does not count");
-    assoc.peer_address_list.back().active = true;
+    assoc.paths.list.back().active = true;
 
     Access::api(stack).sctp_send_data(key, std::vector<uint8_t>(4000, 'x'));
     auto packet = Access::transmit(stack);

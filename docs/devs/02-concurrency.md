@@ -57,7 +57,7 @@ wake the loop.
 
 | Lock | Guards | Taken by |
 |---|---|---|
-| `SCTP_Socket::associations_mutex` | `associations`, `peer_addresses`, every `Association` and `Peer_Path` | Every public API call except the receive calls and `sctp_recv_notification`. On the loop side: `handle_recv_packet`, `handle_expiration`, `handle_icmp_ptb`, `next_packet`, `packet_sent`, `start_transmission_opportunity`, briefly `sending_socket`, and `finish_read` after a receive. |
+| `SCTP_Socket::associations_mutex` | `associations`, `peer_addresses`, every `Association_TCB` and `Peer_Path` | Every public API call except the receive calls and `sctp_recv_notification`. On the loop side: `handle_recv_packet`, `handle_expiration`, `handle_icmp_ptb`, `next_packet`, `packet_sent`, `start_transmission_opportunity`, briefly `sending_socket`, and `finish_read` after a receive. |
 | `Send_Queue::mutex` | the three deques, back-off time | Internally, by each `Send_Queue` method |
 | `Expiration_Queue::mutex` | heap + `active` map | Internally, by each method |
 | `Receive_Queue::mutex` | per-association messages | Internally, by each method |
@@ -216,7 +216,7 @@ sequenceDiagram
         else sent (or EMSGSIZE: counted as lost)
             rect rgba(120,255,160,0.15)
             L->>M: lock: packet_sent()
-            Note right of M: Send_Queue::commit(id)<br/>schedule_expirations_after_send()<br/>record_data_sent: outstanding_data, T3<br/>record_heartbeat_sent, T1 timers<br/>++burst_count if NEW_DATA
+            Note right of M: Send_Queue::commit(id)<br/>schedule_expirations_after_send()<br/>record_data_sent: send.outstanding, T3<br/>record_heartbeat_sent, T1 timers<br/>++burst_count if NEW_DATA
             end
         end
     end

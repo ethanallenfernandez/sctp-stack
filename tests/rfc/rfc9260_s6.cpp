@@ -44,9 +44,9 @@ void s6_states() {
     section("6 User Data Transfer: states");
     auto sends_in = [](Association_State state) {
         SCTP_Socket s;
-        Association& a = Access::establish(s, state);
-        a.outbound.push_back(Outbound_Message{0, 0, false, {'s'}, 0, 0});
-        a.outbound_bytes = 1;
+        Association_TCB& a = Access::establish(s, state);
+        a.send.outbound.push_back(Outbound_Message{0, 0, false, {'s'}, 0, 0});
+        a.send.outbound_bytes = 1;
         return !Access::sent(s).data().empty();
     };
     req("9260-6-1", sends_in(ESTABLISHED) && sends_in(SHUTDOWN_PENDING) && sends_in(SHUTDOWN_RECEIVED)
@@ -81,11 +81,11 @@ void s6_states() {
     }
     auto processes_sack_in = [](Association_State state) {
         SCTP_Socket s;
-        Association& a = Access::establish(s, state);
-        a.outstanding_data.emplace(OUR_TSN, Outstanding_Data{data(OUR_TSN), Clock::now(), Clock::now(), false, false, 0, false, false, addr()});
-        a.next_tsn = OUR_TSN + 1;
+        Association_TCB& a = Access::establish(s, state);
+        a.send.outstanding.emplace(OUR_TSN, Outstanding_Data{data(OUR_TSN), Clock::now(), Clock::now(), false, false, 0, false, false, addr()});
+        a.send.next_tsn = OUR_TSN + 1;
         sack(s, OUR_TSN);
-        return a.outstanding_data.empty();
+        return a.send.outstanding.empty();
     };
     req("9260-6-5", processes_sack_in(ESTABLISHED) && processes_sack_in(SHUTDOWN_PENDING) && processes_sack_in(SHUTDOWN_RECEIVED),
         "SACK is processed in ESTABLISHED, SHUTDOWN-PENDING and SHUTDOWN-RECEIVED");
@@ -95,7 +95,7 @@ void s6_states() {
 void s6_fragmentation_and_bundling() {
     section("6 User Data Transfer: fragmentation and bundling");
     SCTP_Socket s;
-    Association& a = Access::establish(s);
+    Association_TCB& a = Access::establish(s);
     Access::send(s, std::vector<uint8_t>(5000, 'f'));
     auto chunks = Access::sent(s).data();
     req("9260-6-8", chunks.size() > 1, "a message larger than a packet is fragmented");
@@ -135,7 +135,7 @@ void s6_1_rule_a() {
         req("9260-6.1-2", out.data().empty() && Access::armed(s, Expiration_Timer_Type::ZERO_WINDOW_PROBE),
             "no new DATA while rwnd is smaller than the next chunk");
         auto wait = Access::remaining(s, Expiration_Timer_Type::ZERO_WINDOW_PROBE);
-        Association* a = Access::tcb(s);
+        Association_TCB* a = Access::tcb(s);
         req("9260-6.1-7", wait && a && *wait <= std::chrono::duration_cast<std::chrono::milliseconds>(primary(*a).rto)
                 && *wait > std::chrono::duration_cast<std::chrono::milliseconds>(primary(*a).rto) / 2,
             "the first zero window probe waits one RTO");
@@ -143,50 +143,50 @@ void s6_1_rule_a() {
         auto probe = Access::sent(s).data();
         req("9260-6.1-5", probe.size() == 1, "a zero window probe is sent");
         auto rto_before = a ? primary(*a).rto : std::chrono::microseconds{};
-        uint16_t errors = a ? a->error_count : 0;
+        uint16_t errors = a ? a->paths.error_count : 0;
         sack(s, OUR_TSN - 1, 0);
         Access::fire(s, Expiration_Timer_Type::T3_RTX, PEER_IP);
         Access::sent(s);
         req("9260-6.1-7", a && primary(*a).rto >= rto_before * 2 - std::chrono::microseconds(1), "later probes back off exponentially");
-        req("9260-6.1-6", a && a->error_count == errors && primary(*a).error_count == 0,
+        req("9260-6.1-6", a && a->paths.error_count == errors && primary(*a).error_count == 0,
             "an unanswered probe while SACKs arrive counts no error");
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s, ESTABLISHED, {}, 100);
+        Association_TCB& a = Access::establish(s, ESTABLISHED, {}, 100);
         primary(a).cwnd = 0;
         Access::send(s, KB);
         Access::sent(s);
-        a.zero_window_probe_allowed = true;
+        a.send.zero_window_probe_allowed = true;
         req("9260-6.1-3", Access::sent(s).data().empty(), "a zero window probe is sent only when cwnd allows");
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         Access::send(s, KB);
         Access::sent(s);
         sack(s, OUR_TSN - 1, 0);
         Access::send(s, KB);
         Access::sent(s);
-        req("9260-6.1-4", !Access::armed(s, Expiration_Timer_Type::ZERO_WINDOW_PROBE) && a.outstanding_data.size() == 1,
+        req("9260-6.1-4", !Access::armed(s, Expiration_Timer_Type::ZERO_WINDOW_PROBE) && a.send.outstanding.size() == 1,
             "no zero window probe while DATA is outstanding");
         req("9260-6.1-17", Access::send(s, KB) == Sctp_Status::OK && Access::sent(s).data().empty(),
             "with the window full, sends are accepted but no DATA goes out");
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         primary(a).cwnd = 40000;
         primary(a).data_sent_at = Clock::now() - std::chrono::seconds(5);
-        a.peer_rwnd = 0;
+        a.send.peer_rwnd = 0;
         Access::decay(s);
         req("9260-6.1-8", primary(a).cwnd < 40000 && primary(a).cwnd >= 4 * pmdcs(primary(a)),
             "while the window stays closed, cwnd still decays per 7.2.1");
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s, ESTABLISHED, {}, 300);
-        a.peer_max_rwnd = RWND;
+        Association_TCB& a = Access::establish(s, ESTABLISHED, {}, 300);
+        a.send.peer_max_rwnd = RWND;
         Access::send(s, std::vector<uint8_t>(5000, 's'));
         req("9260-6.1-9", Access::sent(s).data().empty(), "a window far below the largest offered is not filled with a sliver (SWS)");
     }
@@ -196,7 +196,7 @@ void s6_1_rules_b_to_d() {
     section("6.1 Rules B - D: cwnd, retransmissions first, Max.Burst");
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         primary(a).cwnd = 1500;
         for (int i = 0; i < 5; ++i) {
             Access::send(s, KB);
@@ -205,22 +205,22 @@ void s6_1_rules_b_to_d() {
         size_t flight = bytes_in_flight(a);
         req("9260-6.1-10", flight < 1500 + pmdcs(primary(a)), "outstanding DATA stays under cwnd + PMDCS - 1");
         req("9260-6.1-11", flight > 1500, "a new packet may overrun cwnd when the flight is below it");
-        req("9260-6.1-12", a.outstanding_data.size() == 2, "the overrun is one packet");
+        req("9260-6.1-12", a.send.outstanding.size() == 2, "the overrun is one packet");
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         Access::send(s, KB);
         Access::sent(s);
         Access::fire(s, Expiration_Timer_Type::T3_RTX, PEER_IP);
-        a.outstanding_data.begin()->second.pending_retransmission = true;
+        a.send.outstanding.begin()->second.pending_retransmission = true;
         Access::send(s, KB);
         auto out = Access::sent(s).data();
         req("9260-6.1-13", !out.empty() && out[0].tsn == OUR_TSN, "chunks marked for retransmission go before new DATA");
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         primary(a).cwnd = 1000000;
         for (int i = 0; i < 20; ++i) {
             Access::send(s, KB);
@@ -234,7 +234,7 @@ void s6_1_rules_b_to_d() {
 void s6_1_t3() {
     section("6.1 T3-rtx start and restart");
     SCTP_Socket s;
-    Association& a = Access::establish(s);
+    Association_TCB& a = Access::establish(s);
     Access::send(s, KB);
     Access::sent(s);
     req("9260-6.1-18", Access::armed(s, Expiration_Timer_Type::T3_RTX, PEER_IP), "the first transmission starts T3-rtx");
@@ -267,20 +267,20 @@ void s6_1_t3() {
 void s6_1_ssn_window() {
     section("6.1 Ordered messages in the send window");
     SCTP_Socket s;
-    Association& a = Access::establish(s, ESTABLISHED, {}, UINT32_MAX);
+    Association_TCB& a = Access::establish(s, ESTABLISHED, {}, UINT32_MAX);
     primary(a).cwnd = UINT32_MAX / 2;
     for (int i = 0; i < 66000; ++i) {
-        a.outbound.push_back(Outbound_Message{0, a.next_ssn[0]++, false, {'o'}, 0, 0});
-        a.outbound_bytes += 1;
+        a.send.outbound.push_back(Outbound_Message{0, a.send.next_ssn[0]++, false, {'o'}, 0, 0});
+        a.send.outbound_bytes += 1;
     }
-    for (int pass = 0; pass < 2000 && !a.outbound.empty(); ++pass) {
+    for (int pass = 0; pass < 2000 && !a.send.outbound.empty(); ++pass) {
         Access::sent(s);
     }
     std::set<uint16_t> in_flight;
-    for (const auto& entry : a.outstanding_data) {
+    for (const auto& entry : a.send.outstanding) {
         in_flight.insert(entry.second.data.stream_seq_num);
     }
-    req("9260-6.1-23", a.outstanding_data.size() <= 65535 && in_flight.size() == a.outstanding_data.size(),
+    req("9260-6.1-23", a.send.outstanding.size() <= 65535 && in_flight.size() == a.send.outstanding.size(),
         "at most 2^16 - 1 ordered messages of a stream are outstanding");
 }
 
@@ -299,7 +299,7 @@ void s6_2_receiving() {
     {
         // TSN PEER_TSN delivered, + 1 and + 3 missing, the rest middle fragments that cannot be delivered.
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         deliver(s, PEER_TSN, KB);
         deliver(s, PEER_TSN + 2, KB, DATA_FLAG_U);
         for (uint32_t t = 4; t <= 67; ++t) {
@@ -309,19 +309,19 @@ void s6_2_receiving() {
         deliver(s, PEER_TSN + 68, KB, DATA_FLAG_U);
         auto drop_high = Access::sent(s);
         auto v = last_sack(drop_high);
-        req("9260-6.2-2", a.tsn_ooo_buffer.count(PEER_TSN + 68) == 0, "with the window at 0, a TSN above the largest received is dropped");
+        req("9260-6.2-2", a.receive.ooo.count(PEER_TSN + 68) == 0, "with the window at 0, a TSN above the largest received is dropped");
         req("9260-6.2-4", v.has_value(), "and a SACK goes out at once");
         req("9260-6.2-5", v && !sack_covers(v, PEER_TSN + 68), "not acknowledging the dropped chunk");
         deliver(s, PEER_TSN + 3, KB, DATA_FLAG_U);
         auto drop_held = Access::sent(s);
         v = last_sack(drop_held);
-        req("9260-6.2-3", a.tsn_ooo_buffer.count(PEER_TSN + 3) == 1 && a.tsn_ooo_buffer.count(PEER_TSN + 67) == 0,
+        req("9260-6.2-3", a.receive.ooo.count(PEER_TSN + 3) == 1 && a.receive.ooo.count(PEER_TSN + 67) == 0,
             "a lower TSN displaces the largest held for reordering");
         req("9260-6.2-27", v && sack_covers(v, PEER_TSN + 3) && !sack_covers(v, PEER_TSN + 67), "the displaced chunk is no longer reported");
         req("9260-6.2-28", v && v->a_rwnd == Access::receive_window(s), "a_rwnd counts only what is held");
-        req("9260-6.2-26", a.last_peer_tsn == PEER_TSN, "nothing at or below the Cumulative TSN Ack is dropped");
-        req("9260-6.2-29", a.tsn_ooo_buffer.count(PEER_TSN + 2) == 1, "gap-acknowledged data is dropped only for want of space");
-        req("9260-6.2-30", a.tsn_ooo_buffer.count(PEER_TSN + 4) == 1, "only the highest held chunk is given up");
+        req("9260-6.2-26", a.receive.last_peer_tsn == PEER_TSN, "nothing at or below the Cumulative TSN Ack is dropped");
+        req("9260-6.2-29", a.receive.ooo.count(PEER_TSN + 2) == 1, "gap-acknowledged data is dropped only for want of space");
+        req("9260-6.2-30", a.receive.ooo.count(PEER_TSN + 4) == 1, "only the highest held chunk is given up");
     }
     {
         SCTP_Socket s;
@@ -406,13 +406,13 @@ void s6_2_receiving() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         Access::send(s, KB);
         Access::send(s, KB);
         Access::sent(s);
         size_t flight = bytes_in_flight(a);
         sack(s, OUR_TSN - 1, 10000);
-        req("9260-6.2.1-1", a.peer_rwnd == 10000 - flight, "rwnd is the a_rwnd less the bytes still in flight");
+        req("9260-6.2.1-1", a.send.peer_rwnd == 10000 - flight, "rwnd is the a_rwnd less the bytes still in flight");
     }
 }
 
@@ -443,17 +443,17 @@ void s6_3_rtt() {
     section("6.3 Management of the Retransmission Timer");
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         Access::send(s, KB);
         Access::send(s, KB);
         Access::sent(s);
-        bool one_at_a_time = a.rtt_measurement_tsn == OUR_TSN;
+        bool one_at_a_time = a.send.rtt_measurement_tsn == OUR_TSN;
         sack(s, OUR_TSN + 1);
         bool measured = primary(a).has_srtt;
         auto first = primary(a).srtt;
         Access::send(s, KB);
         Access::sent(s);
-        bool again = a.rtt_measurement_tsn.has_value();
+        bool again = a.send.rtt_measurement_tsn.has_value();
         sack(s, OUR_TSN + 2);
         req("9260-6.3.1-1", measured && again && primary(a).has_srtt, "a new RTT measurement is made each round trip");
         req("9260-6.3.1-2", one_at_a_time, "at most one measurement per round trip");
@@ -461,7 +461,7 @@ void s6_3_rtt() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         Access::send(s, KB);
         Access::sent(s);
         Access::fire(s, Expiration_Timer_Type::T3_RTX, PEER_IP);
@@ -471,12 +471,12 @@ void s6_3_rtt() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         primary(a).cwnd = 100000;
         Access::send(s, KB);
         Access::send(s, KB);
         Access::sent(s);
-        a.outstanding_data.at(OUR_TSN).pending_retransmission = true;
+        a.send.outstanding.at(OUR_TSN).pending_retransmission = true;
         Access::schedule_retransmission(s);
         Access::sent(s);
         sack(s, OUR_TSN + 1);
@@ -484,8 +484,8 @@ void s6_3_rtt() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s, ESTABLISHED, {"127.0.0.2"});
-        a.peer_address_list[1].rto = std::chrono::seconds(3);
+        Association_TCB& a = Access::establish(s, ESTABLISHED, {"127.0.0.2"});
+        a.paths.list[1].rto = std::chrono::seconds(3);
         Access::send(s, KB);
         Access::sent(s);
         Access::fire(s, Expiration_Timer_Type::T3_RTX, PEER_IP);
@@ -495,7 +495,7 @@ void s6_3_rtt() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         primary(a).cwnd = 100000;
         for (int i = 0; i < 4; ++i) {
             Access::send(s, KB);
@@ -504,7 +504,7 @@ void s6_3_rtt() {
         Access::fire(s, Expiration_Timer_Type::T3_RTX, PEER_IP);
         auto first = Access::sent(s).data();
         size_t marked = 0;
-        for (const auto& e : a.outstanding_data) {
+        for (const auto& e : a.send.outstanding) {
             marked += e.second.pending_retransmission;
         }
         sack(s, OUR_TSN);
@@ -561,7 +561,7 @@ void s6_4_multihoming() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s, ESTABLISHED, {"127.0.0.2"});
+        Association_TCB& a = Access::establish(s, ESTABLISHED, {"127.0.0.2"});
         primary(a).cwnd = 100000;
         for (int i = 0; i < 5; ++i) {
             Access::send(s, KB);
@@ -578,7 +578,7 @@ void s6_4_multihoming() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s, ESTABLISHED, {"127.0.0.2"});
+        Association_TCB& a = Access::establish(s, ESTABLISHED, {"127.0.0.2"});
         primary(a).active = false;
         Access::send(s, KB);
         auto out = Access::sent(s);
@@ -587,7 +587,7 @@ void s6_4_multihoming() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         Access::add_local(s, "127.0.0.2");
         primary(a).source = ipv4("127.0.0.1");
         Access::send(s, KB);
@@ -604,12 +604,12 @@ void s6_5_6_streams() {
     section("6.5 / 6.6 Streams and Ordered Delivery");
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
-        Sctp_Status refused = Access::send(s, {'x'}, a.out_streams);
+        Association_TCB& a = Access::establish(s);
+        Sctp_Status refused = Access::send(s, {'x'}, a.send.out_streams);
         Access::send(s, {'a'}, 3);
         auto chunks = Access::sent(s).data();
         req("9260-6.5-1", refused == Sctp_Status::INVALID_STREAM && !chunks.empty()
-                && std::all_of(chunks.begin(), chunks.end(), [&](const data_chunk_value& c) { return c.stream_identifier < a.out_streams; }),
+                && std::all_of(chunks.begin(), chunks.end(), [&](const data_chunk_value& c) { return c.stream_identifier < a.send.out_streams; }),
             "every DATA chunk carries a valid stream");
     }
     {
@@ -626,7 +626,7 @@ void s6_5_6_streams() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         primary(a).cwnd = 100000;
         Access::send(s, {'0'}, 1);
         Access::send(s, {'1'}, 1);
@@ -639,7 +639,7 @@ void s6_5_6_streams() {
         req("9260-6.5-3", ok, "each stream's SSN starts at 0");
         req("9260-6.5-4", ok, "and goes up by 1 per ordered message");
         req("9260-6.5-6", ok, "an unordered message leaves it unchanged");
-        a.next_ssn[3] = 65535;
+        a.send.next_ssn[3] = 65535;
         Access::send(s, {'w'}, 3);
         Access::send(s, {'x'}, 3);
         auto wrap = Access::sent(s).data();
@@ -673,19 +673,19 @@ void s6_7_gaps() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         primary(a).cwnd = 100000;
         for (int i = 0; i < 5; ++i) {
             Access::send(s, KB);
         }
         Access::sent(s);
         sack(s, OUR_TSN, RWND, {{2, 2}});
-        req("9260-6.7-3", a.outstanding_data.count(OUR_TSN) == 0, "cumulatively acknowledged chunks leave the transmit queue");
-        req("9260-6.7-4", a.outstanding_data.at(OUR_TSN + 1).missing_reports == 1 && a.outstanding_data.at(OUR_TSN + 3).missing_reports == 0,
+        req("9260-6.7-3", a.send.outstanding.count(OUR_TSN) == 0, "cumulatively acknowledged chunks leave the transmit queue");
+        req("9260-6.7-4", a.send.outstanding.at(OUR_TSN + 1).missing_reports == 1 && a.send.outstanding.at(OUR_TSN + 3).missing_reports == 0,
             "an unreported TSN below the highest acknowledged is missing");
         sack(s, OUR_TSN, RWND, {{2, 3}});
         sack(s, OUR_TSN, RWND, {{2, 4}});
-        req("9260-6.7-5", a.outstanding_data.at(OUR_TSN + 1).missing_reports >= 3 && a.outstanding_data.at(OUR_TSN + 1).fast_retransmitted,
+        req("9260-6.7-5", a.send.outstanding.at(OUR_TSN + 1).missing_reports >= 3 && a.send.outstanding.at(OUR_TSN + 1).fast_retransmitted,
             "missing reports are counted to decide retransmission");
     }
 }
@@ -721,7 +721,7 @@ void s6_9_fragmentation() {
     section("6.9 Fragmentation and Reassembly");
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         primary(a).cwnd = 100000;
         Access::send(s, std::vector<uint8_t>(1200, 'f'), 0, true);
         auto out = Access::sent(s);
@@ -741,7 +741,7 @@ void s6_9_fragmentation() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         primary(a).cwnd = 100000;
         Access::send(s, std::vector<uint8_t>(4000, 'g'));
         auto chunks = Access::sent(s).data();
@@ -754,8 +754,8 @@ void s6_9_fragmentation() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s, ESTABLISHED, {"127.0.0.2"});
-        a.peer_address_list[1].plpmtud.plpmtu = 600;
+        Association_TCB& a = Access::establish(s, ESTABLISHED, {"127.0.0.2"});
+        a.paths.list[1].plpmtud.plpmtu = 600;
         Access::send(s, std::vector<uint8_t>(2000, 'h'));
         auto chunks = Access::sent(s).data();
         req("9260-6.9-5", !chunks.empty() && std::all_of(chunks.begin(), chunks.end(), [](const data_chunk_value& c) {
@@ -766,7 +766,7 @@ void s6_9_fragmentation() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         Access::send(s, std::vector<uint8_t>(1100, 'i'));
         Access::sent(s);
         primary(a).plpmtud.plpmtu = 600;
@@ -777,7 +777,7 @@ void s6_9_fragmentation() {
     }
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         deliver(s, PEER_TSN, {'p'}, UBE);
         Access::sent(s);
         Access::send(s, std::vector<uint8_t>(pmdcs(primary(a)) - DATA_CHUNK_HEADER_SIZE, 'j'));
@@ -818,7 +818,7 @@ void s6_10_bundling() {
     section("6.10 Bundling");
     {
         SCTP_Socket s;
-        Association& a = Access::establish(s);
+        Association_TCB& a = Access::establish(s);
         primary(a).cwnd = 100000;
         for (int i = 0; i < 30; ++i) {
             Access::send(s, std::vector<uint8_t>(100 + i * 37, 'b'));

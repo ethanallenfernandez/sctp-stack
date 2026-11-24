@@ -26,7 +26,7 @@ struct SCTP_Socket_Test_Access {
             const Deliverable& retry) {
         {
             std::lock_guard<std::mutex> lock(stack.associations_mutex);
-            stack.associations.at(key).cookie_retransmits =
+            stack.associations.at(key).handshake.cookie_retransmits =
                 sctp_parameters::MAX_INIT_RETRANSMITS;
         }
         stack.enqueue_packet(retry, Send_Priority::RETRANSMISSION);
@@ -58,7 +58,7 @@ struct SCTP_Socket_Test_Access {
         return true;
     }
 
-    static Association association(
+    static Association_TCB association(
             SCTP_Socket& stack, const Association_Key& key) {
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
         return stack.associations.at(key);
@@ -67,9 +67,9 @@ struct SCTP_Socket_Test_Access {
     static void set_next_tsn(
             SCTP_Socket& stack, const Association_Key& key, uint32_t tsn) {
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
-        Association& association = stack.associations.at(key);
-        association.next_tsn = tsn;
-        association.cumulative_tsn_ack = tsn - 1;
+        Association_TCB& association = stack.associations.at(key);
+        association.send.next_tsn = tsn;
+        association.send.cumulative_tsn_ack = tsn - 1;
     }
 
     static sockaddr_in test_address() {
@@ -82,13 +82,13 @@ struct SCTP_Socket_Test_Access {
 
     static Association_Key add_test_association(
             SCTP_Socket& stack, uint32_t cumulative_tsn_ack) {
-        Association association = stack.init_new_association(test_address(), 29999);
+        Association_TCB association = stack.init_new_association(test_address(), 29999);
         association.state = ESTABLISHED;
-        association.peer_ver_tag = 0x10203040;
-        association.cumulative_tsn_ack = cumulative_tsn_ack;
-        association.next_tsn = cumulative_tsn_ack + 1;
+        association.peer.peer_ver_tag = 0x10203040;
+        association.send.cumulative_tsn_ack = cumulative_tsn_ack;
+        association.send.next_tsn = cumulative_tsn_ack + 1;
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
-        association.primary_path = test_address();
+        association.paths.primary = test_address();
         Association_Key key{stack.next_association_id++};
         stack.add_peer_addresses(key, stack.associations.insert_or_assign(key, std::move(association)).first->second, {test_address()});
         return key;
@@ -106,11 +106,11 @@ struct SCTP_Socket_Test_Access {
             .payload_protocal = 0,
             .user_data = std::vector<uint8_t>(payload_size, 0x5a)};
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
-        Association& association = stack.associations.at(key);
-        if (!tsn_lt(tsn, association.next_tsn)) {
-            association.next_tsn = tsn + 1;
+        Association_TCB& association = stack.associations.at(key);
+        if (!tsn_lt(tsn, association.send.next_tsn)) {
+            association.send.next_tsn = tsn + 1;
         }
-        association.outstanding_data.insert_or_assign(
+        association.send.outstanding.insert_or_assign(
             tsn, Outstanding_Data{
                 data, now, now, false, gap_acked, missing_reports,
                 false, false});
@@ -134,15 +134,15 @@ struct SCTP_Socket_Test_Access {
             SCTP_Socket& stack, const Association_Key& key,
             uint32_t exit_tsn) {
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
-        Association& association = stack.associations.at(key);
-        association.in_fast_recovery = true;
-        association.fast_recovery_exit_tsn = exit_tsn;
+        Association_TCB& association = stack.associations.at(key);
+        association.send.in_fast_recovery = true;
+        association.send.fast_recovery_exit_tsn = exit_tsn;
     }
 
     static uint16_t missing_reports(
             SCTP_Socket& stack, const Association_Key& key, uint32_t tsn) {
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
-        return stack.associations.at(key).outstanding_data.at(tsn)
+        return stack.associations.at(key).send.outstanding.at(tsn)
             .missing_reports;
     }
 
@@ -155,7 +155,7 @@ struct SCTP_Socket_Test_Access {
             SCTP_Socket& stack, const Association_Key& key) {
         std::lock_guard<std::mutex> lock(stack.associations_mutex);
         size_t count = 0;
-        for (const auto& entry : stack.associations.at(key).outstanding_data) {
+        for (const auto& entry : stack.associations.at(key).send.outstanding) {
             count += entry.second.pending_retransmission ? 1 : 0;
         }
         return count;
@@ -347,12 +347,12 @@ void test_fast_retransmit(uint32_t first_tsn, const std::string& label) {
               "fast retransmit retained the payload");
     }
 
-    Association during = SCTP_Socket_Test_Access::association(stack, key);
-    check(during.in_fast_recovery, "sender entered Fast Recovery");
+    Association_TCB during = SCTP_Socket_Test_Access::association(stack, key);
+    check(during.send.in_fast_recovery, "sender entered Fast Recovery");
     check(primary(during).cwnd == primary(during).ssthresh
               && primary(during).ssthresh >= 4 * pmdcs(primary(during)),
           "Fast Recovery applied the RFC congestion reduction");
-    check(during.fast_recovery_exit_tsn == first_tsn + 4,
+    check(during.send.fast_recovery_exit_tsn == first_tsn + 4,
           "Fast Recovery recorded the highest outstanding TSN");
 
     peer.send_sack(first_tsn - 1, {{2, 5}});
@@ -361,8 +361,8 @@ void test_fast_retransmit(uint32_t first_tsn, const std::string& label) {
           "a DATA chunk was not fast-retransmitted twice");
     peer.send_sack(first_tsn + 4, {});
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
-    Association after = SCTP_Socket_Test_Access::association(stack, key);
-    check(!after.in_fast_recovery,
+    Association_TCB after = SCTP_Socket_Test_Access::association(stack, key);
+    check(!after.send.in_fast_recovery,
           "cumulative ACK at the exit TSN ended Fast Recovery");
     peer.close();
 }
